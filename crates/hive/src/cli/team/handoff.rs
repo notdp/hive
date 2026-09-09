@@ -3,17 +3,16 @@
 use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 
-use crate::adapters::claude_bg;
-use crate::claude_handoff::{Client, Target};
 use crate::json_fields::map_str;
 use crate::team::{created_at_key, session_member_row, Team, LEAD_AGENT_NAME};
+use crate::terminal_handoff::{Client, Target};
 use crate::{registry, tmux};
 
 fn require_unbound(client: &Client) -> Result<()> {
     if let Some((team, member)) =
-        registry::member_for_session(&client.engine.job_id, Some("claude"))
+        registry::member_for_session(&client.session.id, Some(client.session.cli))
     {
-        bail!("this Claude job is already {team}.{member}; resume its team window");
+        bail!("this session is already {team}.{member}; resume its team window");
     }
     Ok(())
 }
@@ -24,28 +23,23 @@ fn bind(
     workspace: &str,
     group: &str,
 ) -> Result<Map<String, Value>> {
-    claude_bg::write_pane_job(
-        &target.pane,
-        &client.engine.job_id,
-        &client.engine.session_id,
-        &client.engine.cwd,
-    )?;
+    client.session.bind(target)?;
     tmux::tag_pane(
         &target.pane,
         "agent",
         &target.member,
         &target.team,
-        "claude",
+        client.session.cli,
         group,
     );
     crate::context::save_context_for_pane(&target.pane, &target.team, workspace, &target.member)?;
     if tmux::get_pane_option(&target.pane, "hive-agent").as_deref() != Some(&target.member)
         || tmux::get_pane_option(&target.pane, "hive-team").as_deref() != Some(&target.team)
     {
-        bail!("team pane disappeared while binding the Claude job");
+        bail!("team pane disappeared while binding the engine session");
     }
-    let mut row = session_member_row(&target.member, "claude", &client.engine.job_id);
-    row.insert("cwd".into(), Value::String(client.engine.cwd.clone()));
+    let mut row = session_member_row(&target.member, client.session.cli, &client.session.id);
+    row.insert("cwd".into(), Value::String(client.session.cwd.clone()));
     Ok(row)
 }
 
@@ -64,7 +58,7 @@ fn finish(
         ),
         Err(error) => {
             eprintln!("hive: {error}");
-            if let Err(error) = crate::claude_handoff::recover_viewer(target, &client.engine.job_id)
+            if let Err(error) = crate::terminal_handoff::recover_viewer(target, &client.session)
             {
                 eprintln!("hive: {error}");
             }
@@ -99,7 +93,7 @@ pub(super) fn create(mut client: Client, name: &str, description: &str) -> Resul
         let window_id = tmux::display_value(&pane, "#{window_id}")
             .ok_or_else(|| anyhow::anyhow!("team window disappeared"))?;
         let desc = if description.is_empty() {
-            format!("auto-init from hclaude ({window})")
+            format!("auto-init from managed terminal ({window})")
         } else {
             description.to_string()
         };
@@ -138,7 +132,7 @@ pub(super) fn create(mut client: Client, name: &str, description: &str) -> Resul
         Ok(team) => team,
         Err(error) => {
             if let Some(target) = prepared {
-                target.rollback(&client.engine.job_id);
+                target.rollback(&client.session);
             } else {
                 tmux::kill_pane(&pane);
             }
@@ -148,7 +142,7 @@ pub(super) fn create(mut client: Client, name: &str, description: &str) -> Resul
     let target = prepared.expect("successful build prepared target");
     let (status, next_step) = finish(&mut client, &target, &mut team, &workspace);
     Ok(
-        json!({"team":name, "window":window, "orch":{"pane":pane,"name":LEAD_AGENT_NAME,"cli":"claude"},
+        json!({"team":name, "window":window, "orch":{"pane":pane,"name":LEAD_AGENT_NAME,"cli":client.session.cli},
         "workspace":workspace, "protocol":"/hive:hive", "handoff":status, "nextStep":next_step}),
     )
 }
@@ -182,7 +176,7 @@ pub(super) fn join(
         crate::layout::split_horizontal(&window),
         None,
         true,
-        Some(&client.engine.cwd),
+        Some(&client.session.cwd),
     )?;
     let target = Target {
         team: team_name.clone(),
@@ -209,7 +203,7 @@ pub(super) fn join(
         Ok(())
     })();
     if let Err(error) = built {
-        target.rollback(&client.engine.job_id);
+        target.rollback(&client.session);
         return Err(error);
     }
     let (status, next_step) = finish(&mut client, &target, &mut team, &workspace);

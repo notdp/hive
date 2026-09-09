@@ -3,7 +3,6 @@ pub mod agent;
 pub mod agent_cli;
 pub mod assets;
 pub mod bus;
-pub(crate) mod claude_handoff;
 pub mod cli;
 pub mod clock;
 pub mod context;
@@ -27,6 +26,7 @@ pub mod settings;
 pub mod shell;
 pub mod team;
 pub mod team_display;
+pub(crate) mod terminal_handoff;
 #[cfg(test)]
 pub(crate) mod testenv;
 #[cfg(test)]

@@ -240,6 +240,17 @@ fn grok_session_member_env() -> Option<(String, String)> {
 // Binding discovery
 // ---------------------------------------------------------------------------
 
+/// Session identity before a Codex/Grok tool has joined any team.
+pub(crate) fn unbound_engine_session() -> Option<(&'static str, String)> {
+    for (cli, marker) in [("codex", "CODEX_THREAD_ID"), ("grok", "GROK_SESSION_ID")] {
+        let id = env_string(marker).trim().to_string();
+        if !id.is_empty() {
+            return Some((cli, id));
+        }
+    }
+    None
+}
+
 /// Roster identity of the engine session this process runs inside.
 ///
 /// The session rung of the scope ladder: pane tags cover a caller sitting in

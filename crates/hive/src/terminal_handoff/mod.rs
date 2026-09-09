@@ -6,7 +6,9 @@
 //! a handoff from a viewer exit, and a committed job never reopens outside
 //! the team's pane. Team membership remains in the registry.
 
+mod session;
 mod terminal;
+pub(crate) use session::Session;
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -21,20 +23,14 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
-use crate::adapters::claude_bg::{self, EngineSession};
-use crate::adapters::claude_sessions::{config_dir, ClaudeSession};
+use crate::adapters::claude_bg;
+use crate::adapters::claude_sessions::ClaudeSession;
 use crate::json_fields::map_str;
 use crate::shell::shlex_quote;
 use crate::{registry, tmux};
 
 const FRAME_LIMIT: usize = 32 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(30);
-
-fn record_path(job: &str) -> PathBuf {
-    config_dir()
-        .join("hive-control")
-        .join(format!("launch-{job}.json"))
-}
 
 fn read_frame(reader: &mut BufReader<UnixStream>) -> Result<Value> {
     let mut bytes = Vec::new();
@@ -132,7 +128,7 @@ impl Target {
             && tmux::display_value(&self.pane, "#{window_id}").as_deref() == Some(&self.window)
     }
 
-    pub(crate) fn committed(&self, job: &str) -> bool {
+    pub(crate) fn committed(&self, session: &Session) -> bool {
         let Some(entry) = registry::load(&self.team) else {
             return false;
         };
@@ -148,19 +144,17 @@ impl Target {
             .is_some_and(|rows| {
                 rows.iter().any(|r| {
                     r.get("name").and_then(Value::as_str) == Some(&self.member)
-                        && r.get("sessionId").and_then(Value::as_str) == Some(job)
-                        && r.get("cli").and_then(Value::as_str) == Some("claude")
+                        && r.get("sessionId").and_then(Value::as_str) == Some(&session.id)
+                        && r.get("cli").and_then(Value::as_str) == Some(session.cli)
                 })
             })
     }
 
-    pub(crate) fn rollback(&self, job: &str) {
-        if self.committed(job) || !self.owned() {
+    pub(crate) fn rollback(&self, session: &Session) {
+        if self.committed(session) || !self.owned() {
             return;
         }
-        if claude_bg::job_id_for_pane(&self.pane).as_deref() == Some(job) {
-            claude_bg::clear_pane_job(&self.pane);
-        }
+        session.clear_binding(self);
         crate::context::clear_context_for_pane(&self.pane);
         if self.owns_window {
             tmux::kill_window(&self.window);
@@ -173,7 +167,7 @@ impl Target {
 /// Connected to the original terminal, without interrupting its viewer yet.
 pub(crate) struct Client {
     reader: BufReader<UnixStream>,
-    pub engine: EngineSession,
+    pub session: Session,
 }
 
 impl Client {
@@ -183,26 +177,44 @@ impl Client {
         }
         let engine = claude_bg::engine_session_for_pid(session.pid as u32)
             .ok_or_else(|| anyhow!("this Claude background job is no longer live"))?;
-        if !claude_bg::looks_like_job_id(&engine.job_id) {
-            bail!("this Claude session has an invalid background job id");
+        Self::connect(Session::claude(engine)).map(Some)
+    }
+
+    pub(crate) fn for_engine(cli: &str, id: &str) -> Result<Self> {
+        let record = Self::record(cli, id)?;
+        let session = Session::parse(&record["session"])?;
+        if session.cli != cli || session.id != id {
+            bail!("launcher record belongs to a different engine session");
         }
-        let record: Value = fs::read(record_path(&engine.job_id))
-            .ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .ok_or_else(|| anyhow!("this Claude job has no live hclaude launcher; resume it with `hive claude --resume {}`", engine.job_id))?;
+        Self::connect(session)
+    }
+
+    fn record(cli: &str, id: &str) -> Result<Value> {
+        fs::read(Session::record_path(cli, id)?)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .ok_or_else(|| {
+                anyhow!("this {cli} session has no live hive launcher; resume it through h{cli}")
+            })
+    }
+
+    fn connect(session: Session) -> Result<Self> {
+        let record = Self::record(session.cli, &session.id)?;
         let stream = UnixStream::connect(field(&record, "socket")?)
-            .context("the original hclaude launcher is no longer reachable")?;
+            .context("the original terminal launcher is no longer reachable")?;
         stream.set_read_timeout(Some(TIMEOUT))?;
         stream.set_write_timeout(Some(TIMEOUT))?;
         let mut reader = BufReader::new(stream);
         send_frame(
             reader.get_mut(),
-            &json!({"op":"hello", "job":engine.job_id, "nonce":field(&record, "nonce")?}),
+            &json!({"op":"hello", "job":session.id,
+            "cli":session.cli, "nonce":field(&record, "nonce")?}),
         )?;
         let reply = read_frame(&mut reader)?;
         if reply.get("ok") != Some(&Value::Bool(true)) {
             bail!("launcher refused: {}", reply);
         }
-        Ok(Some(Self { reader, engine }))
+        Ok(Self { reader, session })
     }
 
     pub(crate) fn begin(&mut self, target: &Target) -> Result<()> {
@@ -235,11 +247,9 @@ struct Registration {
 }
 
 impl Registration {
-    fn create(job: &str) -> Result<(Self, UnixListener)> {
-        if !claude_bg::looks_like_job_id(job) {
-            bail!("invalid Claude job id");
-        }
-        let path = record_path(job);
+    fn create(session: &Session) -> Result<(Self, UnixListener)> {
+        let path = Session::record_path(session.cli, &session.id)?;
+        let job = &session.id;
         fs::create_dir_all(path.parent().expect("record parent"))?;
         let lock = OpenOptions::new()
             .create(true)
@@ -249,7 +259,7 @@ impl Registration {
             .mode(0o600)
             .open(path.with_extension("lock"))?;
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            bail!("another hclaude launcher already owns job {job}");
+            bail!("another hive launcher already owns session {job}");
         }
         let socket_dir = crate::paths::mkdtemp_in(&std::env::temp_dir(), "hv-")?;
         let socket = socket_dir.join("s");
@@ -276,7 +286,7 @@ impl Registration {
         let written = (|| -> Result<()> {
             serde_json::to_writer(
                 &mut file,
-                &json!({"job":job, "nonce":registration.nonce, "socket":socket, "pid":std::process::id()}),
+                &json!({"job":job, "session":session.json(), "nonce":registration.nonce, "socket":socket, "pid":std::process::id()}),
             )?;
             fs::rename(&pending, &registration.path)?;
             Ok(())
@@ -296,13 +306,12 @@ impl Drop for Registration {
     }
 }
 
-fn viewer(term: &terminal::Terminal, job: &str) -> Result<terminal::Foreground> {
-    term.spawn(
-        Command::new("claude")
-            .args(["attach", job])
-            .env_clear()
-            .envs(claude_bg::bg_env(None)),
-    )
+fn viewer(
+    term: &terminal::Terminal,
+    session: &Session,
+    args: &[String],
+) -> Result<terminal::Foreground> {
+    term.spawn(&mut session.command(args))
 }
 
 // A new session gets the roots this launch uses. An empty value is not an
@@ -340,7 +349,7 @@ pub(crate) fn set_session_roots(pane: &str) -> Result<()> {
     Ok(())
 }
 
-fn viewer_command(job: &str) -> String {
+fn viewer_command(session: &Session) -> String {
     let mut args = vec!["env".to_string()];
     for key in ROOTS.iter().chain(MARKERS.iter()) {
         args.extend(["-u".into(), (*key).into()]);
@@ -352,15 +361,13 @@ fn viewer_command(job: &str) -> String {
     }
     args.extend([
         shlex_quote(&crate::paths::self_exe()),
-        "claude".into(),
-        "--resume".into(),
-        shlex_quote(job),
+        session.team_viewer(),
     ]);
     args.join(" ")
 }
 
-pub(crate) fn recover_viewer(target: &Target, job: &str) -> Result<()> {
-    let path = record_path(job).with_extension("viewer-lock");
+pub(crate) fn recover_viewer(target: &Target, session: &Session) -> Result<()> {
+    let path = Session::record_path(session.cli, &session.id)?.with_extension("viewer-lock");
     let lock = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -373,23 +380,19 @@ pub(crate) fn recover_viewer(target: &Target, job: &str) -> Result<()> {
     }
     // Both the launcher and the caller can recover a lost commit reply.
     // Only one starts the viewer; the other sees the cleared attempt mark.
-    if target.committed(job)
-        && claude_bg::job_id_for_pane(&target.pane).as_deref() == Some(job)
+    if target.committed(session)
+        && session.binding_matches(target)
         && tmux::get_pane_option(&target.pane, "hive-handoff").is_none()
     {
         return Ok(());
     }
-    if !target.owned()
-        || !target.committed(job)
-        || claude_bg::job_id_for_pane(&target.pane).as_deref() != Some(job)
-    {
+    if !target.owned() || !target.committed(session) || !session.binding_matches(target) {
         bail!("handoff target is no longer bound to this job");
     }
     // respawn reports whether the command could be scheduled, not whether
     // Claude rendered a frame. A later viewer failure leaves a committed
     // team recoverable through attach/resume, never a second local viewer.
-    let record =
-        claude_bg::read_pane_job(&target.pane).ok_or_else(|| anyhow!("job binding disappeared"))?;
+
     tmux::run(
         &[
             "respawn-pane",
@@ -397,8 +400,8 @@ pub(crate) fn recover_viewer(target: &Target, job: &str) -> Result<()> {
             "-t",
             &target.pane,
             "-c",
-            &record.cwd,
-            &viewer_command(job),
+            &session.cwd,
+            &viewer_command(session),
         ],
         true,
         5,
@@ -414,7 +417,7 @@ pub(crate) fn recover_viewer(target: &Target, job: &str) -> Result<()> {
 fn transfer(
     stream: UnixStream,
     registration: &Registration,
-    job: &str,
+    session: &Session,
     term: &terminal::Terminal,
     child: &mut terminal::Foreground,
 ) -> Result<Option<Target>> {
@@ -425,7 +428,7 @@ fn transfer(
     let hello = read_frame(&mut reader)?;
     if hello.get("op").and_then(Value::as_str) != Some("hello")
         || hello.get("nonce").and_then(Value::as_str) != Some(&registration.nonce)
-        || hello.get("job").and_then(Value::as_str) != Some(job)
+        || hello.get("job").and_then(Value::as_str) != Some(&session.id)
     {
         bail!("invalid launcher request");
     }
@@ -435,7 +438,7 @@ fn transfer(
         bail!("expected a handoff request");
     }
     let target = Target::parse(&prepare["target"])?;
-    if !target.owned() || target.committed(job) {
+    if !target.owned() || target.committed(session) {
         bail!("handoff target is stale");
     }
     if child.poll()?.is_some() {
@@ -452,8 +455,8 @@ fn transfer(
     // safely revoke a peer still writing the binding and registry row.
     let result =
         send_frame(reader.get_mut(), &json!({"ok":true})).and_then(|_| read_frame(&mut reader));
-    if target.committed(job) {
-        let started = recover_viewer(&target, job);
+    if target.committed(session) {
+        let started = recover_viewer(&target, session);
         let reply = match &started {
             Ok(()) => json!({"ok":true}),
             Err(error) => json!({"ok":false, "error":error.to_string()}),
@@ -464,15 +467,15 @@ fn transfer(
         }
         return Ok(Some(target));
     }
-    target.rollback(job);
+    target.rollback(session);
     let _ = result;
     Ok(None)
 }
 
-pub(crate) fn run(job: &str) -> Result<i32> {
+pub(crate) fn run(session: &Session, initial_args: &[String]) -> Result<i32> {
     let term = terminal::Terminal::capture()?;
-    let (registration, listener) = Registration::create(job)?;
-    let mut child = viewer(&term, job)?;
+    let (registration, listener) = Registration::create(session)?;
+    let mut child = viewer(&term, session, initial_args)?;
     loop {
         if let Some(code) = child.poll()? {
             term.restore(false);
@@ -480,14 +483,14 @@ pub(crate) fn run(job: &str) -> Result<i32> {
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                let transferred = transfer(stream, &registration, job, &term, &mut child);
+                let transferred = transfer(stream, &registration, session, &term, &mut child);
                 match transferred {
                     Ok(Some(target)) => {
                         drop(registration);
                         return attach_terminal(&term, &target);
                     }
                     Ok(None) => {
-                        child = viewer(&term, job)?;
+                        child = viewer(&term, session, &session.resume_args())?;
                     }
                     Err(error) => {
                         // Before release, the original child is still ours.
@@ -548,15 +551,24 @@ fn attach_terminal(term: &terminal::Terminal, target: &Target) -> Result<i32> {
 mod tests {
     use super::*;
 
+    fn claude(id: &str) -> Session {
+        Session {
+            cli: "claude",
+            id: id.into(),
+            cwd: "/tmp".into(),
+            data: json!({"sessionId":"engine"}),
+        }
+    }
+
     #[test]
     fn test_launcher_lock_refuses_second_viewer_for_the_same_job() {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = crate::testenv::EnvGuard::new();
         env.set("CLAUDE_HOME", tmp.path());
-        let (first, _listener) = Registration::create("abc12345").unwrap();
-        assert!(Registration::create("abc12345").is_err());
+        let (first, _listener) = Registration::create(&claude("abc12345")).unwrap();
+        assert!(Registration::create(&claude("abc12345")).is_err());
         drop(first);
-        let (second, _) = Registration::create("abc12345").unwrap();
+        let (second, _) = Registration::create(&claude("abc12345")).unwrap();
         assert!(second.path.exists());
     }
 
@@ -600,12 +612,12 @@ mod tests {
             owns_window: true,
             new_session: true,
         };
-        assert!(target.committed("abc12345"));
-        assert!(!target.committed("abc12346"));
+        assert!(target.committed(&claude("abc12345")));
+        assert!(!target.committed(&claude("abc12346")));
         target.created_at = "12.6".into();
-        assert!(!target.committed("abc12345"));
+        assert!(!target.committed(&claude("abc12345")));
         target.created_at = "not-a-number".into();
-        assert!(!target.committed("abc12345"));
+        assert!(!target.committed(&claude("abc12345")));
     }
 
     #[test]
@@ -621,7 +633,7 @@ mod tests {
         env.remove("CODEX_HOME");
         env.set("HIVE_BIN", &probe);
         let out = Command::new("sh")
-            .args(["-c", &viewer_command("abc12345")])
+            .args(["-c", &viewer_command(&claude("abc12345"))])
             .output()
             .unwrap();
         assert!(

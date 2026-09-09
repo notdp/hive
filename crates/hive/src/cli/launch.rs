@@ -523,7 +523,12 @@ fn exec_claude_managed(args: &[String]) -> ! {
 }
 
 fn run_outside_claude(job: &str) -> ! {
-    match crate::claude_handoff::run(job) {
+    let engine = crate::adapters::claude_bg::wait_engine_entry(job, 10.0).unwrap_or_else(|| {
+        eprintln!("hive: Claude job has no live engine; resume {job}");
+        std::process::exit(1)
+    });
+    let session = crate::terminal_handoff::Session::claude(engine);
+    match crate::terminal_handoff::run(&session, &session.resume_args()) {
         Ok(code) => std::process::exit(code),
         Err(error) => {
             eprintln!("hive: {error}; resume with `hive claude --resume {job}`");
