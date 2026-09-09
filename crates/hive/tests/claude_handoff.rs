@@ -22,6 +22,7 @@ const CLEAN: &[&str] = &[
 ];
 
 struct Rig {
+    cli: &'static str,
     root: tempfile::TempDir,
     path: String,
     launcher: Option<Child>,
@@ -77,11 +78,25 @@ os.execv({tmux:?},[{tmux:?}]+a)
             std::env::var("PATH").unwrap_or_default()
         );
         Self {
+            cli: "claude",
             root,
             path,
             launcher: None,
             roots: Vec::new(),
         }
+    }
+    fn codex() -> Self {
+        let mut rig = Self::new();
+        rig.cli = "codex";
+        let python = Command::new("which").arg("python3").output().unwrap();
+        let script = format!(
+            "#!{}\n{}",
+            String::from_utf8(python.stdout).unwrap().trim(),
+            include_str!("fixtures/handoff_codex.py")
+        );
+        fs::write(rig.file("bin/codex"), script).unwrap();
+        fs::set_permissions(rig.file("bin/codex"), fs::Permissions::from_mode(0o755)).unwrap();
+        rig
     }
     fn file(&self, name: &str) -> PathBuf {
         self.root.path().join(name)
@@ -131,15 +146,39 @@ os.execv({tmux:?},[{tmux:?}]+a)
         let mut c = self.command("script");
         let hive = env!("CARGO_BIN_EXE_hive");
         if cfg!(target_os = "macos") {
-            c.args(["-q", "/dev/null", hive, "claude"]);
+            c.args(["-q", "/dev/null", hive, self.cli]);
             if resume {
-                c.args(["--resume", JOB]);
+                c.args([
+                    if self.cli == "claude" {
+                        "--resume"
+                    } else {
+                        "resume"
+                    },
+                    if self.cli == "claude" {
+                        JOB
+                    } else {
+                        CODEX_THREAD
+                    },
+                ]);
             }
         } else {
             let command = if resume {
-                format!("{hive} claude --resume {JOB}")
+                format!(
+                    "{hive} {} {} {}",
+                    self.cli,
+                    if self.cli == "claude" {
+                        "--resume"
+                    } else {
+                        "resume"
+                    },
+                    if self.cli == "claude" {
+                        JOB
+                    } else {
+                        CODEX_THREAD
+                    }
+                )
             } else {
-                format!("{hive} claude")
+                format!("{hive} {}", self.cli)
             };
             c.args(["-qec", &command, "/dev/null"]);
         }
@@ -155,10 +194,15 @@ os.execv({tmux:?},[{tmux:?}]+a)
         let e: Value =
             serde_json::from_slice(&fs::read(self.file("engine.json")).unwrap()).unwrap();
         let mut c = self.command(env!("CARGO_BIN_EXE_hive"));
-        c.args(args).env(
-            "CLAUDE_CODE_MESSAGING_SOCKET",
-            e["messagingSocketPath"].as_str().unwrap(),
-        );
+        c.args(args);
+        if self.cli == "codex" {
+            c.env("CODEX_THREAD_ID", CODEX_THREAD);
+        } else {
+            c.env(
+                "CLAUDE_CODE_MESSAGING_SOCKET",
+                e["messagingSocketPath"].as_str().unwrap(),
+            );
+        }
         c
     }
     fn events(&self, kind: &str) -> Vec<Value> {
@@ -567,4 +611,52 @@ fn test_plain_delete_retires_the_transferred_job_when_called_from_a_shell() {
     );
     assert!(!r.team_entry().exists());
     assert!(!r.events("stop").is_empty());
+}
+
+const CODEX_THREAD: &str = "11111111-2222-4333-8444-555555555555";
+
+#[test]
+fn test_codex_create_and_resume_keep_daemon_and_thread() {
+    let mut r = Rig::codex();
+    r.launch(false);
+    r.ready();
+    let before = fs::read(r.file("engine.json")).unwrap();
+    let result = r.create();
+    let entry: Value = serde_json::from_slice(&fs::read(r.team_entry()).unwrap()).unwrap();
+    assert_eq!(entry["members"][0]["sessionId"], CODEX_THREAD);
+    let pane = result["orch"]["pane"].as_str().unwrap();
+    r.wait("Codex team viewer", || r.events("attach").len() == 2);
+    r.wait("terminal attached", || !r.clients().is_empty());
+    r.tmux_ok(&["send-keys", "-t", pane, "z"]);
+    r.wait("Codex input", || {
+        r.events("input").iter().any(|v| v["key"] == "z")
+    });
+    assert_eq!(before, fs::read(r.file("engine.json")).unwrap());
+    assert!(r.events("overlap").is_empty());
+    assert_eq!(r.events("thread/start").len(), 1);
+    r.detach();
+    r.wait_launcher();
+    r.launch(true);
+    r.wait("resume attaches Codex team", || !r.clients().is_empty());
+    assert_eq!(r.events("attach").len(), 2);
+    r.detach();
+    r.wait_launcher();
+}
+
+#[test]
+fn test_codex_bind_failure_restores_same_thread_without_second_start() {
+    let mut r = Rig::codex();
+    r.launch(false);
+    r.ready();
+    let fail = r.file("x/app-server-control/hive-pane-0.thread");
+    fs::create_dir(&fail).unwrap();
+    let out = r.engine_command(&["create", TEAM]).output().unwrap();
+    assert!(!out.status.success());
+    r.wait("restored Codex viewer", || r.events("attach").len() == 2);
+    assert!(!r.team_entry().exists());
+    assert!(r.events("overlap").is_empty());
+    assert_eq!(r.events("thread/start").len(), 1);
+    fs::remove_dir(fail).unwrap();
+    r.create();
+    r.wait("retried Codex viewer", || r.events("attach").len() == 3);
 }

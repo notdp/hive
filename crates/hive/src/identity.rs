@@ -202,6 +202,7 @@ pub(crate) fn codex_thread_is_hive_managed(thread_id: &str) -> bool {
         return true;
     }
     codex_thread_member(thread_id).is_some()
+        || crate::terminal_handoff::launcher_registered("codex", thread_id)
 }
 
 /// `codex_thread_is_hive_managed` for this process's own tool thread.

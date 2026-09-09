@@ -239,6 +239,30 @@ impl Client {
     }
 }
 
+/// Launcher capability before membership exists. The held lock distinguishes
+/// a live owner from a stale record; create/join also authenticates its socket.
+pub(crate) fn launcher_registered(cli: &str, id: &str) -> bool {
+    let Ok(path) = Session::record_path(cli, id) else {
+        return false;
+    };
+    let Ok(record) = Client::record(cli, id) else {
+        return false;
+    };
+    let Ok(session) = Session::parse(&record["session"]) else {
+        return false;
+    };
+    if session.cli != cli || session.id != id {
+        return false;
+    }
+    let Ok(lock) = File::open(path.with_extension("lock")) else {
+        return false;
+    };
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return false;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EWOULDBLOCK)
+}
+
 struct Registration {
     path: PathBuf,
     socket_dir: PathBuf,
@@ -567,7 +591,12 @@ mod tests {
         env.set("CLAUDE_HOME", tmp.path());
         let (first, _listener) = Registration::create(&claude("abc12345")).unwrap();
         assert!(Registration::create(&claude("abc12345")).is_err());
+        assert!(launcher_registered("claude", "abc12345"));
+        let stale = fs::read(&first.path).unwrap();
+        let path = first.path.clone();
         drop(first);
+        fs::write(&path, stale).unwrap();
+        assert!(!launcher_registered("claude", "abc12345"));
         let (second, _) = Registration::create(&claude("abc12345")).unwrap();
         assert!(second.path.exists());
     }

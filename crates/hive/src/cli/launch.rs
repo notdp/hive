@@ -223,7 +223,7 @@ fn exec_codex_managed(args: &[String]) -> ! {
         }
     };
     if pane.is_empty() || !identity::is_inside_tmux() {
-        codex_raw(args); // hive needs a tmux pane to bind a thread to
+        exec_codex_outside(args);
     }
     let sub_index = codex_subcommand_index(args);
     let sub = sub_index.map(|i| args[i].as_str());
@@ -325,6 +325,139 @@ fn exec_codex_managed(args: &[String]) -> ! {
     let _ = codex_app_server::clear_pane_thread(&pane);
     argv.extend(args.iter().cloned());
     execvp("codex", &argv);
+}
+
+/// Only explicit native IDs can be bound before the resume picker runs.
+fn codex_thread_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+}
+
+fn normalize_codex_cwd(args: &mut [String], cwd: &str) {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
+        if args[i] == "--cd" || args[i] == "-C" {
+            if let Some(value) = args.get_mut(i + 1) {
+                *value = cwd.into();
+            }
+            i += 2;
+        } else if CODEX_VALUE_OPTS.contains(&args[i].as_str()) {
+            i += 2;
+        } else {
+            if args[i].starts_with("--cd=") {
+                args[i] = format!("--cd={cwd}");
+            } else if args[i].starts_with("-C") {
+                args[i] = format!("-C{cwd}");
+            }
+            i += 1;
+        }
+    }
+}
+
+fn exec_codex_outside(args: &[String]) -> ! {
+    use crate::adapters::codex_app_server;
+    if !env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty() {
+        codex_raw(args);
+    }
+    let sub_index = codex_subcommand_index(args);
+    let sub = sub_index.map(|i| args[i].as_str());
+    let source = if matches!(sub, Some("resume" | "fork")) {
+        let source = codex_positional_after(args, sub_index.unwrap());
+        match source.filter(|s| codex_thread_id(s)) {
+            Some(source) => Some(source),
+            None => codex_raw(args),
+        }
+    } else {
+        None
+    };
+    if sub == Some("resume") {
+        if let Some((team, _)) =
+            crate::registry::member_for_session(source.as_deref().unwrap(), Some("codex"))
+        {
+            super::attach::attach_cmd(&team);
+            std::process::exit(0);
+        }
+    }
+    let cwd = codex_opt_value(args, &["--cd", "-C"]).unwrap_or_else(getcwd);
+    let cwd = std::path::Path::new(&cwd)
+        .canonicalize()
+        .unwrap_or_else(|error| {
+            eprintln!("hive: invalid Codex working directory: {error}");
+            std::process::exit(1);
+        })
+        .to_string_lossy()
+        .into_owned();
+    if !codex_app_server::spawn_daemon() {
+        codex_raw(args);
+    }
+    let _ = codex_app_server::ensure_dir_trusted(&cwd);
+    let name = format!("hive-{}", &uuid4()[..8]);
+    let thread = match sub {
+        Some("resume") => source.clone(),
+        Some("fork") => codex_app_server::fork_member_thread(source.as_deref().unwrap(), &name),
+        _ => codex_app_server::start_member_thread(
+            &cwd,
+            &name,
+            &codex_opt_value(args, &["--model", "-m"]).unwrap_or_default(),
+        ),
+    }
+    .unwrap_or_else(|| {
+        eprintln!("hive: could not create Codex thread");
+        std::process::exit(1);
+    });
+    let session = crate::terminal_handoff::Session {
+        cli: "codex",
+        id: thread.clone(),
+        cwd: cwd.clone(),
+        data: Value::Null,
+    };
+    let mut launch_args = args.to_vec();
+    normalize_codex_cwd(&mut launch_args, &cwd);
+    let mut argv = vec![
+        "-c".into(),
+        "check_for_update_on_startup=false".into(),
+        "--remote".into(),
+        format!(
+            "unix://{}",
+            codex_app_server::shared_socket_path().display()
+        ),
+    ];
+    if !codex_args_set_cwd(args) {
+        argv.extend(["--cd".into(), cwd]);
+    }
+    if let Some(source) = source {
+        let mut rewritten = launch_args;
+        let index = sub_index.unwrap();
+        rewritten[index] = "resume".into();
+        let offset = rewritten[index + 1..]
+            .iter()
+            .position(|s| s == &source)
+            .unwrap();
+        rewritten[index + 1 + offset] = thread;
+        argv.extend(rewritten);
+    } else {
+        argv.extend(["resume".into(), thread]);
+        argv.extend(launch_args);
+    }
+    match crate::terminal_handoff::run(&session, &argv) {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!(
+                "hive: {error}; resume with `hive codex resume {}`",
+                session.id
+            );
+            std::process::exit(1);
+        }
+    }
 }
 
 pub(crate) fn codex_cmd(args: &[String]) {
@@ -779,6 +912,19 @@ fn pane_team_identity() -> Option<(String, String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_codex_cwd_rewrite_keeps_option_values_and_prompt_literal() {
+        let mut args: Vec<String> = ["-c", "-Cvalue", "-C", "relative", "--", "--cd=prompt"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        super::normalize_codex_cwd(&mut args, "/absolute");
+        assert_eq!(
+            args,
+            ["-c", "-Cvalue", "-C", "/absolute", "--", "--cd=prompt"]
+        );
+    }
+
     use super::*;
     use crate::testkit::{args, display_env, fake_tmux_tagged};
 
