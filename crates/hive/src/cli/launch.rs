@@ -765,6 +765,8 @@ fn is_uuid(value: &str) -> bool {
 /// socket all belong to plain grok. Returns (session id, whether hive must
 /// pass `--session-id`, the launch cwd); None is the raw shape.
 fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
+    // --fork-session: grok mints the fork's id itself, so neither a resumed
+    // nor an explicit id names the session that will run.
     const RAW: &[&str] = &[
         "-c",
         "--continue",
@@ -773,6 +775,7 @@ fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
         "--prompt-file",
         "--prompt-json",
         "--leader-socket",
+        "--fork-session",
     ];
     if args.iter().any(|a| {
         RAW.contains(&a.as_str()) || RAW.iter().any(|flag| a.starts_with(&format!("{flag}=")))
@@ -803,6 +806,30 @@ fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
         return is_uuid(&explicit).then_some((explicit, false, cwd));
     }
     Some((uuid4(), true, cwd))
+}
+
+/// *args* with any `--cwd` spelling replaced by the canonical *cwd* the
+/// launch runs in: the viewer's own working directory is that path already
+/// (`Session::command`), and a relative value would resolve a second time.
+fn grok_args_with_cwd(args: &[String], cwd: &str) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip = false;
+    for a in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if a == "--cwd" {
+            skip = true;
+            out.push("--cwd".to_string());
+            out.push(cwd.to_string());
+        } else if a.starts_with("--cwd=") {
+            out.push(format!("--cwd={cwd}"));
+        } else {
+            out.push(a.clone());
+        }
+    }
+    out
 }
 
 /// (session id this launch will run, whether hive must pass --session-id).
@@ -928,7 +955,7 @@ fn run_outside_grok(args: &[String]) -> ! {
         initial.push("--session-id".to_string());
         initial.push(session_id.clone());
     }
-    initial.extend(args.iter().cloned());
+    initial.extend(grok_args_with_cwd(args, &cwd));
     let result = crate::terminal_handoff::run(&session, &initial);
     grok_leader::stop_launch(&key, &session_id);
     match result {
@@ -1161,9 +1188,24 @@ mod tests {
             vec!["--session-id", "not-a-uuid"],
             vec!["--cwd"],
             vec!["--cwd", "/definitely/not/a/dir"],
+            vec!["--resume", sid, "--fork-session"],
+            vec!["--session-id", sid, "--fork-session"],
         ] {
             assert!(grok_outside_launch(&args(&form)).is_none(), "{form:?}");
         }
+        // the launch's args carry the canonical cwd, whatever the spelling
+        assert_eq!(
+            grok_args_with_cwd(&args(&["-m", "x", "--cwd", "../rel", "-y"]), "/abs"),
+            args(&["-m", "x", "--cwd", "/abs", "-y"])
+        );
+        assert_eq!(
+            grok_args_with_cwd(&args(&["--cwd=../rel"]), "/abs"),
+            args(&["--cwd=/abs"])
+        );
+        assert_eq!(
+            grok_args_with_cwd(&args(&["-m", "x"]), "/abs"),
+            args(&["-m", "x"])
+        );
         // --cwd is the launch's directory, canonical
         let tmp = tempfile::tempdir().unwrap();
         let (_, _, dir) =
