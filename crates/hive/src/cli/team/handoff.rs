@@ -1,4 +1,4 @@
-//! create/join for the managed Claude still viewed in its original terminal.
+//! create/join for a managed session still viewed in its original terminal.
 
 use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};

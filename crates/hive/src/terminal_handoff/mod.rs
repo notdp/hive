@@ -1,4 +1,4 @@
-//! A terminal hclaude's viewer belongs to its launcher until create/join.
+//! A terminal viewer belongs to its launcher until create/join.
 //!
 //! One authenticated connection asks that launcher to stop its own child.
 //! The roster write commits the transfer; an EOF before it restores the old

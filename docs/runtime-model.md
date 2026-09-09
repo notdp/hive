@@ -86,8 +86,8 @@ Consequences across modules:
 - **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
   delete/attach) need no tmux client: `create` outside tmux puts the
   team window in the session named after the team (created detached when
-  missing). Desktop Claude joins with a mirror; an hclaude-managed job
-  transfers its viewer into a pane; raw terminal Claude is refused (`join`
+  missing). Desktop Claude joins with a mirror; a managed terminal session
+  transfers its viewer into a pane; raw terminal engines are refused (`join`
   follows the same boundary). `spawn` splits
   a pane into the team's window by id from anywhere, and `attach` rebuilds
   a window that is gone before jumping to it. A pane serves as an address;
@@ -696,42 +696,44 @@ none of the keyboard path above applies to it. This is an enrolment policy,
 not a limitation of the session's inbox transport: a terminal's claude still
 reaches a team as a `ccd.<name>` guest over the same socket.
 
-At a terminal outside tmux, `hive claude` starts a background job and a
-local `claude attach` viewer, with no tmux session (`cli/launch.rs`,
-`claude_handoff/`). The launcher owns the viewer process and advertises a
-private control socket through a record in the Claude config tree's
-`hive-control/`.
-A per-job lock admits one local launcher; its per-launch token authenticates
-create/join requests. A raw Claude or unrelated background job has no such
-launcher and cannot enter this lane.
+## Terminal launchers and team handoff
 
-On create/join, the CLI validates membership and prepares a team pane before
-asking the launcher to release its viewer. The launcher stops and reaps its
-own child, then the CLI writes the pane-job binding and commits the roster
-row. The registry row is the boundary: a disconnected request before that
-write removes the prepared pane and restores the local viewer; after that
-write, it starts the team viewer and keeps the membership. The launcher
-restores its terminal and runs a tmux client. Scheduling a viewer command is
-not evidence that Claude has painted a frame; a later viewer failure leaves
-the enrolled job recoverable through the team's display. A client attach
-failure reports recovery and does not reopen a competing local viewer.
+Outside tmux, `hive claude`, `hive codex`, and `hive grok` show a local
+viewer without creating a tmux session (`cli/launch.rs`,
+`terminal_handoff/`). Their engines are a Claude background job, a thread
+on the shared Codex app-server, and a Grok launch leader. Each launcher
+holds a per-session lock and publishes a private control socket under its
+engine config tree's `hive-control/`. The launch token authenticates
+create/join requests; a bare engine has no launcher to transfer its viewer.
 
-The new team session wears the existing team status bar and its window is
-Hive-built. Its launcher roots (`HIVE_HOME`, `CLAUDE_HOME`,
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`) preserve set, empty and unset
-values over an existing server's globals; unset values are removed with
-`set-environment -r`. The viewer command carries those roots and PATH
-explicitly across a login shell. Join leaves an existing session's environment
-alone. The engine is not restarted; identity resolves its job to the new pane
-through the ordinary pane-job record, rather than changing its environment.
+Create/join prepares a team pane, then asks the launcher to release its
+viewer. The launcher terminates its foreground process group, including
+an npm wrapper's native child, and reaps its owned child before the CLI
+writes the native binding and commits the roster row. The row is the
+boundary: a disconnected request before that write removes the prepared
+pane and restores a viewer on the same session; after that write it starts
+the team viewer and keeps the membership. Rollback resumes without
+replaying the initial prompt. The launcher restores the terminal and runs
+a tmux client. A viewer command being scheduled is not proof it painted a
+frame; later viewer or client-attach failures leave the enrolled session
+recoverable through the team's display.
 
-Detaching the tmux client returns to the shell. Outside tmux, resuming an
-already-enrolled job opens its team display instead of starting a second
-Claude viewer. Kill and delete retain managed-member semantics (`--down`
-stops the job); moving a conversation back to a standalone viewer on team
-teardown is not implemented. Codex and Grok launchers outside tmux remain raw;
-management commands, non-interactive launch shapes, and Claude launches
-without an interactive terminal are raw too.
+A new team session gets the team status bar and the launcher's roots
+(`HIVE_HOME`, `CLAUDE_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`).
+Set, empty and unset values survive an existing server's globals; unset
+values use `set-environment -r`. The viewer command carries those roots and
+PATH across a login shell. Join leaves an existing session's environment
+alone. Native bindings connect the same engine ID to its member: Claude's
+pane-job record, Codex's pane-thread record, or Grok's member alias to its
+launch key. The engine's process environment does not change.
+
+Detaching returns to the shell. Resuming an enrolled session outside tmux
+opens its team display. Kill/delete keep each engine's member lifecycle;
+they do not stop the shared Codex daemon. Grok stops an unbound launch
+leader when its local launcher exits. Moving a session back to a standalone
+viewer on team teardown is not implemented. Management commands,
+non-interactive launches, explicit remote endpoints and pickers whose
+session ID is not known before launch retain their native behavior.
 
 ## Codex: one shared app-server daemon
 
@@ -818,6 +820,10 @@ same engine-first shape as a claude bg job (`claude attach`) and a codex
 thread (`codex resume`). Hive attaches as a further ACP client and folds
 runtime from that client's notification stream. Only a raw `hive grok` pane
 outside any team gets a pane-keyed leader with the pane's lifecycle.
+A terminal launcher uses `l-<id>` instead. On create/join, the member's
+`m-<team>.<member>.alias` names that launch key; socket and session-record
+lookups follow it, so binding does not rename a live socket or restart the
+leader. The alias also lets member teardown reach that leader.
 
 - **Session ownership.** The leader keeps every session of the cwd, so which
   one belongs to this member is not discoverable from it. Hive names the
