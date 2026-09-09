@@ -767,8 +767,9 @@ fn is_uuid(value: &str) -> bool {
 /// resumed by id. A continue, a resume by title or from the picker, a
 /// non-interactive run (`-p`, a prompt file) and an explicit leader
 /// socket all belong to plain grok. Returns (session id, whether hive must
-/// pass `--session-id`, the launch cwd); None is the raw shape.
-fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
+/// pass `--session-id`, the launch cwd, whether this resumes a session);
+/// None is the raw shape.
+fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String, bool)> {
     // --fork-session: grok mints the fork's id itself, so neither a resumed
     // nor an explicit id names the session that will run.
     // --worktree: grok moves the session's directory itself, so the cwd
@@ -820,12 +821,12 @@ fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
             .find_map(|a| a.strip_prefix("--resume=").map(str::to_string))
             .or_else(|| grok_opt_value(args, &["--resume", "-r"]))
             .filter(|v| !v.is_empty())?;
-        return is_uuid(&value).then_some((value, false, cwd));
+        return is_uuid(&value).then_some((value, false, cwd, true));
     }
     if let Some(explicit) = grok_opt_value(args, &["--session-id", "-s"]) {
-        return is_uuid(&explicit).then_some((explicit, false, cwd));
+        return is_uuid(&explicit).then_some((explicit, false, cwd, false));
     }
-    Some((uuid4(), true, cwd))
+    Some((uuid4(), true, cwd, false))
 }
 
 /// *args* with any `--cwd` spelling replaced by the canonical *cwd* the
@@ -961,12 +962,16 @@ fn exec_grok_managed(args: &[String]) -> ! {
 fn run_outside_grok(args: &[String]) -> ! {
     use crate::adapters::grok_leader;
 
-    let Some((session_id, pass_flag, cwd)) = grok_outside_launch(args) else {
+    let Some((session_id, pass_flag, cwd, resumed)) = grok_outside_launch(args) else {
         grok_raw(args); // a shape whose session hive cannot name, or plain grok's own
     };
-    if let Some((team, _)) = crate::registry::member_for_session(&session_id, Some("grok")) {
-        super::attach::attach_cmd(&team);
-        std::process::exit(0);
+    // Only a resume of an enrolled session opens its team; `--session-id`
+    // names a new session, and one that exists is grok's own error to raise.
+    if resumed {
+        if let Some((team, _)) = crate::registry::member_for_session(&session_id, Some("grok")) {
+            super::attach::attach_cmd(&team);
+            std::process::exit(0);
+        }
     }
     let key = grok_leader::mint_launch_key();
     if !grok_leader::spawn_launch_daemon(&key) {
@@ -1194,19 +1199,20 @@ mod tests {
             .into_owned();
         let sid = "0f0f0f0f-1111-4222-8333-444444444444";
         // fresh: hive names the session and passes it
-        let (id, pass, dir) = grok_outside_launch(&args(&["-m", "grok-4"])).unwrap();
-        assert!(is_uuid(&id) && pass && dir == cwd);
+        let (id, pass, dir, resumed) = grok_outside_launch(&args(&["-m", "grok-4"])).unwrap();
+        assert!(is_uuid(&id) && pass && dir == cwd && !resumed);
         // resumed by id, either spelling
         for form in [
             vec!["-r", sid],
             vec!["--resume", sid],
             vec![&format!("--resume={sid}")],
         ] {
-            let (id, pass, _) = grok_outside_launch(&args(&form)).unwrap();
-            assert_eq!((id.as_str(), pass), (sid, false), "{form:?}");
+            let (id, pass, _, resumed) = grok_outside_launch(&args(&form)).unwrap();
+            assert_eq!((id.as_str(), pass, resumed), (sid, false, true), "{form:?}");
         }
-        let (id, pass, _) = grok_outside_launch(&args(&["--session-id", sid])).unwrap();
-        assert_eq!((id.as_str(), pass), (sid, false));
+        // an explicit id is a new session, never a resume
+        let (id, pass, _, resumed) = grok_outside_launch(&args(&["--session-id", sid])).unwrap();
+        assert_eq!((id.as_str(), pass, resumed), (sid, false, false));
         // plain grok's: picker, title, continue, non-interactive, own socket
         for form in [
             vec!["--resume"],
@@ -1266,7 +1272,7 @@ mod tests {
         );
         // --cwd is the launch's directory, canonical
         let tmp = tempfile::tempdir().unwrap();
-        let (_, _, dir) =
+        let (_, _, dir, _) =
             grok_outside_launch(&args(&["--cwd", tmp.path().to_str().unwrap()])).unwrap();
         assert_eq!(
             dir,
