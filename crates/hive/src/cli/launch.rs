@@ -699,6 +699,7 @@ pub(crate) fn claude_cmd(args: &[String]) {
 // prompt is the only other thing that can sit there.
 const GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "agent",
+    "clone",
     "completions",
     "dashboard",
     "doctor",
@@ -717,13 +718,14 @@ const GROK_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
     "setup",
     "trace",
     "update",
+    "usage",
     "version",
     "worktree",
     "wrap",
 ];
 
 // Non-interactive surfaces: --help/--version never start a session.
-const GROK_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
+const GROK_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-v", "-V", "--version"];
 
 /// Value of the first `--opt value` / `--opt=value` occurrence in `args`.
 ///
@@ -767,6 +769,8 @@ fn is_uuid(value: &str) -> bool {
 fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
     // --fork-session: grok mints the fork's id itself, so neither a resumed
     // nor an explicit id names the session that will run.
+    // --worktree: grok moves the session's directory itself, so the cwd
+    // recorded here would not be the one the session runs in.
     const RAW: &[&str] = &[
         "-c",
         "--continue",
@@ -776,9 +780,19 @@ fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
         "--prompt-json",
         "--leader-socket",
         "--fork-session",
+        "-w",
+        "--worktree",
+        "--worktree-ref",
     ];
+    // A packed short flag (`-r<id>`, `-r=<id>`, `-s<id>`, `-p<prompt>`,
+    // `-c<x>`) is clap's to parse; hive does not second-guess it.
+    let packed = |a: &str| {
+        !a.starts_with("--") && a.len() > 2 && ["-r", "-s", "-p", "-c", "-w"].contains(&&a[..2])
+    };
     if args.iter().any(|a| {
-        RAW.contains(&a.as_str()) || RAW.iter().any(|flag| a.starts_with(&format!("{flag}=")))
+        RAW.contains(&a.as_str())
+            || RAW.iter().any(|flag| a.starts_with(&format!("{flag}=")))
+            || packed(a)
     }) {
         return None;
     }
@@ -812,21 +826,36 @@ fn grok_outside_launch(args: &[String]) -> Option<(String, bool, String)> {
 /// launch runs in: the viewer's own working directory is that path already
 /// (`Session::command`), and a relative value would resolve a second time.
 fn grok_args_with_cwd(args: &[String], cwd: &str) -> Vec<String> {
+    // options whose next token is a value, never a flag to rewrite
+    const VALUE_OPTS: &[&str] = &[
+        "--rules",
+        "-m",
+        "--model",
+        "--worktree-ref",
+        "-s",
+        "--session-id",
+    ];
     let mut out = Vec::with_capacity(args.len());
-    let mut skip = false;
-    for a in args {
-        if skip {
-            skip = false;
-            continue;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--" {
+            out.extend(args[i..].iter().cloned());
+            break;
         }
         if a == "--cwd" {
-            skip = true;
             out.push("--cwd".to_string());
             out.push(cwd.to_string());
+            i += 2;
         } else if a.starts_with("--cwd=") {
             out.push(format!("--cwd={cwd}"));
+            i += 1;
+        } else if VALUE_OPTS.contains(&a.as_str()) {
+            out.extend(args[i..(i + 2).min(args.len())].iter().cloned());
+            i += 2;
         } else {
             out.push(a.clone());
+            i += 1;
         }
     }
     out
@@ -1190,9 +1219,26 @@ mod tests {
             vec!["--cwd", "/definitely/not/a/dir"],
             vec!["--resume", sid, "--fork-session"],
             vec!["--session-id", sid, "--fork-session"],
+            vec![&format!("-r{sid}")],
+            vec![&format!("-r={sid}")],
+            vec![&format!("-s{sid}")],
+            vec!["-phello"],
+            vec!["-w"],
+            vec!["--worktree", "feat"],
+            vec!["--worktree-ref", "main"],
         ] {
             assert!(grok_outside_launch(&args(&form)).is_none(), "{form:?}");
         }
+        // a packed model flag is not one of the raw shapes
+        assert!(grok_outside_launch(&args(&["-mgrok-4"])).is_some());
+        // values and everything after `--` are never rewritten
+        assert_eq!(
+            grok_args_with_cwd(&args(&["--rules", "--cwd", "--", "--cwd", "x"]), "/abs"),
+            args(&["--rules", "--cwd", "--", "--cwd", "x"])
+        );
+        assert!(grok_raw_shape(&args(&["clone", "x"])));
+        assert!(grok_raw_shape(&args(&["usage"])));
+        assert!(grok_raw_shape(&args(&["-v"])));
         // the launch's args carry the canonical cwd, whatever the spelling
         assert_eq!(
             grok_args_with_cwd(&args(&["-m", "x", "--cwd", "../rel", "-y"]), "/abs"),
