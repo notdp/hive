@@ -14,13 +14,25 @@ use serde_json::Value;
 mod common;
 use common::require_tmux;
 
-/// Env markers that would give the binary an engine or tmux identity.
+/// Env markers that would give the binary an engine or tmux identity — or,
+/// for a fixture registered as a desktop session, the developer's real
+/// desktop record to read.
 const IDENTITY_VARS: &[&str] = &[
     "TMUX",
     "TMUX_PANE",
     "CODEX_THREAD_ID",
     "GROK_SESSION_ID",
     "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+];
+
+/// hive's root variables a launcher mirrors into the session it opens.
+const ROOT_VARS: &[&str] = &[
+    "HIVE_HOME",
+    "CLAUDE_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "GROK_HOME",
 ];
 
 struct Rig {
@@ -160,12 +172,35 @@ impl Rig {
         self.hive_cmd(args, inside).output().expect("hive runs")
     }
 
-    /// `hive` run by a live Claude session `me` (sessionId `s-me`): its
-    /// registration names the inbox socket the process carries, and this
-    /// test process is the pid behind it. `claude` on PATH is a stub whose
-    /// job ledger is empty, so `s-me` reads as an interactive session — a
-    /// mirror, never a resume — without the real CLI being asked.
-    fn hive_as_claude(&self, args: &[&str], inside: Option<(&str, &str)>) -> Output {
+    /// A stub `claude` on a private bin dir, *script* being its body after
+    /// the shebang; returns the PATH that resolves it first.
+    fn stub_claude(&self, script: &str) -> String {
+        let bin = self.tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("stub bin dir");
+        let stub = bin.join("claude");
+        std::fs::write(&stub, format!("#!/bin/sh\n{script}")).expect("stub claude");
+        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("stub claude mode");
+        format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        )
+    }
+
+    /// `hive` run by a live Claude session `me` (sessionId `s-me`) that
+    /// *entrypoint* launched (`claude-desktop` for the desktop app, `cli`
+    /// for a terminal): its registration names the inbox socket the
+    /// process carries, and this test process is the pid behind it.
+    /// `claude` on PATH is a stub whose job ledger is empty, so `s-me`
+    /// reads as an interactive session — a mirror, never a resume —
+    /// without the real CLI being asked.
+    fn hive_as_claude(
+        &self,
+        args: &[&str],
+        inside: Option<(&str, &str)>,
+        entrypoint: &str,
+    ) -> Output {
         // `CLAUDE_HOME` outranks `CLAUDE_CONFIG_DIR` in hive's config-dir
         // ladder, so the registration goes where the binary will look.
         let sessions = self.tmp.path().join("claude-home").join("sessions");
@@ -179,21 +214,13 @@ impl Rig {
                 "messagingSocketPath": socket,
                 "sessionId": "s-me",
                 "cwd": self.tmp.path(),
+                "kind": "interactive",
+                "entrypoint": entrypoint,
             })
             .to_string(),
         )
         .expect("session registration");
-        let bin = self.tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).expect("stub bin dir");
-        let stub = bin.join("claude");
-        std::fs::write(&stub, "#!/bin/sh\necho '[]'\n").expect("stub claude");
-        std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .expect("stub claude mode");
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
+        let path = self.stub_claude("echo '[]'\n");
         self.hive_cmd(args, inside)
             .env("CLAUDE_CODE_MESSAGING_SOCKET", &socket)
             .env("PATH", path)
@@ -202,7 +229,7 @@ impl Rig {
     }
 
     fn hive_as_claude_ok(&self, args: &[&str], inside: Option<(&str, &str)>) -> String {
-        let out = self.hive_as_claude(args, inside);
+        let out = self.hive_as_claude(args, inside, "claude-desktop");
         assert!(
             out.status.success(),
             "hive {args:?} failed: stdout={} stderr={}",
@@ -900,4 +927,429 @@ fn test_create_outside_tmux_tells_team_panes_their_background_colour() {
         "pane was told its background is {reply:?}"
     );
     rig.delete();
+}
+
+#[test]
+fn test_create_and_join_refuse_a_terminal_claude_session() {
+    let rig = Rig::new("terminal");
+    let ws = rig.ws();
+    let team_json = rig.home().join("teams").join(&rig.team).join("team.json");
+
+    // A terminal's claude: refused before any tmux or registry write. The
+    // socket-dir check must come before any `rig.tmux` call, which makes
+    // that directory itself.
+    let out = rig.hive_as_claude(
+        &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
+        None,
+        "cli",
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("terminal") && stderr.contains("hclaude"),
+        "stderr: {stderr}"
+    );
+    assert!(!team_json.exists());
+    assert!(!rig.socket_dir().exists());
+
+    // An entry without an entrypoint: unconfirmed, not called a terminal.
+    let out = rig.hive_as_claude(
+        &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
+        None,
+        "",
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unconfirmed") && stderr.contains("hclaude"),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("from a terminal"), "stderr: {stderr}");
+    assert!(!team_json.exists());
+    assert!(!rig.socket_dir().exists());
+
+    // A shell's create, then the terminal claude asks to join: the
+    // registry entry and the window are exactly as they were.
+    let window_id = rig.create_outside_tmux();
+    let entry_before = std::fs::read(&team_json).expect("team.json");
+    let panes_before = rig.panes(&window_id);
+    let out = rig.hive_as_claude(&["join", &rig.team], None, "cli");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("hclaude"), "stderr: {stderr}");
+    assert_eq!(std::fs::read(&team_json).expect("team.json"), entry_before);
+    assert_eq!(rig.panes(&window_id), panes_before);
+    rig.tmux(&["kill-server"]);
+}
+
+#[test]
+fn test_launchers_outside_tmux_without_a_terminal_run_the_raw_cli() {
+    let rig = Rig::new("rawcli");
+    let marker = rig.tmp.path().join("claude.args");
+    let path = rig.stub_claude(&format!("echo \"$*\" >> {}\n", marker.display()));
+    for args in [
+        vec!["claude", "--help"],
+        vec!["claude"],
+        vec!["claude", "-p", "hi"],
+    ] {
+        // `hive_cmd` has stdin at /dev/null and stdout piped: no terminal.
+        let out = rig
+            .hive_cmd(&args, None)
+            .env("PATH", &path)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let seen = std::fs::read_to_string(&marker).expect("the stub ran");
+    assert_eq!(seen, "--help\n\n-p hi\n");
+    // The raw path started no server (it only ever asked `tmux -V`).
+    assert!(!rig.socket_dir().exists());
+}
+
+/// The launcher run at a terminal (a pty from `script`) outside tmux, on a
+/// private server that already holds stale root globals. One session per
+/// caller state of the root variables — unset, a lane, explicitly empty —
+/// each held open by the stub `claude` the managed launch falls back to
+/// (its `--bg` fails), until the test has read the roots the first pane, a
+/// split pane and a window hook's run-shell job see.
+#[test]
+fn test_launcher_outside_tmux_at_a_terminal_opens_a_session_mirroring_its_roots() {
+    let rig = Rig::new("session");
+    let home = rig.tmp.path().join("home");
+    let old = rig.tmp.path().join("old");
+    let lane = rig.tmp.path().join("lane");
+    for dir in [&home, &old, &lane] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let old_roots: Vec<(&str, String)> = ROOT_VARS
+        .iter()
+        .map(|k| {
+            (
+                *k,
+                old.join(k.to_lowercase()).to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    // The server, with stale globals: HOME is the rig's so nothing here
+    // reads the developer's own roots when a variable is unset.
+    // The server's global environment is this first client's: the engine
+    // markers a developer's shell carries would otherwise reach every pane.
+    let mut base = Command::new("tmux");
+    base.args(["-S", rig.socket_dir().join("default").to_str().unwrap()])
+        .args(["new-session", "-d", "-s", "base"])
+        .env("TMUX_TMPDIR", rig.tmp.path())
+        .env("HOME", &home);
+    for key in IDENTITY_VARS {
+        base.env_remove(key);
+    }
+    for (k, v) in &old_roots {
+        base.env(k, v);
+    }
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(rig.socket_dir())
+        .unwrap();
+    assert!(base.output().unwrap().status.success());
+    assert_eq!(
+        rig.tmux_ok(&["show-environment", "-g", "HIVE_HOME"]),
+        format!("HIVE_HOME={}", old_roots[0].1)
+    );
+
+    let dump = |tag: &str| {
+        format!(
+            "printf '%s\\n' \"{tag}\" \"HIVE_HOME=${{HIVE_HOME-UNSET}}\" \"CLAUDE_HOME=${{CLAUDE_HOME-UNSET}}\" \
+             \"CLAUDE_CONFIG_DIR=${{CLAUDE_CONFIG_DIR-UNSET}}\" \"CODEX_HOME=${{CODEX_HOME-UNSET}}\" \
+             \"GROK_HOME=${{GROK_HOME-UNSET}}\" \"TMUX_PANE=${{TMUX_PANE-UNSET}}\" \"HOME=$HOME\""
+        )
+    };
+    let hive = env!("CARGO_BIN_EXE_hive");
+    let planted = |root: &std::path::Path, team: &str| {
+        let dir = root.join("teams").join(team);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("team.json"),
+            format!(
+                r#"{{"team":"{team}","workspace":"{}","members":[]}}"#,
+                dir.display()
+            ),
+        )
+        .unwrap();
+    };
+    planted(&home.join(".hive"), "unset-team");
+    planted(&lane, "lane-team");
+    planted(&old.join("hive_home"), "old-team");
+
+    for (state, value, expect, root_team) in [
+        ("unset", None, "UNSET", "unset-team"),
+        (
+            "lane",
+            Some(lane.to_string_lossy().into_owned()),
+            lane.to_str().unwrap(),
+            "lane-team",
+        ),
+        ("empty", Some(String::new()), "", ""),
+    ] {
+        let out = rig.tmp.path().join(format!("{state}.out"));
+        let go = rig.tmp.path().join(format!("{state}.go"));
+        let path = rig.stub_claude(&format!(
+            "{} >> {out}\ncase \"$1\" in --bg) exit 1;; esac\nwhile [ ! -e {go} ]; do sleep 0.1; done\n",
+            dump("claude:$*"),
+            out = out.display(),
+            go = go.display()
+        ));
+        // A pty around the launcher: `script` on macOS takes the command
+        // after the typescript file, util-linux's wants -c.
+        let mut cmd = Command::new("script");
+        if cfg!(target_os = "macos") {
+            cmd.args(["-q", "/dev/null", hive, "claude"]);
+        } else {
+            cmd.args(["-qec", &format!("{hive} claude"), "/dev/null"]);
+        }
+        cmd.current_dir(rig.tmp.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .env("HOME", &home)
+            .env("TMUX_TMPDIR", rig.tmp.path())
+            .env("PATH", &path)
+            // The tmux client needs a terminal that clears; nextest's is dumb.
+            .env("TERM", "xterm-256color");
+        for key in IDENTITY_VARS.iter().chain(ROOT_VARS) {
+            cmd.env_remove(key);
+        }
+        if let Some(value) = &value {
+            for key in ROOT_VARS {
+                cmd.env(key, value);
+            }
+        }
+        let mut child = cmd.spawn().expect("script runs");
+        // The stub's second entry is the raw launch holding the pane.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::fs::read_to_string(&out).map_or(true, |s| s.matches("claude:").count() < 2) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{state}: launcher never held a pane"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // The raw launch's own record (the second): the `--bg` attempt's
+        // fields must not stand in for it.
+        let first = std::fs::read_to_string(&out).unwrap();
+        let first = first
+            .split("claude:")
+            .nth(2)
+            .map(|record| format!("claude:{record}"))
+            .expect("the raw launch's record");
+        let session = rig
+            .tmux_ok(&["list-sessions", "-F", "#{session_name}"])
+            .lines()
+            .find(|s| *s != "base")
+            .expect("the launcher's session")
+            .to_string();
+        let window = rig.tmux_ok(&["display-message", "-p", "-t", &session, "#{window_id}"]);
+
+        // A split pane's view, then a window hook's run-shell job's view.
+        let split_out = rig.tmp.path().join(format!("{state}.split"));
+        rig.tmux_ok(&[
+            "split-window",
+            "-d",
+            "-t",
+            &session,
+            &format!("{} > {}", dump("split"), split_out.display()),
+        ]);
+        // The hook's job runs a script file: the dump's quoting stays out
+        // of tmux's double-quote parser.
+        let hook_out = rig.tmp.path().join(format!("{state}.hook"));
+        let hook_sh = rig.tmp.path().join(format!("{state}.hook.sh"));
+        std::fs::write(
+            &hook_sh,
+            format!("{} > {}\n", dump("hook"), hook_out.display()),
+        )
+        .unwrap();
+        let hook = format!(
+            "run-shell -b \"sh {} >/dev/null 2>&1 || true\"",
+            hook_sh.display()
+        );
+        rig.tmux_ok(&[
+            "set-hook",
+            "-w",
+            "-t",
+            &window,
+            "window-layout-changed",
+            &hook,
+        ]);
+        let ls_out = rig.tmp.path().join(format!("{state}.ls"));
+        rig.tmux_ok(&[
+            "split-window",
+            "-d",
+            "-t",
+            &session,
+            &format!(
+                "{hive} ls > {out} 2>&1; echo rc=$? >> {out}",
+                out = ls_out.display()
+            ),
+        ]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !(split_out.exists() && hook_out.exists() && ls_out.exists()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{state}: split/hook/ls never reported"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let split = std::fs::read_to_string(&split_out).unwrap();
+        let hooked = std::fs::read_to_string(&hook_out).unwrap();
+        for (label, text) in [
+            ("first pane", first.as_str()),
+            ("split", split.as_str()),
+            ("hook", hooked.as_str()),
+        ] {
+            for key in ROOT_VARS {
+                assert!(
+                    text.contains(&format!("{key}={expect}\n")),
+                    "{state} {label}: {key} should be {expect:?}\n{text}"
+                );
+            }
+            assert!(
+                text.contains(&format!("HOME={}\n", home.display())),
+                "{state} {label}:\n{text}"
+            );
+        }
+        assert!(
+            first.contains("TMUX_PANE=%"),
+            "{state} first pane:\n{first}"
+        );
+        // The registry the pane's hive reads is the caller's root, not the
+        // server's old one.
+        let ls = std::fs::read_to_string(&ls_out).unwrap();
+        assert!(ls.contains("rc=0\n"), "{state} ls:\n{ls}");
+        if root_team.is_empty() {
+            // An empty root is a root (`paths::hive_home` takes the value as
+            // it is): no planting is under it.
+            assert!(!ls.contains("-team"), "{state} ls:\n{ls}");
+        } else {
+            assert!(
+                ls.contains(root_team) && !ls.contains("old-team"),
+                "{state} ls:\n{ls}"
+            );
+        }
+        // The session's own environment says the same; the globals and the
+        // base session are untouched.
+        for key in ROOT_VARS {
+            let shown = rig.tmux_ok(&["show-environment", "-t", &session, key]);
+            let want = match &value {
+                None => format!("-{key}"),
+                Some(v) => format!("{key}={v}"),
+            };
+            assert_eq!(shown, want, "{state}");
+        }
+        for (key, old_value) in &old_roots {
+            assert_eq!(
+                rig.tmux_ok(&["show-environment", "-g", key]),
+                format!("{key}={old_value}"),
+                "{state}"
+            );
+            // `-r` wrote into the new session alone: base still has no
+            // variable of its own (it reads the global).
+            assert!(
+                !rig.tmux(&["show-environment", "-t", "base", key])
+                    .status
+                    .success(),
+                "{state} {key}"
+            );
+        }
+
+        // A team created in the launcher's session wears the team bar; the
+        // session is the human's (their engine holds the first pane), so
+        // `hive delete` leaves it, as it leaves any lent window.
+        if state == "unset" {
+            let team = format!("{}-launched", rig.team);
+            let create_out = rig.tmp.path().join("create.out");
+            rig.tmux_ok(&[
+                "split-window",
+                "-d",
+                "-t",
+                &session,
+                &format!(
+                    "{hive} create {team} > {out} 2>&1; echo rc=$? >> {out}",
+                    out = create_out.display()
+                ),
+            ]);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !std::fs::read_to_string(&create_out).is_ok_and(|s| s.contains("rc=")) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "create never reported"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let created = std::fs::read_to_string(&create_out).unwrap();
+            assert!(created.contains("rc=0\n"), "create:\n{created}");
+            let sid = rig.tmux_ok(&["display-message", "-p", "-t", &session, "#{session_id}"]);
+            assert_eq!(
+                rig.tmux_ok(&["show-options", "-t", &sid, "-v", "status"]),
+                "2",
+                "the launcher's session wears the team bar"
+            );
+            assert!(
+                rig.status_line(&window, 0).contains(&format!(" {team} ")),
+                "{}",
+                rig.status_line(&window, 0)
+            );
+            assert_eq!(rig.window_option(&window, "hive-built"), "");
+            // base, the human's other session, is untouched
+            assert_eq!(
+                rig.tmux_ok(&["show-options", "-t", "base", "-v", "status"]),
+                ""
+            );
+            rig.tmux_ok(&[
+                "split-window",
+                "-d",
+                "-t",
+                &session,
+                &format!("{hive} delete {team} > {}.del 2>&1", create_out.display()),
+            ]);
+            let del_out = rig.tmp.path().join("create.out.del");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !del_out.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "delete never reported"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert!(
+                rig.tmux(&["has-session", "-t", &format!("={session}")])
+                    .status
+                    .success(),
+                "delete must leave the launcher's session"
+            );
+            assert!(std::fs::read_to_string(&out).unwrap().contains("claude:"));
+        }
+
+        std::fs::write(&go, "").unwrap();
+        let status = child.wait().expect("script exits");
+        assert!(status.success(), "{state}: {status:?}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while rig
+            .tmux(&["has-session", "-t", &format!("={session}")])
+            .status
+            .success()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{state}: session lingered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    rig.tmux(&["kill-server"]);
 }

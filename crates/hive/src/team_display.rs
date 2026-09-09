@@ -277,6 +277,17 @@ fn install_team_status(pane: &str) {
     }
 }
 
+/// The session a launcher opened outside tmux (`@hive-launcher`,
+/// `cli/launch`) is hive's to dress: a team created in it gets the team
+/// status bar the way a session hive builds does. The window stays the
+/// human's — their engine runs on its pane — so it is never `@hive-built`
+/// and `hive delete` leaves it, as it leaves any lent window.
+pub(crate) fn dress_launcher_session(pane: &str) {
+    if tmux::display_value(pane, "#{@hive-launcher}").is_some() {
+        install_team_status(pane);
+    }
+}
+
 /// Where a team window goes for the caller: inside tmux the caller's own
 /// session, outside tmux the team session. Returns (window target, first
 /// pane id).

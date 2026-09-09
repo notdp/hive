@@ -86,7 +86,9 @@ Consequences across modules:
 - **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
   delete/attach) need no tmux client: `create` outside tmux puts the
   team window in the session named after the team (created detached when
-  missing), `spawn` splits
+  missing) and enrols the caller only when it is the desktop app's Claude
+  session (`join` likewise; a terminal's claude is refused and pointed at
+  `hclaude`), `spawn` splits
   a pane into the team's window by id from anywhere, and `attach` rebuilds
   a window that is gone before jumping to it. A pane serves as an address;
   these verbs do not require the caller to have one. `workflow run` rides the
@@ -140,7 +142,7 @@ cli gets a pane; the rest are named on stderr when the window is rebuilt, and
 stay registry-only until they have one. A window hive built itself carries
 `@hive-built`; `hive delete` closes those and leaves a window a human's
 session lent the team (an in-tmux create). A claude member whose sessionId names an interactive session (a
-creating or joined desktop/ccd session, not a bg job) is drawn read-only
+creating or joined desktop session, not a bg job) is drawn read-only
 through `hive view`, because the resume lane would mint a forked job that
 steals the member's deliveries. That mirror is an ordinary pane
 tagged `@hive-role mirror` beside its member tags: the first pane of a team
@@ -683,13 +685,33 @@ Delivery to a claude pane with neither a job binding nor a deliverable
 session id fails loudly. `hive spawn` and `hive fork` are not gated, since
 they launch the engine themselves and the binding lands when it starts.
 
-An interactive claude session joining from outside tmux, such as the desktop
-app or a standalone terminal session, is enrolled by its session id instead.
-Hive gives it a read-only mirror pane; that display does not turn it into a
-background-job member. It receives session messages over the same two lanes
-(daemon reply, then the session's own inbox socket), has no bg job and no
-ledger row, and none of the keyboard path above applies to it. This is an
-enrolment policy, not a limitation of the session's inbox transport.
+The desktop app's interactive claude session, joining from outside tmux, is
+enrolled by its session id instead (its registry entry's `entrypoint` is
+`claude-desktop`; a terminal's `cli` session, or one with no entrypoint, is
+refused by create and join and pointed at `hclaude`). Hive gives it a
+read-only mirror pane; that display does not turn it into a background-job
+member. It receives session messages over the same two lanes (daemon reply,
+then the session's own inbox socket), has no bg job and no ledger row, and
+none of the keyboard path above applies to it. This is an enrolment policy,
+not a limitation of the session's inbox transport: a terminal's claude still
+reaches a team as a `ccd.<name>` guest over the same socket.
+
+A terminal is where the managed launchers meet the same boundary from the
+other side: `hive claude` / `codex` / `grok` run outside tmux at a terminal
+open a tmux session around the launch (`cli/launch.rs`), so the engine is
+still born on a pane. That session is marked `@hive-launcher`: a team
+created in it wears the team status bar (`team_display::
+dress_launcher_session`), while its window is the human's — their engine
+runs on its pane — so it is never `@hive-built` and `hive delete` leaves it
+as it leaves any lent window. The session mirrors the caller's root variables
+(`HIVE_HOME`, `CLAUDE_HOME`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`)
+in three states — set with `-e`, an empty value included; unset kept unset
+in the first pane (`env -u`) and marked removed (`set-environment -r`) for
+every later pane and window hook, over a pre-existing server's globals —
+and carries the caller's PATH only into the first pane's launcher (a login
+shell rebuilds PATH). Without a terminal (a pipe, an engine's tool
+subprocess), with `$TMUX` set but no pane (a run-shell job), or without
+tmux, the launcher runs the raw CLI, the last case saying so on stderr.
 
 ## Codex: one shared app-server daemon
 

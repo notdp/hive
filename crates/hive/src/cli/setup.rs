@@ -193,14 +193,18 @@ fn which_on_path(name: &str) -> bool {
 const SHELL_INIT_POSIX: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
-# cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
-# they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
+# cd-ready resume hint when it exits. Outside tmux, at a terminal, they open
+# a tmux session of their own around the launch (the status is then the tmux
+# client's, and the hint has no pane to find); for management subcommands /
+# non-interactive flags, or without a terminal or tmux, they run the plain
+# binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hcodex: hive is not on PATH" >&2; return 127
   fi
-  # The launcher always ends in an exec (managed or raw), so the status here
-  # is codex's own — never a fallback signal. The if-condition keeps errexit
+  # The launcher always ends in an exec (managed, raw, or the tmux client
+  # around a launch outside tmux), so the status here is that process's own
+  # — never a fallback signal. The if-condition keeps errexit
   # shells from bailing before the status is saved.
   if hive codex "$@"; then _hive_rc=0; else _hive_rc=$?; fi
   # print a cd-ready resume hint for the session that just ended.
@@ -212,8 +216,9 @@ function hclaude {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hclaude: hive is not on PATH" >&2; return 127
   fi
-  # The launcher always ends in an exec (managed or raw), so the status here
-  # is claude's own — never a fallback signal. The if-condition keeps errexit
+  # The launcher always ends in an exec (managed, raw, or the tmux client
+  # around a launch outside tmux), so the status here is that process's own
+  # — never a fallback signal. The if-condition keeps errexit
   # shells from bailing before the status is saved.
   if hive claude "$@"; then _hive_rc=0; else _hive_rc=$?; fi
   # claude's own resume hint omits the directory; print a cd-ready one.
@@ -225,8 +230,9 @@ function hgrok {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hgrok: hive is not on PATH" >&2; return 127
   fi
-  # The launcher always ends in an exec (managed or raw), so the status here
-  # is grok's own — never a fallback signal. The if-condition keeps errexit
+  # The launcher always ends in an exec (managed, raw, or the tmux client
+  # around a launch outside tmux), so the status here is that process's own
+  # — never a fallback signal. The if-condition keeps errexit
   # shells from bailing before the status is saved.
   if hive grok "$@"; then _hive_rc=0; else _hive_rc=$?; fi
   # print a cd-ready resume hint for the session that just ended.
@@ -238,15 +244,19 @@ function hgrok {
 const SHELL_INIT_FISH: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
-# cd-ready resume hint when it exits. Outside tmux, and for management subcommands / non-interactive flags,
-# they run the plain binary. Plain `codex` / `claude` / `grok` are never touched.
+# cd-ready resume hint when it exits. Outside tmux, at a terminal, they open
+# a tmux session of their own around the launch (the status is then the tmux
+# client's, and the hint has no pane to find); for management subcommands /
+# non-interactive flags, or without a terminal or tmux, they run the plain
+# binary. Plain `codex` / `claude` / `grok` are never touched.
 function hcodex
     if not type -q hive
         echo "hcodex: hive is not on PATH" >&2
         return 127
     end
-    # the launcher always ends in an exec (managed or raw): the status is
-    # codex's own, never a fallback signal
+    # the launcher always ends in an exec (managed, raw, or the tmux client
+    # around a launch outside tmux): the status is that process's own, never
+    # a fallback signal
     hive codex $argv
     set -l _hive_rc $status
     # print a cd-ready resume hint for the session that just ended.
@@ -259,8 +269,9 @@ function hclaude
         echo "hclaude: hive is not on PATH" >&2
         return 127
     end
-    # the launcher always ends in an exec (managed or raw): the status is
-    # claude's own, never a fallback signal
+    # the launcher always ends in an exec (managed, raw, or the tmux client
+    # around a launch outside tmux): the status is that process's own, never
+    # a fallback signal
     hive claude $argv
     set -l _hive_rc $status
     # claude's own resume hint omits the directory; print a cd-ready one.
@@ -273,8 +284,9 @@ function hgrok
         echo "hgrok: hive is not on PATH" >&2
         return 127
     end
-    # the launcher always ends in an exec (managed or raw): the status is
-    # grok's own, never a fallback signal
+    # the launcher always ends in an exec (managed, raw, or the tmux client
+    # around a launch outside tmux): the status is that process's own, never
+    # a fallback signal
     hive grok $argv
     set -l _hive_rc $status
     # print a cd-ready resume hint for the session that just ended.

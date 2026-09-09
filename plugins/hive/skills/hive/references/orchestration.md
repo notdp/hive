@@ -121,7 +121,7 @@ merge 只由你串行执行,一次一条。该任务验收通过且 human 批准
 ## 对 human
 
 - 只给已收敛结论、单个阻断问题、建议下一步——human 的注意力留给拍板。拍板用所在 CLI 的阻塞提问工具(claude 是 `AskUserQuestion`)。
-- 给 human 的可执行命令(`hive attach <team>`、`hive view` 等)单独放 ```bash 围栏块,一条命令一块,不带 `$` 和输出——Claude Code Desktop 只给 shell 块加 Run 按钮,行内反引号只是文字。
+- 给 human 的可执行命令各放一个 ```bash 块,块内只放命令;其中 `hive attach <team>` 仅在系统提示说明你在 Claude desktop app 中运行时提供。
 - 成员越过你直接向 human 交付:回它「终态发我」,交付线走你,验收才有着落。human 直接对某个成员改了方向:以 human 为准,更新你手里的验收标准。
 - stage 汇报和最终交付要有自包含 HTML,Markdown 源同目录,发 human 时给 HTML 绝对路径;agent 间 artifact 一律 Markdown。
 - 全部完成且 human 签字后才 kill 剩余成员;整团收摊用 `hive delete`。

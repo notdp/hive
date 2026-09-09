@@ -87,7 +87,7 @@ fn token_urlsafe4() -> String {
     out
 }
 
-fn stdin_isatty() -> bool {
+pub(crate) fn stdin_isatty() -> bool {
     unsafe { libc::isatty(0) == 1 }
 }
 
