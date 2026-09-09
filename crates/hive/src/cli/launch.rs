@@ -24,6 +24,12 @@ use crate::tmux;
 // codex subcommands that are not an interactive TUI launch: hive leaves these
 // completely untouched (raw codex). Kept in sync with `codex --help`.
 const CODEX_PASSTHROUGH_SUBCOMMANDS: &[&str] = &[
+    "agents",
+    "queue",
+    "archive",
+    "delete",
+    "migrate-rollouts",
+    "unarchive",
     "exec",
     "e",
     "review",
@@ -55,6 +61,10 @@ const CODEX_PASSTHROUGH_FLAGS: &[&str] = &["-h", "--help", "-V", "--version"];
 // subcommand scan does not mistake that value for the subcommand. `--opt=value`
 // and `-Cvalue` are self-contained and handled separately.
 const CODEX_VALUE_OPTS: &[&str] = &[
+    "-i",
+    "--image",
+    "--local-provider",
+    "--add-dir",
     "-c",
     "--config",
     "-m",
@@ -124,14 +134,16 @@ fn codex_positional_after(args: &[String], sub_index: usize) -> Option<String> {
 /// A following token starting with `-` is the next flag, not this option's
 /// value: the option is read as bare (None) rather than swallowing it.
 fn codex_opt_value(args: &[String], names: &[&str]) -> Option<String> {
-    for (i, a) in args.iter().enumerate() {
+    let mut i = 0;
+    while let Some(a) = args.get(i) {
+        if a == "--" {
+            break;
+        }
         if names.contains(&a.as_str()) {
-            let next = args.get(i + 1).map(String::as_str).unwrap_or("");
-            return if !next.is_empty() && !next.starts_with('-') {
-                Some(next.to_string())
-            } else {
-                None
-            };
+            return args
+                .get(i + 1)
+                .filter(|next| !next.is_empty() && !next.starts_with('-'))
+                .cloned();
         }
         for name in names {
             let prefix = if name.starts_with("--") {
@@ -143,6 +155,11 @@ fn codex_opt_value(args: &[String], names: &[&str]) -> Option<String> {
                 return Some(a[prefix.len()..].to_string());
             }
         }
+        i += if CODEX_VALUE_OPTS.contains(&a.as_str()) {
+            2
+        } else {
+            1
+        };
     }
     None
 }
@@ -183,8 +200,7 @@ fn codex_pane_thread_name(pane: &str) -> String {
 
 /// True when the user already passed codex's cwd flag (-C / --cd, any form).
 fn codex_args_set_cwd(args: &[String]) -> bool {
-    args.iter()
-        .any(|a| a == "--cd" || a.starts_with("--cd=") || a.starts_with("-C"))
+    codex_opt_value(args, &["--cd", "-C"]).is_some()
 }
 
 fn codex_raw(args: &[String]) -> ! {
@@ -1020,6 +1036,15 @@ fn pane_team_identity() -> Option<(String, String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_codex_cwd_flags_ignore_option_values_and_literal_prompts() {
+        for input in [vec!["--", "--cd=/prompt"], vec!["-c", "--cd=/config"]] {
+            let input = args(&input);
+            assert!(!codex_args_set_cwd(&input));
+            assert_eq!(codex_opt_value(&input, &["--cd", "-C"]), None);
+        }
+    }
+
     #[test]
     fn test_codex_resume_uses_recorded_cwd_unless_overridden() {
         let tmp = tempfile::tempdir().unwrap();
