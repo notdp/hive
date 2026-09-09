@@ -363,6 +363,18 @@ fn normalize_codex_cwd(args: &mut [String], cwd: &str) {
     }
 }
 
+fn codex_launch_cwd(args: &[String], source: Option<&str>) -> String {
+    use crate::adapters::base::SessionAdapter;
+    codex_opt_value(args, &["--cd", "-C"])
+        .or_else(|| {
+            let adapter = crate::adapters::codex::CodexAdapter;
+            let path = adapter.find_session_file(source?, None)?;
+            adapter.read_meta(&path).and_then(|meta| meta.cwd)
+        })
+        .filter(|cwd| !cwd.is_empty())
+        .unwrap_or_else(getcwd)
+}
+
 fn exec_codex_outside(args: &[String]) -> ! {
     use crate::adapters::codex_app_server;
     if !env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty() {
@@ -387,7 +399,7 @@ fn exec_codex_outside(args: &[String]) -> ! {
             std::process::exit(0);
         }
     }
-    let cwd = codex_opt_value(args, &["--cd", "-C"]).unwrap_or_else(getcwd);
+    let cwd = codex_launch_cwd(args, source.as_deref());
     let cwd = std::path::Path::new(&cwd)
         .canonicalize()
         .unwrap_or_else(|error| {
@@ -912,6 +924,27 @@ fn pane_team_identity() -> Option<(String, String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_codex_resume_uses_recorded_cwd_unless_overridden() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::testenv::EnvGuard::new();
+        env.set("CODEX_HOME", tmp.path());
+        let sessions = tmp.path().join("sessions/2026/04/02");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let id = "11111111-2222-4333-8444-555555555555";
+        std::fs::write(
+            sessions.join(format!("rollout-2026-04-02T00-00-00-{id}.jsonl")),
+            serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":"/original"}})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(super::codex_launch_cwd(&[], Some(id)), "/original");
+        assert_eq!(
+            super::codex_launch_cwd(&["--cd".into(), "/override".into()], Some(id)),
+            "/override"
+        );
+    }
+
     #[test]
     fn test_codex_cwd_rewrite_keeps_option_values_and_prompt_literal() {
         let mut args: Vec<String> = ["-c", "-Cvalue", "-C", "relative", "--", "--cd=prompt"]
