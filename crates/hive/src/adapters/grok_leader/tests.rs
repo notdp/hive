@@ -3180,7 +3180,7 @@ fn test_sleep_pool_observation_is_scoped_and_requires_idle_evidence() {
     assert!(client.handshake());
     pool.hold_for_test(key, client.clone());
     assert_eq!(pool.idle_owned_keys("other"), Some(Vec::new()));
-    assert_eq!(pool.idle_owned_keys("cedar"), None);
+    assert_eq!(pool.idle_owned_keys("cedar"), Some(vec![key.into()]));
     proc.feed(&activity("working"));
     settle(&client, |rt| rt.turn_open == Some(true));
     assert_eq!(pool.idle_owned_keys("cedar"), None);
@@ -3290,5 +3290,39 @@ fn test_parked_member_keeps_session_and_alias_and_wakes_only_on_submission() {
         1
     );
     let client = pool.client_for_key(key).unwrap();
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_zero_turn_session_is_idle_only_after_replay_completes() {
+    let _bed = setup();
+    let key = "m-cedar.worker";
+    write_session_key(key, SID, CWD).unwrap();
+    let (arrived, load_request) = std::sync::mpsc::channel();
+    let proc = FakeProc::new(Some(Box::new(move |msg| match msg["method"].as_str() {
+        Some("initialize") => vec![ok(msg, json!({"protocolVersion":1}))],
+        Some("session/load") => {
+            arrived.send(msg.clone()).unwrap();
+            Vec::new()
+        }
+        _ => Vec::new(),
+    })));
+    let handed = Arc::clone(&proc);
+    set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
+    let client = Arc::new(GrokStdioClient::new(key).unwrap());
+    let pool = GrokClientPool::new();
+    pool.hold_for_test(key, client.clone());
+    assert!(!client.idle_for_sleep());
+    let loading = Arc::clone(&client);
+    let handshake = thread::spawn(move || loading.handshake());
+    let request = load_request.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(client.turn_open(), None);
+    assert!(!client.idle_for_sleep());
+    assert_eq!(pool.idle_owned_keys("cedar"), None);
+    proc.feed(&ok(&request, json!({})));
+    assert!(handshake.join().unwrap());
+    assert_eq!(client.turn_open(), None);
+    assert!(client.idle_for_sleep());
+    assert_eq!(pool.idle_owned_keys("cedar"), Some(vec![key.into()]));
     teardown(&client, &proc);
 }

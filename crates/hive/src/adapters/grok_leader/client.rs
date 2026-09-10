@@ -877,11 +877,14 @@ impl GrokStdioClient {
         }
     }
 
-    /// Retirement needs both completed turn evidence and no outstanding RPC.
+    /// After a complete replay, no turn evidence means the session is unused.
+    /// Before load completes it remains unknown, even with no pending turn.
     pub(super) fn idle_for_sleep(&self) -> bool {
-        self.is_alive()
-            && self.turn_open() == Some(false)
-            && self.inner.pending.lock().unwrap().is_empty()
+        let idle = {
+            let state = self.inner.state.lock().unwrap();
+            state.loaded && state.loading.is_none() && state.runtime.turn_open != Some(true)
+        };
+        self.is_alive() && idle && self.inner.pending.lock().unwrap().is_empty()
     }
 
     /// Turn evidence, replay included: `Some(false)` for a session whose
