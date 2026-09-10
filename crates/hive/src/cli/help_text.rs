@@ -71,6 +71,7 @@ Debug:
 
   capture    Debug: capture raw pane output from a team member's pane.
   doctor     Diagnose agent connectivity and session state.
+  ps         List Hive processes and recorded resources without changing them.
   inject     Debug: inject raw input into an agent pane.
   interrupt  Interrupt an agent's running turn.
   kill       Kill an agent pane and remove it from the team.
@@ -277,6 +278,20 @@ Options:
   --down                Retire every member first and kill the team's tmux
                         session
   -h, --help            Show this message and exit.
+"#
+        }
+        ["ps"] => {
+            r#"Usage: hive ps [OPTIONS]
+
+  List Hive processes and recorded resources without changing them.
+
+  Logical ownership and OS parentage are separate columns. Missing observations
+  are unknown. Tmux display observations use the caller's tmux server; engine
+  records use the configured homes. Process discovery covers the OS snapshot.
+
+Options:
+  --json      Print a JSON array, one resource object per line.
+  -h, --help  Show this message and exit.
 "#
         }
         ["doctor"] => {
