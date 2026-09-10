@@ -298,3 +298,101 @@ pub fn hidden_mirror_pane(team: &str) -> Option<String> {
         (role == "mirror" && windows.iter().any(|w| w == window)).then(|| pane.to_string())
     })
 }
+
+// --- The hived's per-tick snapshot ---
+
+/// The per-pane columns the hived's tick used to fetch one fork at a time
+/// (`display-message` for the window and cwd, a `list-panes -a` per liveness
+/// check, `display-message` for the tty): read once per tick instead.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PaneExtra {
+    /// `session:index` of the pane's window.
+    pub window: String,
+    pub dead: bool,
+    /// `/dev/ttys003`-style tty, empty for a pane without one.
+    pub tty: String,
+    pub pid: Option<u32>,
+    pub cwd: String,
+}
+
+/// `PANE_BASE_FMT` plus the snapshot columns; `parse_panes_snapshot` reads
+/// the first eight as a `PaneInfo` and the rest as its `PaneExtra`.
+pub const PANE_SNAPSHOT_FMT: &str = concat!(
+    "#{pane_id}\t#{pane_title}\t#{pane_current_command}\t#{@hive-role}\t",
+    "#{@hive-agent}\t#{@hive-team}\t#{@hive-cli}\t#{@hive-group}\t",
+    "#{session_name}:#{window_index}\t#{pane_dead}\t#{pane_tty}\t#{pane_pid}\t#{pane_current_path}"
+);
+const PANE_SNAPSHOT_FIELD_COUNT: usize = 13;
+
+pub type PaneSnapshot = (Vec<PaneInfo>, std::collections::HashMap<String, PaneExtra>);
+
+/// Every pane on the server with its snapshot columns; the same
+/// `(value, status)` contract as `list_panes_all_status`.
+pub fn list_panes_snapshot_status() -> (Option<PaneSnapshot>, &'static str) {
+    let r = match run(&["list-panes", "-a", "-F", PANE_SNAPSHOT_FMT], false, 5) {
+        Ok(r) => r,
+        Err(_) => return (None, "unknown"),
+    };
+    if r.returncode == 0 {
+        return (Some(parse_panes_snapshot(&r.stdout)), "ok");
+    }
+    if stderr_means_no_server(&r.stderr) {
+        return (None, "no-server");
+    }
+    (None, "unknown")
+}
+
+pub fn parse_panes_snapshot(stdout: &str) -> PaneSnapshot {
+    let mut panes: Vec<PaneInfo> = Vec::new();
+    let mut extras = std::collections::HashMap::new();
+    for line in stdout.trim().split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let p = split_fields(line, PANE_SNAPSHOT_FIELD_COUNT);
+        let info = PaneInfo {
+            pane_id: p[0].clone(),
+            title: p[1].clone(),
+            command: p[2].clone(),
+            role: p[3].clone(),
+            agent: p[4].clone(),
+            team: p[5].clone(),
+            cli: p[6].clone(),
+            group: p[7].clone(),
+        };
+        extras.insert(
+            info.pane_id.clone(),
+            PaneExtra {
+                window: p[8].clone(),
+                dead: p[9] == "1",
+                tty: p[10].clone(),
+                pid: p[11].trim().parse().ok().filter(|pid| *pid > 0),
+                cwd: p[12].clone(),
+            },
+        );
+        panes.push(info);
+    }
+    (panes, extras)
+}
+
+/// One window option across every window, `session:index → value`, only
+/// for windows where it is set. None when tmux did not answer.
+pub fn list_window_option_all(key: &str) -> Option<std::collections::HashMap<String, String>> {
+    let fmt = format!("#{{session_name}}:#{{window_index}}\t#{{@{key}}}");
+    let r = run(&["list-windows", "-a", "-F", &fmt], false, 5).ok()?;
+    if r.returncode != 0 {
+        return None;
+    }
+    Some(parse_window_option_all(&r.stdout))
+}
+
+pub fn parse_window_option_all(stdout: &str) -> std::collections::HashMap<String, String> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (window, value) = line.split_once('\t')?;
+            (!window.is_empty() && !value.is_empty())
+                .then(|| (window.to_string(), value.to_string()))
+        })
+        .collect()
+}

@@ -438,30 +438,30 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             }
         }
 
-        // One display probe per tick: while the tmux server answers, its
-        // pane listing is the snapshot the status and view ticks read;
-        // while it does not, every display-dependent tick is skipped and
-        // the probe backs off. The socket below keeps its 1s accept loop
-        // either way.
-        let panes = if display.due(now) {
-            let (panes, status) = hooked_list_panes_all_status();
-            if let Some(transition) = display.record(status, now) {
+        // One display snapshot per tick: while the tmux server answers, it
+        // is what every display-dependent tick reads (pane liveness,
+        // windows, CLIs, tokens are lookups into it); while it does not,
+        // those ticks are skipped and the probe backs off. The socket below
+        // keeps its 1s accept loop either way.
+        let snap = if display.due(now) {
+            let snap = TickSnapshot::collect();
+            if let Some(transition) = display.record(snap.status, now) {
                 hooked_notify_debug_emit(
                     workspace,
                     transition.event(),
                     &[
                         ("team", Value::from(team)),
-                        ("status", Value::from(status)),
+                        ("status", Value::from(snap.status)),
                         ("nextProbeSeconds", Value::from(display.next_in(now))),
                     ],
                 );
             }
-            panes
+            Some(snap).filter(TickSnapshot::reachable)
         } else {
             None
         };
-        let tick_members = panes.as_deref().map(|panes| {
-            let tick_members = hooked_team_member_bindings(team).unwrap_or_default();
+        let tick_members = snap.as_ref().map(|snap| {
+            let tick_members = hooked_team_member_bindings(team, snap).unwrap_or_default();
             // Job relabelling and border cosmetics must never take the hived
             // down (the tick fns swallow their own failures).
             claude_name_tick(&tick_members, team, &mut claude_view_state);
@@ -470,7 +470,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
                 team,
                 &tick_members,
                 &mut claude_view_state,
-                panes,
+                &snap.panes,
             );
             status_tick(
                 workspace,
@@ -478,7 +478,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
                 busy_monitor.as_deref(),
                 &mut status_state,
                 now_epoch_seconds(),
-                panes,
+                snap,
             );
             tick_members
         });
@@ -498,7 +498,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             break;
         }
 
-        if let Some(tick_members) = tick_members.as_deref() {
+        if let (Some(snap), Some(tick_members)) = (snap.as_ref(), tick_members.as_deref()) {
             idle_notify_tick(
                 team,
                 &session_target,
@@ -508,6 +508,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
                 workspace,
                 Some(&mut notify_debug_state),
                 Some(tick_members),
+                snap,
             );
         }
     }

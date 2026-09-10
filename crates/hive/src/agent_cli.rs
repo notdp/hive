@@ -436,12 +436,27 @@ fn adapter_for(name: &str) -> Option<Box<dyn SessionAdapter>> {
 /// engine still counts as a live claude. Any probe failure fails closed to
 /// None.
 pub fn detect_cli_process_for_pane(pane_id: &str) -> Option<&'static CLIProfile> {
-    let profile = get_profile(&pane_current_command(pane_id).unwrap_or_default());
-    if profile.is_some() {
-        return profile;
+    let command = pane_current_command(pane_id).unwrap_or_default();
+    if let Some(profile) = get_profile(&command) {
+        return Some(profile);
     }
     let tty = pane_tty(pane_id).unwrap_or_default();
-    for process in tty_processes(&tty) {
+    detect_cli_process(pane_id, &command, &tty_processes(&tty))
+}
+
+/// `detect_cli_process_for_pane` over evidence already in hand — the pane's
+/// current command and the processes on its tty — for a caller that read
+/// both once for every pane (the hived's tick snapshot) instead of probing
+/// per pane. Same matchers, same claude engine fallback.
+pub fn detect_cli_process(
+    pane_id: &str,
+    command: &str,
+    processes: &[crate::tmux::TTYProcessInfo],
+) -> Option<&'static CLIProfile> {
+    if let Some(profile) = get_profile(command) {
+        return Some(profile);
+    }
+    for process in processes {
         if let Some(profile) = detect_profile_from_process(&process.command, &process.argv) {
             return Some(profile);
         }
