@@ -25,13 +25,21 @@ behavior is documented in the modules themselves.
   brings an archive back as a new instance (a new `createdAt`). Cold means
   positively seen idle: no window, no engine alive, no hived answering
   with a busy or alive member, no unfinished node operation; tmux or a
-  ledger not answering blocks, never counts as idle. The cold clock is
+  ledger not answering, an unreadable record, an engine the collector
+  cannot ask — each blocks, never counts as idle. The cold clock is
   `gc.coldSince` on the entry, cleared by any use (`Team::load` under a
-  mutating verb) and by `gc.keep`; the collector runs at the tail of a
-  mutating verb at most once a day (`$HIVE_HOME/state/gc/last-attempt`).
-  A member mid-turn refuses a plain `hive delete` (the caller's own
-  member excepted); `--down` retires it. The store lock is
-  `$HIVE_HOME/teams/.lock`. tmux is display, resolved on top of it, and a
+  mutating verb), by `gc.keep` and by a blocked run; the collector runs at
+  the tail of a mutating verb at most once a day per hive home
+  (`$HIVE_HOME/state/gc/last-attempt`, under the store lock). Archiving is
+  a closed transaction: `gc.closing = {at, by}` on the entry first, which
+  `Team::load` and the registry's write lane refuse to admit work into
+  while fresh (120s), then a graceful hived stop, a second look, and the
+  archive under the store lock only on the same instance and intent; every
+  trash transition re-reads the manifest under that lock and never follows
+  a symlink. A member mid-turn refuses a plain `hive delete` (the caller's
+  own member excepted); `--down` retires it; `--delete-workspace` refuses
+  an external workspace another live team records or a symlinked one. The
+  store lock is `$HIVE_HOME/teams/.lock`. tmux is display, resolved on top of it, and a
   pane or a window is not the authority on who is on a team. The orch
   mirror is display state of the same kind: `@hive-role mirror` on the
   pane, `@hive-mirror on|off` on the team window (`hive mirror`; unset

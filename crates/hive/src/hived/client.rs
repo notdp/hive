@@ -19,6 +19,11 @@ use super::*;
 /// dispatch) must not take `AnswerLost` for a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RequestFailure {
+    /// No socket, or a socket file nobody listens on (a hived that died
+    /// without cleaning up): there is no hived to ask.
+    NoListener,
+    /// The request never reached a hived, for a reason that is not
+    /// "nobody there" (a permission error, a failed timeout or write).
     NotSent(String),
     AnswerLost(String),
 }
@@ -30,14 +35,16 @@ pub(crate) fn request_hived_answer(
 ) -> Result<Map<String, Value>, RequestFailure> {
     let path = socket_path(workspace);
     if !path.exists() {
-        return Err(RequestFailure::NotSent(format!(
-            "no hived socket at {}",
-            path.display()
-        )));
+        return Err(RequestFailure::NoListener);
     }
     let dur = Some(Duration::from_secs_f64(timeout.max(0.001)));
     let not_sent = |e: std::io::Error| RequestFailure::NotSent(e.to_string());
-    let mut client = UnixStream::connect(&path).map_err(not_sent)?;
+    let mut client = UnixStream::connect(&path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound => {
+            RequestFailure::NoListener
+        }
+        _ => not_sent(e),
+    })?;
     client.set_read_timeout(dur).map_err(not_sent)?;
     client.set_write_timeout(dur).map_err(not_sent)?;
     let mut body = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
@@ -300,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_hived_answer_is_not_sent_without_a_socket() {
+    fn test_request_hived_answer_finds_no_listener_without_a_socket() {
         let run_tmp = tempfile::Builder::new()
             .prefix("hrq")
             .tempdir_in("/tmp")
@@ -311,13 +318,18 @@ mod tests {
             ..Default::default()
         });
         let err = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 0.5).unwrap_err();
-        assert!(
-            matches!(&err, RequestFailure::NotSent(reason) if reason.contains("no hived socket")),
-            "{err:?}"
-        );
+        assert!(matches!(err, RequestFailure::NoListener), "{err:?}");
 
-        // A socket file nobody listens on: the connect fails, nothing was sent.
-        let _ = std::fs::write(run_tmp.path().join("hived.sock"), "");
+        // A socket nobody listens on (a hived that died without cleaning up).
+        let socket = run_tmp.path().join("hived.sock");
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        let err = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 0.5).unwrap_err();
+        assert!(matches!(err, RequestFailure::NoListener), "{err:?}");
+
+        // A regular file where the socket should be is neither a hived nor
+        // "nobody listens": unsent, with the reason kept.
+        std::fs::remove_file(&socket).unwrap();
+        std::fs::write(&socket, "").unwrap();
         let err = request_hived_answer("/tmp/ws-x", &action_payload("ping"), 0.5).unwrap_err();
         assert!(matches!(err, RequestFailure::NotSent(_)), "{err:?}");
     }

@@ -222,6 +222,20 @@ fn write(path: &Path, identity: &WindowIdentity, stored: &Stored) -> bool {
     written
 }
 
+/// A restored team is a new instance under a possibly new name: the
+/// arrangement its archive kept (drag and mirror choice) follows it.
+/// Nothing happens when the file is not *old*'s.
+pub(crate) fn rebind(old: &WindowIdentity, new: &WindowIdentity) {
+    let Some(path) = old.path() else {
+        return;
+    };
+    let stored = read(&path, &old.instance);
+    if stored.mirror.is_none() && stored.drag.is_none() {
+        return;
+    }
+    write(&path, new, &stored);
+}
+
 /// The remembered drag of *identity*'s window, if any.
 pub(crate) fn drag(identity: &WindowIdentity) -> Option<Drag> {
     read(&identity.path()?, &identity.instance).drag

@@ -1,7 +1,9 @@
 //! tmux control-mode output parsing and the pane-activity monitor.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::os::unix::io::RawFd;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -351,36 +353,193 @@ fn next_restart_delay(previous: Option<f64>, ran_for_secs: f64) -> f64 {
     }
 }
 
-/// Control clients of *session_target* that nobody owns any more, from a
-/// `ps -axo pid=,ppid=,command=` listing: a hived killed with SIGKILL
-/// leaves its `tmux -C attach` child reparented to pid 1, attached forever.
-/// Only a process whose argv is exactly the one `monitor_run_once` spawns
-/// and whose parent is pid 1 matches — a human's own control client keeps
-/// its shell as parent, and a live hived's keeps the hived.
-pub(crate) fn orphan_control_client_pids(ps_output: &str, session_target: &str) -> Vec<i32> {
-    let wanted = format!("tmux -C attach -t {session_target}");
-    ps_output
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split_whitespace();
-            let pid: i32 = parts.next()?.parse().ok()?;
-            let ppid: i32 = parts.next()?.parse().ok()?;
-            let command = parts.collect::<Vec<_>>().join(" ");
-            (ppid == 1 && command == wanted).then_some(pid)
+/// One control client this workspace's hived spawned: its pid, its birth
+/// as `ps lstart` reports it (whitespace-normalized) and the session it
+/// attached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ControlClientRow {
+    pub pid: i32,
+    pub started: String,
+    pub session: String,
+}
+
+/// `<run dir>/control-clients.json`: the control clients this workspace's
+/// hived spawned, for the reaper of the next one. A hived killed with
+/// SIGKILL leaves its `tmux -C attach` child reparented to pid 1, attached
+/// forever; the next hived reaps it — but only a process the ledger names,
+/// whose birth time and argv are still the ledger's, and whose parent is
+/// pid 1. A pid alone is not identity (pids are reused) and a matching
+/// argv alone is not ownership (a human's control client on a same-named
+/// session of another server looks the same): what the ledger does not
+/// vouch for is reported, never killed.
+fn control_client_ledger_path(workspace: &str) -> PathBuf {
+    crate::hived::run_dir_impl(workspace).join("control-clients.json")
+}
+
+fn read_control_client_ledger(path: &Path) -> Vec<ControlClientRow> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(serde_json::Value::Array(rows)) = serde_json::from_str::<serde_json::Value>(&text)
+    else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let row = row.as_object()?;
+            Some(ControlClientRow {
+                pid: i32::try_from(row.get("pid")?.as_i64()?).ok()?,
+                started: row.get("started")?.as_str()?.to_string(),
+                session: row.get("session")?.as_str()?.to_string(),
+            })
         })
         .collect()
 }
 
+/// Write the ledger by atomic rename; an empty ledger removes the file.
+fn write_control_client_ledger(path: &Path, rows: &[ControlClientRow]) {
+    if rows.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let doc: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row| {
+            serde_json::json!({"pid": row.pid, "started": row.started, "session": row.session})
+        })
+        .collect();
+    let Ok((mut file, tmp)) = crate::paths::mkstemp_in(parent, ".control-clients.", ".tmp") else {
+        return;
+    };
+    let mut text = serde_json::to_string_pretty(&serde_json::Value::Array(doc)).unwrap_or_default();
+    text.push('\n');
+    if file
+        .write_all(text.as_bytes())
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .is_err()
+    {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// A process's birth as `ps` reports it (`lstart`), whitespace-normalized;
+/// None when the process is gone already.
+pub(crate) fn process_birth(pid: i32) -> Option<String> {
+    let out = Command::new("ps")
+        .args(["-o", "lstart=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let started = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!started.is_empty()).then_some(started)
+}
+
+fn record_control_client(workspace: &str, session_target: &str, pid: i32) {
+    let Some(started) = process_birth(pid) else {
+        return;
+    };
+    let path = control_client_ledger_path(workspace);
+    let mut rows = read_control_client_ledger(&path);
+    rows.retain(|row| row.pid != pid);
+    rows.push(ControlClientRow {
+        pid,
+        started,
+        session: session_target.to_string(),
+    });
+    write_control_client_ledger(&path, &rows);
+}
+
+fn forget_control_client(workspace: &str, pid: i32) {
+    let path = control_client_ledger_path(workspace);
+    let rows = read_control_client_ledger(&path);
+    if rows.iter().any(|row| row.pid == pid) {
+        let kept: Vec<ControlClientRow> = rows.into_iter().filter(|row| row.pid != pid).collect();
+        write_control_client_ledger(&path, &kept);
+    }
+}
+
+/// One `ps -axo pid=,ppid=,lstart=,command=` line: pid, ppid, the
+/// five-token birth, the argv.
+fn parse_ps_line(line: &str) -> Option<(i32, i32, String, String)> {
+    let mut parts = line.split_whitespace();
+    let pid: i32 = parts.next()?.parse().ok()?;
+    let ppid: i32 = parts.next()?.parse().ok()?;
+    let started: Vec<&str> = parts.by_ref().take(5).collect();
+    if started.len() < 5 {
+        return None;
+    }
+    let command = parts.collect::<Vec<_>>().join(" ");
+    Some((pid, ppid, started.join(" "), command))
+}
+
+/// What the reaper does with the ledger against a listing.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct OrphanVerdict {
+    /// Ledger rows still that very process, reparented to pid 1: reaped.
+    pub reap: Vec<i32>,
+    /// Ledger rows still that process under a living parent (an older
+    /// hived generation's client): kept.
+    pub keep: Vec<ControlClientRow>,
+    /// Reparented control clients of the session the ledger does not
+    /// vouch for: reported only.
+    pub unowned: Vec<i32>,
+}
+
+pub(crate) fn orphan_control_clients(
+    ledger: &[ControlClientRow],
+    ps_output: &str,
+    session_target: &str,
+) -> OrphanVerdict {
+    let wanted = format!("tmux -C attach -t {session_target}");
+    let rows: Vec<(i32, i32, String, String)> =
+        ps_output.lines().filter_map(parse_ps_line).collect();
+    let mut verdict = OrphanVerdict::default();
+    for entry in ledger {
+        let argv = format!("tmux -C attach -t {}", entry.session);
+        let Some((_, ppid, _, _)) = rows.iter().find(|(pid, _, started, command)| {
+            *pid == entry.pid && *started == entry.started && *command == argv
+        }) else {
+            continue; // gone, or another process wearing the pid: dropped
+        };
+        if *ppid == 1 {
+            verdict.reap.push(entry.pid);
+        } else {
+            verdict.keep.push(entry.clone());
+        }
+    }
+    for (pid, ppid, _, command) in &rows {
+        if *ppid == 1 && *command == wanted && !verdict.reap.contains(pid) {
+            verdict.unowned.push(*pid);
+        }
+    }
+    verdict
+}
+
 fn reap_orphan_control_clients(session_target: &str, workspace: &str) {
+    let path = control_client_ledger_path(workspace);
+    let ledger = read_control_client_ledger(&path);
     let Ok(out) = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,command="])
+        .args(["-axo", "pid=,ppid=,lstart=,command="])
         .output()
     else {
         return;
     };
-    for pid in orphan_control_client_pids(&String::from_utf8_lossy(&out.stdout), session_target) {
+    let verdict = orphan_control_clients(
+        &ledger,
+        &String::from_utf8_lossy(&out.stdout),
+        session_target,
+    );
+    for pid in &verdict.reap {
         unsafe {
-            libc::kill(pid, libc::SIGTERM);
+            libc::kill(*pid, libc::SIGTERM);
         }
         crate::notify_debug::emit(
             workspace,
@@ -390,6 +549,19 @@ fn reap_orphan_control_clients(session_target: &str, workspace: &str) {
                 ("pid", serde_json::json!(pid)),
             ],
         );
+    }
+    for pid in &verdict.unowned {
+        crate::notify_debug::emit(
+            workspace,
+            "monitor.orphan_unowned",
+            &[
+                ("session", serde_json::json!(session_target)),
+                ("pid", serde_json::json!(pid)),
+            ],
+        );
+    }
+    if verdict.keep != ledger {
+        write_control_client_ledger(&path, &verdict.keep);
     }
 }
 
@@ -585,6 +757,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         }
     };
     *inner.master_fd.lock().unwrap() = Some(master);
+    record_control_client(&inner.workspace, session_target, child.id() as i32);
     let supports_colours = super::version().is_some_and(|v| v >= super::PANE_COLOUR_REPORT_SINCE);
     let mut colour_reports = PaneColourReports::default();
     let mut panes_dirty = true;
@@ -662,6 +835,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         }
     }
     terminate_child(&mut child);
+    forget_control_client(&inner.workspace, child.id() as i32);
     *inner.master_fd.lock().unwrap() = None;
     unsafe {
         libc::close(master);
@@ -986,17 +1160,85 @@ mod restart_tests {
     }
 
     #[test]
-    fn test_orphan_control_client_pids_matches_only_reparented_clients_with_the_exact_argv() {
-        let ps = "  352     1 tmux -C attach -t osct\n\
-                  13506     1 tmux -C attach -t hornet\n\
-                   3390 53702 tmux -C attach -t hornet\n\
-                   4000     1 tmux -C attach -t hornet -f x\n\
-                   4001     1 tmux attach -t hornet\n\
-                   4002     1 /opt/homebrew/bin/tmux -C attach -t hornet\n\
-                   4003     1 tmux -C attach -t hornet2\n\
+    fn test_orphan_control_clients_reaps_only_ledger_rows_still_born_then_and_reparented() {
+        let ps = "  352     1 Mon Aug  3 12:20:44 2026 tmux -C attach -t osct\n\
+                  13506     1 Mon Aug  3 12:21:00 2026 tmux -C attach -t hornet\n\
+                   3390 53702 Mon Aug  3 12:22:00 2026 tmux -C attach -t hornet\n\
+                   4000     1 Mon Aug  3 12:23:00 2026 tmux -C attach -t hornet -f x\n\
+                   4002     1 Mon Aug  3 12:24:00 2026 /opt/homebrew/bin/tmux -C attach -t hornet\n\
+                    600     1 Mon Aug  3 12:26:00 2026 tmux -C attach -t hornet\n\
+                   7777     1 Mon Aug  3 12:25:00 2026 python3 server.py\n\
                    garbage line\n";
-        assert_eq!(orphan_control_client_pids(ps, "hornet"), vec![13506]);
-        assert_eq!(orphan_control_client_pids(ps, "osct"), vec![352]);
-        assert!(orphan_control_client_pids(ps, "lane").is_empty());
+        let row = |pid: i32, started: &str, session: &str| ControlClientRow {
+            pid,
+            started: started.to_string(),
+            session: session.to_string(),
+        };
+        let ledger = vec![
+            // reparented, still the process born then: reaped
+            row(13506, "Mon Aug 3 12:21:00 2026", "hornet"),
+            // an older hived is still its parent: kept
+            row(3390, "Mon Aug 3 12:22:00 2026", "hornet"),
+            // the pid now wears another process: dropped
+            row(7777, "Mon Aug 3 12:00:00 2026", "hornet"),
+            // gone: dropped
+            row(9999, "Mon Aug 3 11:00:00 2026", "hornet"),
+            // not the argv the monitor spawns: dropped
+            row(4002, "Mon Aug 3 12:24:00 2026", "hornet"),
+        ];
+
+        let verdict = orphan_control_clients(&ledger, ps, "hornet");
+
+        assert_eq!(verdict.reap, vec![13506]);
+        assert_eq!(
+            verdict.keep,
+            vec![row(3390, "Mon Aug 3 12:22:00 2026", "hornet")]
+        );
+        // a reparented client the ledger never saw is reported, not killed
+        assert_eq!(verdict.unowned, vec![600]);
+        // ownership is the ledger's, whatever session this hived attaches;
+        // the unowned candidates are that session's
+        let other = orphan_control_clients(&ledger, ps, "osct");
+        assert_eq!(other.reap, vec![13506]);
+        assert_eq!(other.unowned, vec![352]);
+        assert!(orphan_control_clients(&[], ps, "lane").reap.is_empty());
+        assert!(orphan_control_clients(&[], ps, "lane").unowned.is_empty());
+    }
+
+    #[test]
+    fn test_process_birth_is_what_the_listing_says_of_this_process() {
+        let pid = std::process::id() as i32;
+        let birth = process_birth(pid).expect("this process has a birth");
+        let out = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,lstart=,command="])
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&out.stdout);
+        let row = listing
+            .lines()
+            .filter_map(parse_ps_line)
+            .find(|(p, ..)| *p == pid)
+            .expect("this process is listed");
+        assert_eq!(row.2, birth);
+        assert!(process_birth(i32::MAX - 7).is_none());
+    }
+
+    #[test]
+    fn test_control_client_ledger_round_trips_and_an_empty_one_removes_the_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("run").join("control-clients.json");
+        let rows = vec![ControlClientRow {
+            pid: 42,
+            started: "Mon Aug 3 12:21:00 2026".to_string(),
+            session: "hornet".to_string(),
+        }];
+        write_control_client_ledger(&path, &rows);
+        assert_eq!(read_control_client_ledger(&path), rows);
+        write_control_client_ledger(&path, &[]);
+        assert!(!path.exists());
+        assert!(read_control_client_ledger(&path).is_empty());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "not json").unwrap();
+        assert!(read_control_client_ledger(&path).is_empty());
     }
 }

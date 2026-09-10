@@ -122,7 +122,7 @@ fn hived_answer(
                 "{command_name}: answer lost ({reason})"
             )))
         }
-        Err(RequestFailure::NotSent(_)) => {
+        Err(RequestFailure::NoListener) | Err(RequestFailure::NotSent(_)) => {
             return Err(DispatchFailure::Refused(
                 crate::devlog::hived_unavailable_message(std::path::Path::new(workspace)),
             ))

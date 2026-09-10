@@ -10,16 +10,29 @@
 //! purges at once, `--keep-workspace` archives with no purge date). The
 //! name is free the moment the entry leaves the registry: the trash
 //! reserves nothing, and `hive gc restore` brings an archive back as a new
-//! team instance under its old name or another. The collector archives
-//! only what it has positively seen idle: tmux not answering, a claude
-//! ledger call failing, a hived that holds the socket but does not answer,
-//! an unfinished node operation — each blocks the team until it clears.
+//! team instance under its old name or another.
+//!
+//! The collector archives only what it has positively seen idle, and only
+//! what it has closed first: an expired team gets a *close intent* on its
+//! entry (`gc.closing`, under the store lock), which every hive writer
+//! refuses to admit work into (`Team::load`, the registry's write lane);
+//! its hived is asked to stop gracefully (a pending node result declines);
+//! the team is classified once more; and the archive commits under the
+//! lock only if the entry is still the instance the intent was written on.
+//! tmux not answering, a ledger call failing, a hived that listens and
+//! stays silent, an unreadable or unfinished node record — each blocks the
+//! team until it clears. Every manifest transition (quarantine, keep,
+//! restore, purge) re-reads the manifest under the same lock before it
+//! moves anything. Manifests and entries are written by atomic rename
+//! without fsync, like every registry write: a power cut can lose the last
+//! transition, and the next run repairs what a manifest then says.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
@@ -32,6 +45,16 @@ pub const COLD_AFTER_SECONDS: f64 = 30.0 * 86400.0;
 pub const TRASH_AFTER_SECONDS: f64 = 30.0 * 86400.0;
 /// The tail of a mutating verb runs the collector at most this often.
 pub const AUTO_INTERVAL_SECONDS: f64 = 86400.0;
+/// A close intent older than this is a crashed collector's, not a gate.
+pub const CLOSING_TTL_SECONDS: f64 = 120.0;
+/// The tail of a verb spends at most this long collecting; what it did not
+/// reach waits for the next run.
+pub const AUTO_BUDGET_SECONDS: f64 = 20.0;
+/// A payload written this long after it was quarantined is in use: its
+/// purge date moves out by `TRASH_AFTER_SECONDS` from the write.
+const RECENT_WRITE_SLACK_SECONDS: f64 = 60.0;
+const EVENTS_MAX_BYTES: u64 = 1 << 20;
+const EVENTS_KEEP_LINES: usize = 1000;
 
 const MANIFEST: &str = "manifest.json";
 const PAYLOAD: &str = "payload";
@@ -97,17 +120,27 @@ fn created_at_string(entry: &Map<String, Value>) -> String {
     }
 }
 
-fn member_names(entry: &Map<String, Value>) -> Vec<String> {
+fn member_rows(entry: &Map<String, Value>) -> Vec<Map<String, Value>> {
     entry
         .get("members")
         .and_then(Value::as_array)
-        .map(|rows| {
-            rows.iter()
-                .filter_map(Value::as_object)
-                .map(|m| map_str(m, "name"))
-                .filter(|n| !n.is_empty())
-                .collect()
-        })
+        .map(|rows| rows.iter().filter_map(Value::as_object).cloned().collect())
+        .unwrap_or_default()
+}
+
+fn member_names(entry: &Map<String, Value>) -> Vec<String> {
+    member_rows(entry)
+        .iter()
+        .map(|m| map_str(m, "name"))
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+fn gc_object(entry: &Map<String, Value>) -> Map<String, Value> {
+    entry
+        .get("gc")
+        .and_then(Value::as_object)
+        .cloned()
         .unwrap_or_default()
 }
 
@@ -127,6 +160,39 @@ fn write_atomic(path: &Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// A real directory at *path* — not a symlink to one, which a destructive
+/// step must never follow out of the trash.
+fn real_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
+}
+
+/// The newest modification time under *path* (symlinks not followed).
+fn newest_mtime(path: &Path) -> Option<f64> {
+    let mut newest: Option<f64> = None;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.filter_map(|e| e.ok()) {
+            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if let Ok(modified) = meta.modified() {
+                let secs = modified
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                newest = Some(newest.map_or(secs, |n: f64| n.max(secs)));
+            }
+            if meta.file_type().is_dir() {
+                stack.push(entry.path());
+            }
+        }
+    }
+    newest
+}
+
 // ---------------------------------------------------------------------------
 // archives
 // ---------------------------------------------------------------------------
@@ -144,12 +210,14 @@ pub(crate) struct Archive {
     /// `delete` or `expired`.
     pub origin: String,
     /// `preparing` (manifest written, directory not yet moved),
-    /// `quarantined`, `purging`.
+    /// `quarantined`, `restoring` (a restore under way; `restore_as` names
+    /// its target), `purging`.
     pub state: String,
     pub quarantined_at: f64,
     /// None keeps the archive.
     pub purge_after: Option<f64>,
     pub members: Vec<String>,
+    pub restore_as: String,
 }
 
 impl Archive {
@@ -166,7 +234,7 @@ impl Archive {
     }
 
     fn to_value(&self) -> Value {
-        json!({
+        let mut doc = json!({
             "schema": SCHEMA,
             "archiveId": self.id,
             "team": self.team,
@@ -177,7 +245,11 @@ impl Archive {
             "quarantinedAt": self.quarantined_at,
             "purgeAfter": self.purge_after,
             "members": self.members,
-        })
+        });
+        if !self.restore_as.is_empty() {
+            doc["restoreAs"] = Value::from(self.restore_as.as_str());
+        }
+        doc
     }
 
     fn from_value(doc: &Value) -> Option<Archive> {
@@ -187,7 +259,7 @@ impl Archive {
         }
         let text = |key: &str| map_str(doc, key);
         let id = text("archiveId");
-        if id.is_empty() || id.contains(['/', '\\', '.']) {
+        if !archive_id_ok(&id) {
             return None;
         }
         Some(Archive {
@@ -212,6 +284,7 @@ impl Archive {
                         .collect()
                 })
                 .unwrap_or_default(),
+            restore_as: text("restoreAs"),
         })
     }
 
@@ -222,35 +295,66 @@ impl Archive {
     }
 }
 
+fn archive_id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn read_archive(dir: &Path) -> Option<Archive> {
-    let text = fs::read_to_string(dir.join(MANIFEST)).ok()?;
+    if !real_dir(dir) {
+        return None;
+    }
+    let manifest = dir.join(MANIFEST);
+    if fs::symlink_metadata(&manifest).is_ok_and(|m| m.file_type().is_symlink()) {
+        return None;
+    }
+    let text = fs::read_to_string(&manifest).ok()?;
     let doc: Value = serde_json::from_str(&text).ok()?;
     let archive = Archive::from_value(&doc)?;
     (dir.file_name().and_then(|n| n.to_str()) == Some(archive.id.as_str())).then_some(archive)
 }
 
-/// Every readable archive, oldest first.
-pub(crate) fn list_archives() -> Vec<Archive> {
+/// Every readable archive, oldest first, and the names of the trash
+/// entries that are not one (a symlink, a directory without a readable
+/// manifest): reported, never touched.
+fn list_trash() -> (Vec<Archive>, Vec<String>) {
     let Ok(read) = fs::read_dir(trash_dir()) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
-    let mut archives: Vec<Archive> = read
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .filter_map(|dir| read_archive(&dir))
-        .collect();
+    let mut archives = Vec::new();
+    let mut corrupt = Vec::new();
+    for entry in read.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        match read_archive(&path) {
+            Some(archive) => archives.push(archive),
+            None => corrupt.push(name),
+        }
+    }
     archives.sort_by(|a, b| {
         a.quarantined_at
             .partial_cmp(&b.quarantined_at)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.id.cmp(&b.id))
     });
-    archives
+    corrupt.sort();
+    (archives, corrupt)
+}
+
+/// Every readable archive, oldest first.
+#[cfg(test)]
+pub(crate) fn list_archives() -> Vec<Archive> {
+    list_trash().0
 }
 
 pub(crate) fn archive(id: &str) -> Option<Archive> {
-    if id.is_empty() || id.contains(['/', '\\', '.']) {
+    if !archive_id_ok(id) {
         return None;
     }
     read_archive(&trash_dir().join(id))
@@ -263,6 +367,9 @@ fn new_archive_id() -> String {
         .collect()
 }
 
+/// Append one event line; a log past `EVENTS_MAX_BYTES` keeps its last
+/// `EVENTS_KEEP_LINES` lines — the manifests are the record, this is the
+/// narrative.
 fn append_event(event: &str, archive: &Archive, extra: &[(&str, Value)]) {
     let mut row = Map::new();
     row.insert("event".to_string(), Value::from(event));
@@ -280,21 +387,51 @@ fn append_event(event: &str, archive: &Archive, extra: &[(&str, Value)]) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    if fs::metadata(&path).is_ok_and(|m| m.len() > EVENTS_MAX_BYTES) {
+        if let Ok(text) = fs::read_to_string(&path) {
+            let lines: Vec<&str> = text.lines().collect();
+            let keep = lines.len().saturating_sub(EVENTS_KEEP_LINES);
+            let mut trimmed = lines[keep..].join("\n");
+            trimmed.push('\n');
+            let _ = write_atomic(&path, &trimmed);
+        }
+    }
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
         let _ = writeln!(file, "{}", Value::Object(row));
     }
+}
+
+/// What an archive must still be for a collector's archive to commit: the
+/// instance it classified and the close intent it wrote.
+pub(crate) struct Expected {
+    pub created_at: String,
+    pub closing_by: String,
 }
 
 /// Move *team* out of the registry into the trash: its directory becomes
 /// the archive's payload (the entry with it — that is what ends the team),
 /// an external workspace is only recorded, never moved. The name is free
 /// on return. *keep* gives the archive no purge date, else it is *at* plus
-/// `TRASH_AFTER_SECONDS`. The caller has stopped what ran for the team;
-/// nothing here does.
-pub(crate) fn archive_team(team: &str, origin: &str, keep: bool, at: f64) -> Result<Archive> {
+/// `TRASH_AFTER_SECONDS`. With *expected*, the entry must still be that
+/// instance under that close intent, and not kept, or nothing moves. The
+/// caller has stopped what ran for the team; nothing here does.
+pub(crate) fn archive_team(
+    team: &str,
+    origin: &str,
+    keep: bool,
+    at: f64,
+    expected: Option<&Expected>,
+) -> Result<Archive> {
     let dir = crate::registry::team_dir(team).ok_or_else(|| anyhow!("unsafe team name"))?;
     let _lock = crate::registry::locked()?;
     let entry = crate::registry::load(team).ok_or_else(|| anyhow!("team '{team}' not found"))?;
+    if let Some(expected) = expected {
+        let same_instance = created_at_string(&entry) == expected.created_at;
+        let our_intent = closing_of(&entry).is_some_and(|(_, by)| by == expected.closing_by);
+        if !same_instance || !our_intent || is_kept(&entry) {
+            bail!("team '{team}' changed while the collector was closing it; left alone");
+        }
+    }
     let ws = map_str(&entry, "workspace");
     let external = if ws.is_empty() || Path::new(&crate::paths::expanduser(&ws)) == dir.as_path() {
         String::new()
@@ -311,6 +448,7 @@ pub(crate) fn archive_team(team: &str, origin: &str, keep: bool, at: f64) -> Res
         quarantined_at: at,
         purge_after: (!keep).then_some(at + TRASH_AFTER_SECONDS),
         members: member_names(&entry),
+        restore_as: String::new(),
     };
     fs::create_dir_all(archive.dir())?;
     archive.write()?;
@@ -324,34 +462,118 @@ pub(crate) fn archive_team(team: &str, origin: &str, keep: bool, at: f64) -> Res
     Ok(archive)
 }
 
-/// Remove the archive for good: the manifest says `purging` first, so a
-/// crash mid-way is finished by the next run and never restored.
-pub(crate) fn purge_archive(archive: &Archive) -> Result<()> {
-    let mut purging = archive.clone();
-    purging.state = "purging".to_string();
-    purging.write()?;
-    let payload = archive.payload();
-    if payload.symlink_metadata().is_ok() {
-        fs::remove_dir_all(&payload)?;
-    }
-    fs::remove_dir_all(archive.dir())?;
-    append_event("purged", archive, &[]);
-    Ok(())
+/// What one purge attempt did.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Purge {
+    Purged,
+    /// Something wrote into the payload after it was quarantined: the
+    /// purge date moved to the new time.
+    Deferred(f64),
+    /// The manifest no longer says what the caller saw.
+    Skipped(&'static str),
 }
 
-/// A `preparing` archive left by a crash: the directory moved, the
-/// manifest did not follow — commit it; the directory never moved — the
-/// team is still live, drop the empty archive.
-fn repair_preparing(archive: &Archive) -> Result<&'static str> {
-    if archive.payload().is_dir() {
-        let mut fixed = archive.clone();
-        fixed.state = "quarantined".to_string();
-        fixed.write()?;
-        append_event("quarantined", &fixed, &[("repaired", Value::Bool(true))]);
-        return Ok("quarantined");
+/// Remove the archive for good, from what the manifest says now: under
+/// the store lock it must be `quarantined` past its purge date (or a
+/// `purging` left by a crash, finished here); the manifest says `purging`
+/// before anything goes, so a crash mid-way is finished by the next run
+/// and never restored. A payload written since it was quarantined is in
+/// use: deferred, not purged.
+pub(crate) fn purge_archive(id: &str, now: f64) -> Result<Purge> {
+    let archive = {
+        let _lock = crate::registry::locked()?;
+        let Some(mut archive) = self::archive(id) else {
+            return Ok(Purge::Skipped("no such archive"));
+        };
+        match archive.state.as_str() {
+            "purging" => {}
+            "quarantined" => {
+                let Some(due) = archive.purge_after.filter(|due| *due <= now) else {
+                    return Ok(Purge::Skipped("not due"));
+                };
+                let newest = newest_mtime(&archive.payload()).unwrap_or(0.0);
+                if newest > archive.quarantined_at + RECENT_WRITE_SLACK_SECONDS && newest > due {
+                    archive.purge_after = Some(newest + TRASH_AFTER_SECONDS);
+                    archive.write()?;
+                    append_event("deferred", &archive, &[("writtenAt", Value::from(newest))]);
+                    return Ok(Purge::Deferred(newest + TRASH_AFTER_SECONDS));
+                }
+                archive.state = "purging".to_string();
+                archive.write()?;
+            }
+            _ => return Ok(Purge::Skipped("not quarantined")),
+        }
+        archive
+    };
+    let payload = archive.payload();
+    if fs::symlink_metadata(&payload).is_ok() {
+        if !real_dir(&payload) {
+            bail!("archive {id}: payload is not a directory; left alone");
+        }
+        fs::remove_dir_all(&payload)?;
     }
-    fs::remove_dir_all(archive.dir())?;
-    Ok("dropped")
+    let _lock = crate::registry::locked()?;
+    if real_dir(&archive.dir()) {
+        fs::remove_dir_all(archive.dir())?;
+    }
+    append_event("purged", &archive, &[]);
+    Ok(Purge::Purged)
+}
+
+/// An archive a crash left mid-transition, under the store lock: a
+/// `preparing` whose directory moved is committed (its clock restarted
+/// from now — the interrupted transaction earns the full window), one
+/// whose directory never moved is dropped; a `restoring` whose target
+/// published is finished, one whose payload is still here goes back to
+/// `quarantined`.
+fn repair(id: &str, now: f64) -> Result<&'static str> {
+    let _lock = crate::registry::locked()?;
+    let Some(mut archive) = archive(id) else {
+        return Ok("gone");
+    };
+    match archive.state.as_str() {
+        "preparing" => {
+            if real_dir(&archive.payload()) {
+                archive.state = "quarantined".to_string();
+                archive.quarantined_at = now;
+                if !archive.kept() {
+                    archive.purge_after = Some(now + TRASH_AFTER_SECONDS);
+                }
+                archive.write()?;
+                append_event("quarantined", &archive, &[("repaired", Value::Bool(true))]);
+                Ok("quarantined")
+            } else {
+                fs::remove_dir_all(archive.dir())?;
+                Ok("dropped")
+            }
+        }
+        "restoring" => {
+            let published = crate::registry::team_dir(&archive.restore_as)
+                .and_then(|dir| crate::registry::load_at(&dir.join("team.json")))
+                .is_some_and(|entry| entry["restoredFrom"]["archiveId"] == archive.id.as_str());
+            if published {
+                fs::remove_dir_all(archive.dir())?;
+                append_event(
+                    "restored",
+                    &archive,
+                    &[
+                        ("as", Value::from(archive.restore_as.as_str())),
+                        ("repaired", Value::Bool(true)),
+                    ],
+                );
+                Ok("restored")
+            } else if real_dir(&archive.payload()) {
+                archive.state = "quarantined".to_string();
+                archive.restore_as = String::new();
+                archive.write()?;
+                Ok("quarantined")
+            } else {
+                fs::remove_dir_all(archive.dir())?;
+                Ok("dropped")
+            }
+        }
+        _ => Ok("unchanged"),
+    }
 }
 
 /// What `restore_archive` did.
@@ -366,10 +588,16 @@ pub(crate) struct Restored {
 /// a callback the old instance left behind never lands on it — under its
 /// old name or *as_name*. Refused when the name is in use (a live team, or
 /// a leftover directory) or a member's engine session is bound to a live
-/// team: nothing is taken from anyone. Data only: no engine starts, the
-/// display is built by the next attach.
+/// team: nothing is taken from anyone. Under the store lock throughout:
+/// the manifest is re-read and must be `quarantined`; it says `restoring`
+/// and the new entry is written into the payload before the directory
+/// moves, so a failure publishes nothing (`repair` finishes or reverts
+/// what a crash leaves). Data only: no engine starts, the display is built
+/// by the next attach. The arrangement the archive kept follows the team
+/// to its new instance.
 pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restored> {
-    let archive =
+    let _lock = crate::registry::locked()?;
+    let mut archive =
         archive(id).ok_or_else(|| anyhow!("no archive '{id}' (see `hive gc run --dry-run`)"))?;
     if archive.state != "quarantined" {
         bail!("archive {id} is {}; not restorable", archive.state);
@@ -381,14 +609,16 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
     }
     let target = crate::registry::team_dir(name).ok_or_else(|| anyhow!("unsafe team name"))?;
     let payload = archive.payload();
+    if !real_dir(&payload) {
+        bail!("archive {id} has no payload directory");
+    }
     let entry_path = payload.join("team.json");
     let text = fs::read_to_string(&entry_path)
         .map_err(|e| anyhow!("archive {id} has no readable team.json: {e}"))?;
     let Value::Object(mut entry) = serde_json::from_str::<Value>(&text)? else {
         bail!("archive {id}: team.json is not an object");
     };
-    let _lock = crate::registry::locked()?;
-    if target.symlink_metadata().is_ok() {
+    if fs::symlink_metadata(&target).is_ok() {
         bail!(
             "name '{name}' is in use ({}); pass --as <name>",
             if crate::registry::load(name).is_some() {
@@ -398,30 +628,24 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
             }
         );
     }
-    for member in entry
-        .get("members")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(Value::as_object)
-    {
-        let sid = map_str(member, "sessionId");
+    for member in member_rows(&entry) {
+        let sid = map_str(&member, "sessionId");
         if sid.is_empty() {
             continue;
         }
-        let cli = map_str(member, "cli");
+        let cli = map_str(&member, "cli");
         if let Some((other_team, other)) =
             crate::registry::member_for_session(&sid, Some(cli.as_str()))
         {
             bail!(
                 "member '{}' rides session {sid}, which is bound to {other_team}.{other}; \
                  restore refuses to take it",
-                map_str(member, "name")
+                map_str(&member, "name")
             );
         }
     }
     let at = now();
+    let old_instance = created_at_string(&entry);
     let mut restored_from = Map::new();
     restored_from.insert("archiveId".to_string(), Value::from(archive.id.as_str()));
     restored_from.insert("team".to_string(), Value::from(archive.team.as_str()));
@@ -430,8 +654,9 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
         Value::from(archive.created_at.as_str()),
     );
     restored_from.insert("restoredAt".to_string(), Value::from(at));
+    let new_instance = format!("{at}");
     entry.insert("team".to_string(), Value::from(name));
-    entry.insert("createdAt".to_string(), Value::from(format!("{at}")));
+    entry.insert("createdAt".to_string(), Value::from(new_instance.as_str()));
     entry.insert("display".to_string(), Value::from(""));
     if archive.workspace.is_empty() {
         entry.insert(
@@ -441,9 +666,37 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
     }
     entry.insert("gc".to_string(), json!({"keep": false, "coldSince": null}));
     entry.insert("restoredFrom".to_string(), Value::Object(restored_from));
-    fs::rename(&payload, &target)
-        .map_err(|e| anyhow!("cannot move the archive back to {}: {e}", target.display()))?;
-    crate::registry::write_entry_file(&target.join("team.json"), &entry)?;
+    // The intent, then the new entry inside the payload, then the move:
+    // a failure anywhere before the move publishes nothing.
+    archive.state = "restoring".to_string();
+    archive.restore_as = name.to_string();
+    archive.write()?;
+    let revert = |archive: &mut Archive| {
+        archive.state = "quarantined".to_string();
+        archive.restore_as = String::new();
+        let _ = archive.write();
+    };
+    if let Err(e) = crate::registry::write_entry_file(&entry_path, &entry) {
+        revert(&mut archive);
+        return Err(anyhow!("cannot write the restored entry: {e}"));
+    }
+    if let Err(e) = fs::rename(&payload, &target) {
+        revert(&mut archive);
+        return Err(anyhow!(
+            "cannot move the archive back to {}: {e}",
+            target.display()
+        ));
+    }
+    let workspace = if archive.workspace.is_empty() {
+        target.to_string_lossy().into_owned()
+    } else {
+        archive.workspace.clone()
+    };
+    crate::layout::rebind_arrangement(
+        &workspace,
+        (&archive.team, &old_instance),
+        (name, &new_instance),
+    );
     let _ = fs::remove_dir_all(archive.dir());
     append_event("restored", &archive, &[("as", Value::from(name))]);
     Ok(Restored {
@@ -459,16 +712,13 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
 pub(crate) fn set_keep(target: &str, on: bool) -> Result<String> {
     if crate::registry::load(target).is_some() {
         let written = crate::registry::update_entry(target, |entry| {
-            let mut gc = entry
-                .get("gc")
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default();
+            let mut gc = gc_object(entry);
             gc.insert("keep".to_string(), Value::Bool(on));
             if !on {
                 gc.insert("coldSince".to_string(), Value::Null);
             }
             entry.insert("gc".to_string(), Value::Object(gc));
+            true
         })?;
         if !written {
             bail!("team '{target}' vanished while writing");
@@ -482,6 +732,7 @@ pub(crate) fn set_keep(target: &str, on: bool) -> Result<String> {
             }
         ));
     }
+    let _lock = crate::registry::locked()?;
     let Some(mut archive) = archive(target) else {
         bail!("no team or archive named '{target}' (see `hive ls`, `hive gc run --dry-run`)");
     };
@@ -499,6 +750,56 @@ pub(crate) fn set_keep(target: &str, on: bool) -> Result<String> {
             date(at)
         ),
     })
+}
+
+// ---------------------------------------------------------------------------
+// the close intent
+// ---------------------------------------------------------------------------
+
+/// `gc.closing` on an entry: `(at, by)`.
+fn closing_of(entry: &Map<String, Value>) -> Option<(f64, String)> {
+    let closing = gc_object(entry).get("closing")?.as_object()?.clone();
+    Some((
+        closing.get("at").and_then(Value::as_f64)?,
+        map_str(&closing, "by"),
+    ))
+}
+
+/// Whether a collector is closing this team right now: a fresh
+/// `gc.closing`. Every hive writer refuses to admit work into such a team
+/// (`Team::load`, the registry's write lane); an intent older than
+/// `CLOSING_TTL_SECONDS` is a crashed collector's and gates nothing.
+pub(crate) fn is_closing(entry: &Map<String, Value>, now: f64) -> bool {
+    closing_of(entry).is_some_and(|(at, _)| now - at < CLOSING_TTL_SECONDS && at - now < 1.0)
+}
+
+/// Write the close intent under the store lock, on the instance the
+/// collector classified, unless the team is kept or already closing.
+fn open_close_intent(team: &str, expected_created: &str, by: &str, now: f64) -> Result<bool> {
+    crate::registry::update_entry(team, |entry| {
+        if created_at_string(entry) != expected_created || is_kept(entry) || is_closing(entry, now)
+        {
+            return false;
+        }
+        let mut gc = gc_object(entry);
+        gc.insert("closing".to_string(), json!({"at": now, "by": by}));
+        entry.insert("gc".to_string(), Value::Object(gc));
+        true
+    })
+}
+
+/// Take back a close intent this collector wrote.
+fn drop_close_intent(team: &str, by: &str) {
+    let _ = crate::registry::update_entry(team, |entry| {
+        match closing_of(entry) {
+            Some((_, owner)) if owner == by => {}
+            _ => return false,
+        }
+        let mut gc = gc_object(entry);
+        gc.remove("closing");
+        entry.insert("gc".to_string(), Value::Object(gc));
+        true
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -548,27 +849,44 @@ fn displayed_teams() -> Result<HashSet<String>, &'static str> {
 }
 
 /// A node operation the hived journaled and never brought to a terminal
-/// state (`run/operations/<incarnation>/<dispatchId>.json`).
-fn unfinished_operation(workspace: &str) -> Option<String> {
+/// state (`run/operations/<incarnation>/<dispatchId>.json`): Ok(Some) with
+/// its id, Err when a record or the journal cannot be read — which is not
+/// "no obligation".
+fn unfinished_operation(workspace: &str) -> Result<Option<String>, String> {
     let root = Path::new(workspace).join("run").join("operations");
-    let incarnations = fs::read_dir(root).ok()?;
-    for incarnation in incarnations.filter_map(|e| e.ok()) {
-        let Ok(records) = fs::read_dir(incarnation.path()) else {
+    let incarnations = match fs::read_dir(&root) {
+        Ok(read) => read,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("operations journal unreadable: {e}")),
+    };
+    for incarnation in incarnations {
+        let incarnation = incarnation.map_err(|e| format!("operations journal unreadable: {e}"))?;
+        if !incarnation.path().is_dir() {
             continue;
-        };
-        for record in records.filter_map(|e| e.ok()) {
-            let Ok(text) = fs::read_to_string(record.path()) else {
-                continue;
-            };
-            let Ok(doc) = serde_json::from_str::<Value>(&text) else {
-                continue;
-            };
+        }
+        let records = fs::read_dir(incarnation.path())
+            .map_err(|e| format!("operations journal unreadable: {e}"))?;
+        for record in records {
+            let record = record.map_err(|e| format!("operations journal unreadable: {e}"))?;
+            let name = record.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || !name.ends_with(".json") {
+                continue; // a writer's temp file, not a record
+            }
+            let text = fs::read_to_string(record.path())
+                .map_err(|e| format!("operation record {name} unreadable: {e}"))?;
+            let doc: Value = serde_json::from_str(&text)
+                .map_err(|_| format!("operation record {name} is corrupt"))?;
             if doc["state"] != "terminal" {
-                return Some(doc["dispatchId"].as_str().unwrap_or("?").to_string());
+                return Ok(Some(
+                    doc["dispatchId"]
+                        .as_str()
+                        .unwrap_or(name.trim_end_matches(".json"))
+                        .to_string(),
+                ));
             }
         }
     }
-    None
+    Ok(None)
 }
 
 /// A test's stand-in for the hived's `team-runtime` answer.
@@ -579,8 +897,9 @@ pub(crate) fn fake_hived_runtime() -> &'static Mutex<Option<Map<String, Value>>>
 }
 
 /// The runtime the team's hived reports, when there is a hived: Ok(None)
-/// with no socket — or a socket file nobody listens on, a hived that died
-/// without cleaning up — and Err when one listens and does not answer.
+/// with no socket, or a socket file nobody listens on (a hived that died
+/// without cleaning up); Err when one listens and does not answer, or the
+/// socket cannot be reached for a reason that is not "nobody there".
 fn hived_runtime(workspace: &str, team: &str) -> Result<Option<Map<String, Value>>, String> {
     #[cfg(test)]
     if let Some(runtime) = fake_hived_runtime().lock().ok().and_then(|r| r.clone()) {
@@ -591,7 +910,10 @@ fn hived_runtime(workspace: &str, team: &str) -> Result<Option<Map<String, Value
     }
     match crate::hived::request_team_runtime_answer(workspace, team) {
         Ok(runtime) => Ok(Some(runtime)),
-        Err(crate::hived::RequestFailure::NotSent(_)) => Ok(None),
+        Err(crate::hived::RequestFailure::NoListener) => Ok(None),
+        Err(crate::hived::RequestFailure::NotSent(reason)) => {
+            Err(format!("hived socket unreachable ({reason})"))
+        }
         Err(crate::hived::RequestFailure::AnswerLost(reason)) => {
             Err(format!("hived listens but did not answer ({reason})"))
         }
@@ -611,9 +933,15 @@ fn runtime_members(runtime: &Map<String, Value>) -> Vec<(String, &Map<String, Va
         .unwrap_or_default()
 }
 
-/// The codex thread's open turn, asked of the shared daemon: None when
-/// the daemon is not there (no turn can be open) or Err when it is and
-/// will not say.
+/// Whether a turn is open on the codex thread, asked of the shared daemon:
+/// Ok(None) when the daemon is not there (no turn can be open), Err when
+/// it is and will not say.
+///
+/// ponytail: `thread/read` is the one read-only question a fresh client can
+/// ask; an approval waiting on the thread (`waiting_user`) is carried by
+/// the hived's `team-runtime` while the hived runs and is not visible
+/// here, so a codex member without a display and without a hived counts as
+/// idle unless a turn is in progress.
 fn codex_turn_open(thread_id: &str) -> Result<Option<bool>, String> {
     if !crate::adapters::codex_app_server::daemon_alive() {
         return Ok(None);
@@ -626,32 +954,57 @@ fn codex_turn_open(thread_id: &str) -> Result<Option<bool>, String> {
         .ok_or_else(|| "codex daemon did not answer".to_string())
 }
 
+/// Whether a grok leader listens on *socket*: Ok(false) when the path is
+/// gone or refuses (a leader that died), Err for any other failure (a
+/// timeout, a permission error — a socket the collector cannot judge).
+fn grok_leader_listens(socket: &Path) -> Result<bool, String> {
+    if !socket.exists() {
+        return Ok(false);
+    }
+    match crate::adapters::grok_leader::probe_connect(socket) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("grok leader socket {}: {e}", socket.display())),
+    }
+}
+
 /// Everything one run of the collector reads once and shares: the tmux
-/// window listing, the claude job ledger (one CLI call, only when a team
-/// without a display has a claude member).
+/// window listing, the claude job ledger and the live claude sessions
+/// (each one call, only when a team without a display has a claude
+/// member).
 struct Observations {
     displayed: Result<HashSet<String>, &'static str>,
-    claude: OnceLock<Option<Vec<Map<String, Value>>>>,
+    claude_jobs: OnceLock<Option<Vec<Map<String, Value>>>>,
+    claude_sessions: OnceLock<Vec<crate::adapters::claude_sessions::ClaudeSession>>,
 }
 
 impl Observations {
     fn gather() -> Observations {
         Observations {
             displayed: displayed_teams(),
-            claude: OnceLock::new(),
+            claude_jobs: OnceLock::new(),
+            claude_sessions: OnceLock::new(),
         }
     }
 
-    fn claude_rows(&self) -> Option<&Vec<Map<String, Value>>> {
-        self.claude
+    fn claude_jobs(&self) -> Option<&Vec<Map<String, Value>>> {
+        self.claude_jobs
             .get_or_init(|| crate::adapters::claude_bg::jobs_ledger("claude"))
             .as_ref()
     }
 
+    fn claude_sessions(&self) -> &Vec<crate::adapters::claude_sessions::ClaudeSession> {
+        self.claude_sessions
+            .get_or_init(crate::adapters::claude_sessions::list_sessions)
+    }
+
     /// Where the team stands. Display counts as use; a hived that answers
     /// speaks for its members; without one, each member's engine is asked
-    /// in its own way — the claude ledger, the codex daemon's open turn,
-    /// the grok leader's socket.
+    /// in its own way — the claude job ledger and the live claude sessions
+    /// (a desktop conversation's CLI is one), the codex daemon's turn state
+    /// for the thread, the grok leader's socket. A member whose engine
+    /// cannot be asked is unknown, not idle.
     fn classify(&self, entry: &Map<String, Value>) -> Activity {
         let team = map_str(entry, "team");
         match &self.displayed {
@@ -676,30 +1029,45 @@ impl Observations {
             }
             Ok(None) => {}
         }
-        if let Some(id) = unfinished_operation(&workspace) {
-            return Activity::Unknown(format!("unfinished operation {id}"));
+        match unfinished_operation(&workspace) {
+            Err(reason) => return Activity::Unknown(reason),
+            Ok(Some(id)) => return Activity::Unknown(format!("unfinished operation {id}")),
+            Ok(None) => {}
         }
-        let members: Vec<Map<String, Value>> = entry
-            .get("members")
-            .and_then(Value::as_array)
-            .map(|rows| rows.iter().filter_map(Value::as_object).cloned().collect())
-            .unwrap_or_default();
-        for member in &members {
-            let name = map_str(member, "name");
-            let sid = map_str(member, "sessionId");
+        for member in member_rows(entry) {
+            let name = map_str(&member, "name");
+            let sid = map_str(&member, "sessionId");
             if sid.is_empty() {
-                continue;
+                continue; // no engine was ever bound to this row
             }
-            match map_str(member, "cli").as_str() {
+            match map_str(&member, "cli").as_str() {
                 "claude" => {
-                    let Some(rows) = self.claude_rows() else {
+                    let Some(jobs) = self.claude_jobs() else {
                         return Activity::Unknown("claude job ledger unavailable".to_string());
                     };
-                    let running = rows
+                    if jobs
                         .iter()
-                        .any(|row| map_str(row, "id") == sid && is_set(row.get("pid")));
-                    if running {
+                        .any(|row| map_str(row, "id") == sid && is_set(row.get("pid")))
+                    {
                         return Activity::Active(format!("{name}'s claude job is running"));
+                    }
+                    if self
+                        .claude_sessions()
+                        .iter()
+                        .any(|session| session.session_id == sid)
+                    {
+                        return Activity::Active(format!("{name}'s claude session is live"));
+                    }
+                    let host = map_str(&member, "hostSessionId");
+                    if !host.is_empty()
+                        && matches!(
+                            crate::adapters::claude_desktop::record_presence(&host),
+                            crate::adapters::claude_desktop::RecordPresence::Unknown
+                        )
+                    {
+                        return Activity::Unknown(format!(
+                            "{name}'s desktop conversation cannot be read"
+                        ));
                     }
                 }
                 "codex" => match codex_turn_open(&sid) {
@@ -711,11 +1079,19 @@ impl Observations {
                     let socket = crate::adapters::grok_leader::socket_path_for_key(&format!(
                         "m-{team}.{name}"
                     ));
-                    if crate::adapters::grok_leader::probe_socket(&socket) {
-                        return Activity::Active(format!("{name}'s grok leader is alive"));
+                    match grok_leader_listens(&socket) {
+                        Err(reason) => return Activity::Unknown(format!("{name}: {reason}")),
+                        Ok(true) => {
+                            return Activity::Active(format!("{name}'s grok leader is alive"))
+                        }
+                        Ok(false) => {}
                     }
                 }
-                _ => {}
+                other => {
+                    return Activity::Unknown(format!(
+                        "{name} rides a '{other}' engine the collector cannot ask"
+                    ))
+                }
             }
         }
         Activity::Inactive
@@ -744,22 +1120,16 @@ pub(crate) fn busy_members(entry: &Map<String, Value>) -> Turns {
         Ok(None) => {}
     }
     let mut busy = Vec::new();
-    for member in entry
-        .get("members")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_object)
-    {
-        let sid = map_str(member, "sessionId");
-        if sid.is_empty() || map_str(member, "cli") != "codex" {
+    for member in member_rows(entry) {
+        let sid = map_str(&member, "sessionId");
+        if sid.is_empty() || map_str(&member, "cli") != "codex" {
             continue;
         }
         match codex_turn_open(&sid) {
             Err(reason) => {
-                return Turns::Unverified(format!("{}: {reason}", map_str(member, "name")))
+                return Turns::Unverified(format!("{}: {reason}", map_str(&member, "name")))
             }
-            Ok(Some(true)) => busy.push(map_str(member, "name")),
+            Ok(Some(true)) => busy.push(map_str(&member, "name")),
             Ok(_) => {}
         }
     }
@@ -780,12 +1150,13 @@ pub(crate) enum Mode {
     DryRun,
     /// `hive gc run`.
     Manual,
-    /// The tail of a mutating verb: at most once per `AUTO_INTERVAL_SECONDS`.
+    /// The tail of a mutating verb: at most once per `AUTO_INTERVAL_SECONDS`,
+    /// within `AUTO_BUDGET_SECONDS`.
     Auto,
 }
 
 /// One run's findings: a row per registry team and per archive, and the
-/// lines for what was done.
+/// lines for what was done or could not be.
 #[derive(Debug, Default)]
 pub(crate) struct Report {
     pub throttled: bool,
@@ -794,36 +1165,34 @@ pub(crate) struct Report {
     pub actions: Vec<String>,
 }
 
+impl Report {
+    /// Whether any row ended in an error.
+    pub(crate) fn failed(&self) -> bool {
+        self.teams
+            .iter()
+            .chain(self.archives.iter())
+            .any(|row| row["state"] == "error")
+    }
+}
+
 fn cold_since(entry: &Map<String, Value>) -> Option<f64> {
-    entry
-        .get("gc")
-        .and_then(Value::as_object)
-        .and_then(|gc| gc.get("coldSince"))
-        .and_then(Value::as_f64)
+    gc_object(entry).get("coldSince").and_then(Value::as_f64)
 }
 
 fn is_kept(entry: &Map<String, Value>) -> bool {
-    entry
-        .get("gc")
-        .and_then(Value::as_object)
-        .and_then(|gc| gc.get("keep"))
-        .and_then(Value::as_bool)
-        == Some(true)
+    gc_object(entry).get("keep").and_then(Value::as_bool) == Some(true)
 }
 
 fn set_cold_since(team: &str, at: Option<f64>) -> Result<()> {
     crate::registry::update_entry(team, |entry| {
-        let mut gc = entry
-            .get("gc")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        let mut gc = gc_object(entry);
         gc.entry("keep".to_string()).or_insert(Value::Bool(false));
         gc.insert(
             "coldSince".to_string(),
             at.map(Value::from).unwrap_or(Value::Null),
         );
         entry.insert("gc".to_string(), Value::Object(gc));
+        true
     })?;
     Ok(())
 }
@@ -859,6 +1228,21 @@ fn team_row(team: &str, state: &str) -> Map<String, Value> {
     row
 }
 
+fn with_reason(mut row: Map<String, Value>, reason: String) -> Map<String, Value> {
+    row.insert("reason".to_string(), Value::from(reason));
+    row
+}
+
+fn cooling_row(team: &str, since: f64) -> Map<String, Value> {
+    let mut row = team_row(team, "cooling");
+    row.insert("coldSince".to_string(), Value::from(since));
+    row.insert(
+        "archiveAfter".to_string(),
+        Value::from(since + COLD_AFTER_SECONDS),
+    );
+    row
+}
+
 fn archive_row(archive: &Archive, state: &str) -> Value {
     json!({
         "archiveId": archive.id,
@@ -870,24 +1254,121 @@ fn archive_row(archive: &Archive, state: &str) -> Value {
     })
 }
 
+/// Directories in the store that are nobody's team: no `team.json`
+/// (an older delete left them). Reported, never touched.
+fn unmanaged_team_dirs() -> Vec<String> {
+    let Ok(read) = fs::read_dir(crate::registry::store_dir()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = read
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.'))
+        .filter(|name| !matches!(crate::registry::entry_path(name), Some(p) if p.is_file()))
+        .collect();
+    names.sort();
+    names
+}
+
 pub(crate) fn run(mode: Mode) -> Result<Report> {
     run_at(mode, now())
 }
 
+/// One expired team: close it, stop its hived gracefully, look again,
+/// archive if it is still what the collector saw. Returns the row.
+fn collect_expired(
+    observations: &Observations,
+    entry: &Map<String, Value>,
+    since: f64,
+    now: f64,
+    actions: &mut Vec<String>,
+) -> Map<String, Value> {
+    let team = map_str(entry, "team");
+    let created = created_at_string(entry);
+    let by = format!("gc-{}-{}", std::process::id(), new_archive_id());
+    match open_close_intent(&team, &created, &by, now) {
+        Ok(true) => {}
+        Ok(false) => {
+            return with_reason(
+                team_row(&team, "skipped"),
+                "changed or already closing".to_string(),
+            )
+        }
+        Err(e) => return with_reason(team_row(&team, "error"), e.to_string()),
+    }
+    let workspace = workspace_of(entry);
+    if crate::hived::socket_path(&workspace).exists()
+        && !crate::hived::stop_hived_graceful(&workspace)
+    {
+        drop_close_intent(&team, &by);
+        return with_reason(
+            team_row(&team, "active"),
+            "the hived declined to stop (work pending)".to_string(),
+        );
+    }
+    let Some(fresh) = crate::registry::load(&team) else {
+        return with_reason(team_row(&team, "skipped"), "entry vanished".to_string());
+    };
+    match observations.classify(&fresh) {
+        Activity::Active(reason) => {
+            drop_close_intent(&team, &by);
+            with_reason(team_row(&team, "active"), reason)
+        }
+        Activity::Unknown(reason) => {
+            drop_close_intent(&team, &by);
+            with_reason(team_row(&team, "blocked"), reason)
+        }
+        Activity::Inactive => {
+            let expected = Expected {
+                created_at: created,
+                closing_by: by.clone(),
+            };
+            match archive_team(&team, "expired", false, now, Some(&expected)) {
+                Ok(archive) => {
+                    actions.push(format!(
+                        "archived team '{team}' as {} (idle since {}; purge after {})",
+                        archive.id,
+                        date(since),
+                        archive.purge_after.map(date).unwrap_or_default()
+                    ));
+                    let mut row = team_row(&team, "archived");
+                    row.insert("archiveId".to_string(), Value::from(archive.id));
+                    row.insert(
+                        "purgeAfter".to_string(),
+                        archive.purge_after.map(Value::from).unwrap_or(Value::Null),
+                    );
+                    row
+                }
+                Err(e) => {
+                    drop_close_intent(&team, &by);
+                    with_reason(team_row(&team, "error"), e.to_string())
+                }
+            }
+        }
+    }
+}
+
 /// The collector at *now*: every registry team is classified, the cold
-/// ones clocked and the expired ones archived; every archive past its
-/// purge date is purged. A team that fails to archive is reported, not
-/// fatal to the run.
+/// ones clocked and the expired ones closed and archived; every archive
+/// past its purge date is purged, the ones a crash left mid-way repaired.
+/// A team that fails is reported, not fatal to the run.
 pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
     let write = mode != Mode::DryRun;
     let mut report = Report::default();
     if mode == Mode::Auto {
+        // One collector a day per hive home: the check and the stamp are
+        // one critical section.
+        let _lock = crate::registry::locked()?;
         if !stamp_due(now) {
             report.throttled = true;
             return Ok(report);
         }
         write_stamp(now)?;
     }
+    let started = Instant::now();
+    let over_budget =
+        || mode == Mode::Auto && started.elapsed().as_secs_f64() > AUTO_BUDGET_SECONDS;
     let observations = Observations::gather();
     for entry in crate::registry::list_entries() {
         let team = map_str(&entry, "team");
@@ -899,91 +1380,74 @@ pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
             report.teams.push(Value::Object(team_row(&team, "kept")));
             continue;
         }
+        if over_budget() {
+            report
+                .teams
+                .push(Value::Object(team_row(&team, "deferred")));
+            continue;
+        }
         let since = cold_since(&entry);
-        let mut row = match observations.classify(&entry) {
-            Activity::Active(reason) => {
-                if write && since.is_some() {
-                    if let Err(e) = set_cold_since(&team, None) {
-                        report.actions.push(format!("{team}: {e}"));
-                    }
+        let mut clock = |at: Option<f64>| {
+            if write {
+                if let Err(e) = set_cold_since(&team, at) {
+                    report.actions.push(format!("{team}: {e}"));
                 }
-                let mut row = team_row(&team, "active");
-                row.insert("reason".to_string(), Value::from(reason));
-                row
+            }
+        };
+        let row = match observations.classify(&entry) {
+            Activity::Active(reason) => {
+                if since.is_some() {
+                    clock(None);
+                }
+                with_reason(team_row(&team, "active"), reason)
             }
             Activity::Unknown(reason) => {
-                let mut row = team_row(&team, "blocked");
-                row.insert("reason".to_string(), Value::from(reason));
-                row
+                // Not evidence of idleness: whatever clock was running stops.
+                if since.is_some() {
+                    clock(None);
+                }
+                with_reason(team_row(&team, "blocked"), reason)
             }
             Activity::Inactive => match since {
                 None => {
-                    if write {
-                        if let Err(e) = set_cold_since(&team, Some(now)) {
-                            report.actions.push(format!("{team}: {e}"));
-                        }
-                    }
-                    let mut row = team_row(&team, "cooling");
-                    row.insert("coldSince".to_string(), Value::from(now));
-                    row.insert(
-                        "archiveAfter".to_string(),
-                        Value::from(now + COLD_AFTER_SECONDS),
-                    );
-                    row
+                    clock(Some(now));
+                    cooling_row(&team, now)
+                }
+                Some(since) if since > now + 1.0 => {
+                    // The clock went backwards: start over rather than trust a
+                    // deadline from the future.
+                    clock(Some(now));
+                    cooling_row(&team, now)
                 }
                 Some(since) if now - since >= COLD_AFTER_SECONDS => {
-                    if !write {
+                    if write {
+                        collect_expired(&observations, &entry, since, now, &mut report.actions)
+                    } else {
                         let mut row = team_row(&team, "expired");
                         row.insert("coldSince".to_string(), Value::from(since));
                         row
-                    } else {
-                        let workspace = workspace_of(&entry);
-                        if crate::hived::socket_path(&workspace).exists() {
-                            crate::hived::stop_hived(&workspace);
-                        }
-                        match archive_team(&team, "expired", false, now) {
-                            Ok(archive) => {
-                                report.actions.push(format!(
-                                    "archived team '{team}' as {} (idle since {}; purge after {})",
-                                    archive.id,
-                                    date(since),
-                                    archive.purge_after.map(date).unwrap_or_default()
-                                ));
-                                let mut row = team_row(&team, "archived");
-                                row.insert("archiveId".to_string(), Value::from(archive.id));
-                                row.insert(
-                                    "purgeAfter".to_string(),
-                                    archive.purge_after.map(Value::from).unwrap_or(Value::Null),
-                                );
-                                row
-                            }
-                            Err(e) => {
-                                let mut row = team_row(&team, "error");
-                                row.insert("reason".to_string(), Value::from(e.to_string()));
-                                row
-                            }
-                        }
                     }
                 }
-                Some(since) => {
-                    let mut row = team_row(&team, "cooling");
-                    row.insert("coldSince".to_string(), Value::from(since));
-                    row.insert(
-                        "archiveAfter".to_string(),
-                        Value::from(since + COLD_AFTER_SECONDS),
-                    );
-                    row
-                }
+                Some(since) => cooling_row(&team, since),
             },
         };
-        row.entry("state".to_string()).or_insert(Value::from("?"));
         report.teams.push(Value::Object(row));
     }
-    for archive in list_archives() {
+    for name in unmanaged_team_dirs() {
+        report
+            .teams
+            .push(Value::Object(team_row(&name, "unmanaged")));
+    }
+    let (archives, corrupt) = list_trash();
+    for archive in archives {
+        if over_budget() {
+            report.archives.push(archive_row(&archive, "deferred"));
+            continue;
+        }
         let row = match archive.state.as_str() {
-            "preparing" => {
+            "preparing" | "restoring" => {
                 if write {
-                    match repair_preparing(&archive) {
+                    match repair(&archive.id, now) {
                         Ok(verdict) => archive_row(&archive, verdict),
                         Err(e) => {
                             report.actions.push(format!("archive {}: {e}", archive.id));
@@ -991,19 +1455,20 @@ pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
                         }
                     }
                 } else {
-                    archive_row(&archive, "preparing")
+                    archive_row(&archive, &archive.state)
                 }
             }
             "purging" => {
                 if write {
-                    match purge_archive(&archive) {
-                        Ok(()) => {
+                    match purge_archive(&archive.id, now) {
+                        Ok(Purge::Purged) => {
                             report.actions.push(format!(
                                 "finished purging archive {} ('{}')",
                                 archive.id, archive.team
                             ));
                             archive_row(&archive, "purged")
                         }
+                        Ok(_) => archive_row(&archive, "purging"),
                         Err(e) => {
                             report.actions.push(format!("archive {}: {e}", archive.id));
                             archive_row(&archive, "error")
@@ -1013,13 +1478,12 @@ pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
                     archive_row(&archive, "purging")
                 }
             }
-            _ if archive.kept() => archive_row(&archive, "kept"),
-            _ => match archive.purge_after {
+            "quarantined" => match archive.purge_after {
                 None => archive_row(&archive, "kept"),
                 Some(at) if at <= now => {
                     if write {
-                        match purge_archive(&archive) {
-                            Ok(()) => {
+                        match purge_archive(&archive.id, now) {
+                            Ok(Purge::Purged) => {
                                 report.actions.push(format!(
                                     "purged archive {} ('{}', quarantined {})",
                                     archive.id,
@@ -1027,6 +1491,22 @@ pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
                                     date(archive.quarantined_at)
                                 ));
                                 archive_row(&archive, "purged")
+                            }
+                            Ok(Purge::Deferred(until)) => {
+                                report.actions.push(format!(
+                                    "archive {} ('{}') was written into; purge moved to {}",
+                                    archive.id,
+                                    archive.team,
+                                    date(until)
+                                ));
+                                let mut row = archive_row(&archive, "deferred");
+                                row["purgeAfter"] = Value::from(until);
+                                row
+                            }
+                            Ok(Purge::Skipped(reason)) => {
+                                let mut row = archive_row(&archive, "skipped");
+                                row["reason"] = Value::from(reason);
+                                row
                             }
                             Err(e) => {
                                 report.actions.push(format!("archive {}: {e}", archive.id));
@@ -1039,8 +1519,18 @@ pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
                 }
                 Some(_) => archive_row(&archive, "quarantined"),
             },
+            other => {
+                let mut row = archive_row(&archive, "unknown-state");
+                row["reason"] = Value::from(format!("manifest state '{other}'"));
+                row
+            }
         };
         report.archives.push(row);
+    }
+    for name in corrupt {
+        report
+            .archives
+            .push(json!({"archiveId": name, "state": "corrupt"}));
     }
     Ok(report)
 }
@@ -1063,7 +1553,7 @@ pub(crate) fn render_text(report: &Report) -> String {
         let team = map_str(row, "team");
         let state = map_str(row, "state");
         let detail = match state.as_str() {
-            "active" | "blocked" | "error" => map_str(row, "reason"),
+            "active" | "blocked" | "error" | "skipped" => map_str(row, "reason"),
             "cooling" => format!(
                 "idle since {}, archive after {}",
                 date(row.get("coldSince").and_then(Value::as_f64).unwrap_or(0.0)),
@@ -1085,6 +1575,7 @@ pub(crate) fn render_text(report: &Report) -> String {
                     .map(date)
                     .unwrap_or_else(|| "never".to_string())
             ),
+            "unmanaged" => "a directory without team.json; not a team, left alone".to_string(),
             _ => String::new(),
         };
         if detail.is_empty() {
@@ -1101,6 +1592,13 @@ pub(crate) fn render_text(report: &Report) -> String {
         let Some(row) = row.as_object() else {
             continue;
         };
+        if map_str(row, "state") == "corrupt" {
+            out.push_str(&format!(
+                "  {} unreadable manifest; left alone\n",
+                map_str(row, "archiveId")
+            ));
+            continue;
+        }
         let purge = match row.get("purgeAfter").and_then(Value::as_f64) {
             Some(at) => format!("purge after {}", date(at)),
             None => "kept".to_string(),
@@ -1204,7 +1702,19 @@ mod tests {
                 ..Default::default()
             },
         );
+        *fake_hived_runtime().lock().unwrap() = None;
         (tmp, env, ledger)
+    }
+
+    fn ledger(rows: Option<Vec<Value>>) -> crate::adapters::claude_bg::testhook::Guard {
+        crate::adapters::claude_bg::testhook::install(crate::adapters::claude_bg::testhook::Hook {
+            list_jobs_rows: Some(rows.map(|rows| {
+                rows.into_iter()
+                    .filter_map(|r| r.as_object().cloned())
+                    .collect()
+            })),
+            ..Default::default()
+        })
     }
 
     fn team(name: &str, members: &[Map<String, Value>]) -> PathBuf {
@@ -1223,6 +1733,29 @@ mod tests {
             .find(|row| row["team"] == team)
             .map(|row| row["state"].as_str().unwrap_or_default().to_string())
             .unwrap_or_default()
+    }
+
+    fn events() -> Vec<Value> {
+        fs::read_to_string(events_path())
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn fixture(id: &str, state: &str, quarantined_at: f64, purge_after: Option<f64>) -> Archive {
+        Archive {
+            id: id.to_string(),
+            team: "honey".to_string(),
+            created_at: "100.0".to_string(),
+            workspace: String::new(),
+            origin: "delete".to_string(),
+            state: state.to_string(),
+            quarantined_at,
+            purge_after,
+            members: Vec::new(),
+            restore_as: String::new(),
+        }
     }
 
     /// Every path under the trash with each manifest's text, for a
@@ -1247,14 +1780,6 @@ mod tests {
         out
     }
 
-    fn events() -> Vec<Value> {
-        fs::read_to_string(events_path())
-            .unwrap_or_default()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
     #[test]
     fn test_a_cold_team_is_archived_after_thirty_days_and_purged_thirty_days_later() {
         let (_tmp, _env, _ledger) = home();
@@ -1274,7 +1799,7 @@ mod tests {
 
         // the deadline: the team directory goes to the trash whole
         let due = run_at(Mode::Manual, T0 + 30.0 * DAY).unwrap();
-        assert_eq!(state_of(&due, "honey"), "archived");
+        assert_eq!(state_of(&due, "honey"), "archived", "{:?}", due.teams);
         assert!(crate::registry::load("honey").is_none());
         assert!(!dir.exists());
         let archives = list_archives();
@@ -1292,6 +1817,10 @@ mod tests {
             "# r"
         );
         assert_eq!(due.actions.len(), 1, "{:?}", due.actions);
+        // the close intent went with the entry; no trace of it in the payload
+        // gates a restore
+        let entry = crate::registry::load_at(&archive.payload().join("team.json")).unwrap();
+        assert!(is_closing(&entry, T0 + 30.0 * DAY));
 
         // the trash keeps it a day short of its own deadline…
         let kept = run_at(Mode::Manual, T0 + 59.0 * DAY).unwrap();
@@ -1310,54 +1839,40 @@ mod tests {
     }
 
     #[test]
-    fn test_activity_resets_the_clock_and_missing_evidence_blocks() {
-        let (tmp, _env, ledger) = home();
+    fn test_activity_resets_the_clock_and_missing_evidence_blocks_and_clears_it() {
+        let (_tmp, _env, ledger_guard) = home();
         team("honey", &[member_row("orch", "claude", "job-1")]);
-        // clocked once…
         run_at(Mode::Manual, T0).unwrap();
         assert!(cold_since(&crate::registry::load("honey").unwrap()).is_some());
 
-        // …a running claude job is activity: the clock stops
-        drop(ledger);
-        let running = crate::adapters::claude_bg::testhook::install(
-            crate::adapters::claude_bg::testhook::Hook {
-                list_jobs_rows: Some(Some(vec![json!({"id": "job-1", "pid": 4242})
-                    .as_object()
-                    .unwrap()
-                    .clone()])),
-                ..Default::default()
-            },
-        );
+        // a running claude job is activity: the clock stops
+        drop(ledger_guard);
+        let running = ledger(Some(vec![json!({"id": "job-1", "pid": 4242})]));
         let report = run_at(Mode::Manual, T0 + DAY).unwrap();
         assert_eq!(state_of(&report, "honey"), "active");
         assert_eq!(cold_since(&crate::registry::load("honey").unwrap()), None);
         drop(running);
 
-        // a ledger that does not answer blocks: no clock, no archive
-        let silent = crate::adapters::claude_bg::testhook::install(
-            crate::adapters::claude_bg::testhook::Hook {
-                list_jobs_rows: Some(None),
-                ..Default::default()
-            },
-        );
+        // an asleep job (no pid) is not activity: the clock starts again…
+        let asleep = ledger(Some(vec![json!({"id": "job-1"})]));
         let report = run_at(Mode::Manual, T0 + 2.0 * DAY).unwrap();
+        assert_eq!(state_of(&report, "honey"), "cooling");
+        assert_eq!(
+            cold_since(&crate::registry::load("honey").unwrap()),
+            Some(T0 + 2.0 * DAY)
+        );
+        drop(asleep);
+        // …and a ledger that does not answer blocks and stops the clock:
+        // nothing unseen counts as idle time
+        let silent = ledger(None);
+        let report = run_at(Mode::Manual, T0 + 3.0 * DAY).unwrap();
         assert_eq!(state_of(&report, "honey"), "blocked");
         assert_eq!(cold_since(&crate::registry::load("honey").unwrap()), None);
         drop(silent);
 
-        // an asleep job (no pid) is not activity: the clock starts again
-        let asleep = crate::adapters::claude_bg::testhook::install(
-            crate::adapters::claude_bg::testhook::Hook {
-                list_jobs_rows: Some(Some(vec![json!({"id": "job-1"})
-                    .as_object()
-                    .unwrap()
-                    .clone()])),
-                ..Default::default()
-            },
-        );
-        let report = run_at(Mode::Manual, T0 + 3.0 * DAY).unwrap();
-        assert_eq!(state_of(&report, "honey"), "cooling");
-        // an unfinished node operation blocks even a cold team
+        // an unfinished node operation blocks even a cold team; so does a
+        // record the collector cannot read
+        let _empty = ledger(Some(Vec::new()));
         let ops = crate::registry::team_dir("honey")
             .unwrap()
             .join("run")
@@ -1369,22 +1884,64 @@ mod tests {
             r#"{"dispatchId":"nd-1","state":"running"}"#,
         )
         .unwrap();
+        set_cold_since("honey", Some(T0 - 40.0 * DAY)).unwrap();
         let report = run_at(Mode::Manual, T0 + 40.0 * DAY).unwrap();
         assert_eq!(state_of(&report, "honey"), "blocked");
         assert!(crate::registry::load("honey").is_some());
-        drop(asleep);
-        drop(tmp);
+        fs::write(ops.join("nd-1.json"), "{").unwrap();
+        set_cold_since("honey", Some(T0 - 40.0 * DAY)).unwrap();
+        let report = run_at(Mode::Manual, T0 + 40.0 * DAY).unwrap();
+        assert_eq!(state_of(&report, "honey"), "blocked", "{:?}", report.teams);
+        assert!(crate::registry::load("honey").is_some());
+        // a writer's temp file beside the records is not a record
+        fs::remove_file(ops.join("nd-1.json")).unwrap();
+        fs::write(ops.join(".nd-2.json.tmp"), "{").unwrap();
+        let report = run_at(Mode::Manual, T0 + 41.0 * DAY).unwrap();
+        assert_eq!(state_of(&report, "honey"), "cooling", "{:?}", report.teams);
     }
 
     #[test]
-    fn test_a_dead_hiveds_socket_file_is_not_evidence_of_anything() {
+    fn test_a_live_claude_session_and_an_unaskable_engine_are_not_idle() {
+        let (tmp, _env, _ledger) = home();
+        // a desktop orch whose CLI is running: registered in the sessions
+        // directory with this very process's pid, in no job ledger
+        let sessions = tmp.path().join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("me.json"),
+            json!({
+                "name": "me",
+                "pid": std::process::id(),
+                "messagingSocketPath": tmp.path().join("me.sock"),
+                "sessionId": "s-me",
+                "kind": "interactive",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        team("honey", &[member_row("orch", "claude", "s-me")]);
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "honey"), "active", "{:?}", report.teams);
+
+        // a member on an engine the collector has no probe for is unknown
+        team("comb", &[member_row("x", "bash", "sid-x")]);
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "comb"), "blocked", "{:?}", report.teams);
+        // a row that never got an engine is no evidence either way
+        team("wax", &[member_row("y", "codex", "")]);
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "wax"), "cooling", "{:?}", report.teams);
+    }
+
+    #[test]
+    fn test_a_dead_hiveds_socket_is_not_evidence_of_anything() {
         let (_tmp, _env, _ledger) = home();
         let dir = team("honey", &[member_row("sage", "grok", "sid-sage")]);
-        // the hived was killed -9: its socket path is still there, a file
-        // nobody listens on
+        // the hived was killed -9: its socket is still there, nobody listens
         let socket = crate::hived::socket_path(dir.to_str().unwrap());
         fs::create_dir_all(socket.parent().unwrap()).unwrap();
-        fs::write(&socket, "").unwrap();
+        drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+        assert!(socket.exists());
 
         let report = run_at(Mode::Manual, T0).unwrap();
 
@@ -1406,17 +1963,77 @@ mod tests {
     }
 
     #[test]
+    fn test_the_collector_closes_a_team_before_archiving_and_a_change_under_it_aborts() {
+        let (_tmp, _env, _ledger) = home();
+        team("honey", &[]);
+        // the writers gate on the wall clock, so the intent is dated by it
+        let now = epoch_now();
+        set_cold_since("honey", Some(now - 40.0 * DAY)).unwrap();
+        // a fresh close intent written by another collector: hive writers are
+        // refused and this collector leaves the team alone
+        let mut entry = crate::registry::load("honey").unwrap();
+        let mut gc = gc_object(&entry);
+        gc.insert(
+            "closing".to_string(),
+            json!({"at": now - 5.0, "by": "gc-other"}),
+        );
+        entry.insert("gc".to_string(), Value::Object(gc));
+        assert!(is_closing(&entry, now));
+        crate::registry::write_entry_file(
+            &crate::registry::team_dir("honey")
+                .unwrap()
+                .join("team.json"),
+            &entry,
+        )
+        .unwrap();
+        let err = crate::team::Team::load("honey", "")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("being archived"), "{err}");
+        assert_eq!(
+            crate::registry::reserve_member("honey", &member_row("late", "grok", ""), "100.0")
+                .unwrap(),
+            "closing"
+        );
+        let report = run_at(Mode::Manual, now).unwrap();
+        assert_eq!(state_of(&report, "honey"), "skipped", "{:?}", report.teams);
+        assert!(crate::registry::load("honey").is_some());
+        // a stale intent (a crashed collector's) gates nothing, and one dated
+        // from the future is not fresh either
+        assert!(!is_closing(&entry, now + CLOSING_TTL_SECONDS + 1.0));
+        assert!(!is_closing(&entry, now - 60.0));
+
+        // the archive commits only on the instance the intent was written on
+        let expected = Expected {
+            created_at: "999".to_string(),
+            closing_by: "gc-other".to_string(),
+        };
+        let err = archive_team("honey", "expired", false, T0, Some(&expected))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed"), "{err}");
+        assert!(crate::registry::load("honey").is_some());
+        assert!(list_archives().is_empty());
+        let expected = Expected {
+            created_at: "100.0".to_string(),
+            closing_by: "gc-other".to_string(),
+        };
+        archive_team("honey", "expired", false, T0, Some(&expected)).unwrap();
+        assert!(crate::registry::load("honey").is_none());
+    }
+
+    #[test]
     fn test_delete_archives_at_once_keep_has_no_purge_date_and_the_name_is_free() {
         let (_tmp, _env, _ledger) = home();
         team("honey", &[member_row("sage", "grok", "sid-sage")]);
-        let first = archive_team("honey", "delete", false, T0).unwrap();
+        let first = archive_team("honey", "delete", false, T0, None).unwrap();
         assert_eq!(first.origin, "delete");
         assert!(first.purge_after.is_some());
         assert!(crate::registry::load("honey").is_none());
 
         // the name is free: a new honey, its own archive later
         team("honey", &[]);
-        let second = archive_team("honey", "delete", true, T0).unwrap();
+        let second = archive_team("honey", "delete", true, T0, None).unwrap();
         assert!(second.kept());
         assert_ne!(first.id, second.id);
         let ids: Vec<String> = list_archives().into_iter().map(|a| a.id).collect();
@@ -1436,17 +2053,63 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_brings_the_archive_back_as_a_new_instance() {
+    fn test_a_purge_defers_for_a_payload_written_into_and_reads_the_manifest_as_it_is() {
+        let (_tmp, _env, _ledger) = home();
+        team("honey", &[]);
+        // quarantined long ago by the manifest's clock; the payload's files
+        // are written now, long after
+        let archive = archive_team("honey", "delete", false, T0 - 400.0 * DAY, None).unwrap();
+        let note = archive.payload().join("artifacts").join("late.md");
+        fs::write(&note, "still reading this").unwrap();
+        let written = newest_mtime(&archive.payload()).unwrap();
+        assert!(written > archive.quarantined_at + RECENT_WRITE_SLACK_SECONDS);
+
+        let outcome = purge_archive(&archive.id, written + 400.0 * DAY).unwrap();
+
+        assert_eq!(outcome, Purge::Deferred(written + TRASH_AFTER_SECONDS));
+        assert!(note.is_file());
+        assert_eq!(
+            self::archive(&archive.id).unwrap().purge_after,
+            Some(written + TRASH_AFTER_SECONDS)
+        );
+        // not due: nothing
+        assert_eq!(
+            purge_archive(&archive.id, written + 1.0).unwrap(),
+            Purge::Skipped("not due")
+        );
+        // kept meanwhile: the purge sees the manifest as it is now
+        set_keep(&archive.id, true).unwrap();
+        assert_eq!(
+            purge_archive(&archive.id, written + 900.0 * DAY).unwrap(),
+            Purge::Skipped("not due")
+        );
+        assert!(note.is_file());
+        set_keep(&archive.id, false).unwrap();
+        // due at last (the purge date is now from the keep-off, past every
+        // write into the payload)
+        let due = self::archive(&archive.id).unwrap().purge_after.unwrap();
+        assert_eq!(purge_archive(&archive.id, due).unwrap(), Purge::Purged);
+        assert!(!archive.dir().exists());
+        assert_eq!(
+            purge_archive(&archive.id, due).unwrap(),
+            Purge::Skipped("no such archive")
+        );
+    }
+
+    #[test]
+    fn test_restore_brings_the_archive_back_as_a_new_instance_with_its_arrangement() {
         let (_tmp, _env, _ledger) = home();
         let dir = team("honey", &[member_row("sage", "grok", "sid-sage")]);
-        let archive = archive_team("honey", "delete", false, T0).unwrap();
+        crate::layout::remember_mirror_for_test("honey", dir.to_str().unwrap(), "100.0");
+        let archive = archive_team("honey", "delete", false, T0, None).unwrap();
 
         let restored = restore_archive(&archive.id, None).unwrap();
 
         assert_eq!(restored.team, "honey");
         assert_eq!(restored.dir, dir);
         let entry = crate::registry::load("honey").unwrap();
-        assert_ne!(map_str(&entry, "createdAt"), "100.0");
+        let new_instance = map_str(&entry, "createdAt");
+        assert_ne!(new_instance, "100.0");
         assert_eq!(
             entry["restoredFrom"]["archiveId"],
             Value::from(archive.id.as_str())
@@ -1464,18 +2127,24 @@ mod tests {
         );
         assert!(list_archives().is_empty());
         assert_eq!(events().last().unwrap()["event"], "restored");
+        // the mirror choice the archive kept follows the new instance
+        assert_eq!(
+            crate::layout::remembered_mirror("honey", dir.to_str().unwrap(), &new_instance),
+            Some(false)
+        );
     }
 
     #[test]
     fn test_restore_refuses_a_taken_name_or_a_bound_session_and_takes_another_name() {
         let (_tmp, _env, _ledger) = home();
         team("honey", &[member_row("sage", "grok", "sid-sage")]);
-        let archive = archive_team("honey", "delete", false, T0).unwrap();
+        let archive = archive_team("honey", "delete", false, T0, None).unwrap();
         // a new honey took the name
         team("honey", &[]);
         let err = restore_archive(&archive.id, None).unwrap_err().to_string();
         assert!(err.contains("--as"), "{err}");
-        assert!(list_archives().len() == 1);
+        assert_eq!(list_archives().len(), 1);
+        assert_eq!(list_archives()[0].state, "quarantined");
 
         // another team rides sage's session: nothing is taken from it
         team("comb", &[member_row("rider", "grok", "sid-sage")]);
@@ -1484,7 +2153,7 @@ mod tests {
             .to_string();
         assert!(err.contains("comb.rider"), "{err}");
         assert!(crate::registry::load("honey2").is_none());
-        assert!(list_archives().len() == 1);
+        assert_eq!(list_archives().len(), 1);
 
         // the session freed, another name works
         crate::registry::delete_team("comb").unwrap();
@@ -1498,8 +2167,43 @@ mod tests {
             "the new honey is untouched"
         );
         assert!(list_archives().is_empty());
-        // a purging or unknown archive is not restorable
         assert!(restore_archive("nope", None).is_err());
+    }
+
+    #[test]
+    fn test_a_restore_a_crash_interrupted_is_finished_or_reverted() {
+        let (_tmp, _env, _ledger) = home();
+        team("honey", &[]);
+        let archive = archive_team("honey", "delete", false, T0, None).unwrap();
+        // the intent landed, the move did not: back to quarantined
+        let mut restoring = archive.clone();
+        restoring.state = "restoring".to_string();
+        restoring.restore_as = "honey".to_string();
+        restoring.write().unwrap();
+        assert!(
+            restore_archive(&archive.id, None).is_err(),
+            "not quarantined"
+        );
+        let report = run_at(Mode::Manual, T0 + 1.0).unwrap();
+        assert_eq!(report.archives[0]["state"], "quarantined");
+        assert_eq!(self::archive(&archive.id).unwrap().state, "quarantined");
+        assert!(self::archive(&archive.id).unwrap().restore_as.is_empty());
+
+        // the move landed, the archive directory did not go: finished
+        let restored = restore_archive(&archive.id, Some("honey2")).unwrap();
+        let mut leftover = restored.archive.clone();
+        leftover.state = "restoring".to_string();
+        leftover.restore_as = "honey2".to_string();
+        fs::create_dir_all(leftover.dir()).unwrap();
+        leftover.write().unwrap();
+        let report = run_at(Mode::Manual, T0 + 2.0).unwrap();
+        assert_eq!(
+            report.archives[0]["state"], "restored",
+            "{:?}",
+            report.archives
+        );
+        assert!(!leftover.dir().exists());
+        assert!(crate::registry::load("honey2").is_some());
     }
 
     #[test]
@@ -1546,21 +2250,29 @@ mod tests {
     }
 
     #[test]
-    fn test_a_preparing_archive_is_committed_or_dropped() {
+    fn test_a_clock_from_the_future_starts_over() {
+        let (_tmp, _env, _ledger) = home();
+        team("honey", &[]);
+        set_cold_since("honey", Some(T0 + 10.0 * DAY)).unwrap();
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "honey"), "cooling");
+        assert_eq!(
+            cold_since(&crate::registry::load("honey").unwrap()),
+            Some(T0)
+        );
+    }
+
+    #[test]
+    fn test_a_preparing_archive_is_committed_with_a_fresh_clock_or_dropped() {
         let (_tmp, _env, _ledger) = home();
         let dir = team("honey", &[]);
         // the directory moved, the manifest did not follow
-        let mut moved = Archive {
-            id: "a1b2c3d4e5f6".to_string(),
-            team: "honey".to_string(),
-            created_at: "100.0".to_string(),
-            workspace: String::new(),
-            origin: "delete".to_string(),
-            state: "preparing".to_string(),
-            quarantined_at: T0,
-            purge_after: Some(T0 + TRASH_AFTER_SECONDS),
-            members: Vec::new(),
-        };
+        let mut moved = fixture(
+            "a1b2c3d4e5f6",
+            "preparing",
+            T0 - 100.0 * DAY,
+            Some(T0 - 70.0 * DAY),
+        );
         fs::create_dir_all(moved.dir()).unwrap();
         moved.write().unwrap();
         fs::rename(&dir, moved.payload()).unwrap();
@@ -1570,12 +2282,71 @@ mod tests {
         fs::create_dir_all(aborted.dir()).unwrap();
         aborted.write().unwrap();
 
-        let report = run_at(Mode::Manual, T0 + 1.0).unwrap();
+        let report = run_at(Mode::Manual, T0).unwrap();
 
+        // committed at the repair, not at the crash: the full trash window
         moved.state = "quarantined".to_string();
+        moved.quarantined_at = T0;
+        moved.purge_after = Some(T0 + TRASH_AFTER_SECONDS);
         assert_eq!(archive(&moved.id).unwrap(), moved);
         assert!(!aborted.dir().exists());
         assert_eq!(report.archives.len(), 2, "{:?}", report.archives);
+    }
+
+    #[test]
+    fn test_the_trash_never_follows_a_symlink_and_reports_what_it_cannot_read() {
+        let (tmp, _env, _ledger) = home();
+        // an archive-shaped directory elsewhere, reached through a symlink
+        // planted in the trash
+        let elsewhere = tmp.path().join("elsewhere");
+        let payload = elsewhere.join(PAYLOAD);
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(payload.join("valuable"), "keep me").unwrap();
+        let planted = fixture(
+            "linkfixture",
+            "quarantined",
+            T0 - 100.0 * DAY,
+            Some(T0 - 60.0 * DAY),
+        );
+        let mut text = serde_json::to_string_pretty(&planted.to_value()).unwrap();
+        text.push('\n');
+        fs::write(elsewhere.join(MANIFEST), &text).unwrap();
+        fs::create_dir_all(trash_dir()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, trash_dir().join("linkfixture")).unwrap();
+        // and a directory with an unreadable manifest
+        fs::create_dir_all(trash_dir().join("garbled")).unwrap();
+        fs::write(trash_dir().join("garbled").join(MANIFEST), "{").unwrap();
+
+        let report = run_at(Mode::Manual, T0).unwrap();
+
+        assert!(payload.join("valuable").is_file(), "followed the link");
+        assert!(list_archives().is_empty());
+        let corrupt: Vec<String> = report
+            .archives
+            .iter()
+            .filter(|row| row["state"] == "corrupt")
+            .map(|row| row["archiveId"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            corrupt,
+            vec!["garbled".to_string(), "linkfixture".to_string()]
+        );
+        assert_eq!(
+            purge_archive("linkfixture", T0).unwrap(),
+            Purge::Skipped("no such archive")
+        );
+        assert!(render_text(&report).contains("unreadable manifest"));
+    }
+
+    #[test]
+    fn test_unmanaged_store_directories_are_reported_not_touched() {
+        let (_tmp, _env, _ledger) = home();
+        let leftover = crate::registry::store_dir().join("oldteam");
+        fs::create_dir_all(leftover.join("artifacts")).unwrap();
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "oldteam"), "unmanaged");
+        assert!(leftover.join("artifacts").is_dir());
+        assert!(render_text(&report).contains("left alone"));
     }
 
     #[test]
@@ -1591,7 +2362,7 @@ mod tests {
         assert!(set_keep("honey", false).unwrap().contains("keep off"));
         assert_eq!(cold_since(&crate::registry::load("honey").unwrap()), None);
 
-        let archive = archive_team("honey", "delete", false, T0).unwrap();
+        let archive = archive_team("honey", "delete", false, T0, None).unwrap();
         let line = set_keep(&archive.id, true).unwrap();
         assert!(line.contains("kept"), "{line}");
         assert!(super::archive(&archive.id).unwrap().kept());
@@ -1613,10 +2384,27 @@ mod tests {
         );
         let entry = crate::registry::load("honey").unwrap();
         assert_eq!(busy_members(&entry), Turns::Idle);
-        // the clock is a use-clearing affair too
         set_cold_since("honey", Some(T0)).unwrap();
         clear_cold_since("honey").unwrap();
         assert_eq!(cold_since(&crate::registry::load("honey").unwrap()), None);
+    }
+
+    #[test]
+    fn test_the_event_log_keeps_its_tail_past_the_cap() {
+        let (_tmp, _env, _ledger) = home();
+        fs::create_dir_all(state_dir()).unwrap();
+        let filler = format!("{{\"event\":\"x\",\"pad\":\"{}\"}}\n", "p".repeat(2000));
+        fs::write(events_path(), filler.repeat(1200)).unwrap();
+        assert!(fs::metadata(events_path()).unwrap().len() > EVENTS_MAX_BYTES);
+        let archive = fixture("eeeeeeeeeeee", "quarantined", T0, None);
+        append_event("kept", &archive, &[]);
+        let lines: Vec<String> = fs::read_to_string(events_path())
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), EVENTS_KEEP_LINES + 1);
+        assert!(lines.last().unwrap().contains("\"event\":\"kept\""));
     }
 
     #[test]

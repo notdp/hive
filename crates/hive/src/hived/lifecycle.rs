@@ -606,6 +606,12 @@ pub fn stop_hived(workspace: &str) {
     }
 }
 
+/// Ask the hived to retire gracefully: true when it is gone, false when it
+/// declined (a node result pending) or did not leave in time.
+pub(crate) fn stop_hived_graceful(workspace: &str) -> bool {
+    stop_hived_generation(workspace, None, false) == StopOutcome::Stopped
+}
+
 #[derive(PartialEq, Eq)]
 enum StopOutcome {
     Stopped,

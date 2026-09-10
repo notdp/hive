@@ -3420,7 +3420,7 @@ fn ensure_hived_with_delayed_ping(delay: Option<Duration>) -> (Option<i32>, usiz
     if delay.is_none() {
         assert!(matches!(
             request_hived_answer(workspace, &action_payload("ping"), IDENTITY_PING_TIMEOUT),
-            Err(RequestFailure::NotSent(_))
+            Err(RequestFailure::NoListener)
         ));
     }
     let result = ensure_hived(workspace, "team-a", "dev:3", "@99").unwrap();

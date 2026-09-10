@@ -18,6 +18,9 @@ pub(crate) fn run_cmd(dry_run: bool, json: bool) {
             } else {
                 print!("{}", gc::render_text(&report));
             }
+            if report.failed() {
+                std::process::exit(1);
+            }
         }
         Err(e) => fail(&format!("gc: {e}")),
     }

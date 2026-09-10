@@ -304,6 +304,23 @@ pub(crate) fn remembered_mirror(team: &str, workspace: &str, instance: &str) -> 
     })
 }
 
+/// The arrangement kept for a team instance follows the team `hive gc
+/// restore` brings back as a new instance (and maybe a new name).
+pub(crate) fn rebind_arrangement(workspace: &str, old: (&str, &str), new: (&str, &str)) {
+    arrangement::rebind(
+        &WindowIdentity {
+            team: old.0.to_string(),
+            workspace: workspace.to_string(),
+            instance: old.1.to_string(),
+        },
+        &WindowIdentity {
+            team: new.0.to_string(),
+            workspace: workspace.to_string(),
+            instance: new.1.to_string(),
+        },
+    );
+}
+
 /// A `hive mirror off` recorded for a team instance, for a test of the
 /// window that is built after it.
 #[cfg(test)]

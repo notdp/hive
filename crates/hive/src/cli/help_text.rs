@@ -296,10 +296,13 @@ Options:
   whole to $HIVE_HOME/trash/<archive-id>/payload/ and its name is free.
   An archive not kept is purged 30 days later. `hive delete` is the same
   archive without the wait. The collector runs by itself at the tail of a
-  mutating verb (create, join, spawn, send, kill, delete, attach, workflow)
-  at most once a day; it only archives what it has positively seen idle —
-  tmux not answering, an unreadable claude job ledger, a hived that holds
-  its socket silently, an unfinished node operation each block a team.
+  mutating verb (create, join, spawn, send, kill, delete, attach, workflow,
+  fork) at most once a day per hive home, within a 20s budget; it only
+  archives what it has positively seen idle — tmux not answering, an
+  unreadable claude job ledger, a hived that listens without answering, an
+  unreadable or unfinished node record, an engine it cannot ask, each
+  block a team — and only after closing the team (writers are refused for
+  a moment), asking its hived to stop gracefully and looking again.
 
 Options:
   -h, --help  Show this message and exit.
@@ -317,11 +320,16 @@ Commands:
   Collect now: clock cold teams, archive the expired, purge the trash.
 
   Prints a row per registry team (active, cooling with its archive date,
-  blocked with why, kept, archived) and per archive (quarantined with its
-  purge date, kept, purged). Runs whatever the daily throttle says.
+  blocked with why, kept, archived; a store directory without team.json
+  as unmanaged) and per archive (quarantined with its purge date, kept,
+  purged, deferred when its payload was written into; an unreadable
+  manifest as corrupt). Runs whatever the daily throttle says; exits 1
+  when a row ended in an error.
 
 Options:
-  --dry-run   Report what would happen; write nothing — no clock starts.
+  --dry-run   Report what would happen; write nothing in the store or the
+              trash — no clock starts. Still asks each team's hived for its
+              runtime, as a real run does.
   --json      Machine-readable report
   -h, --help  Show this message and exit.
 "#

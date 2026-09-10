@@ -405,6 +405,11 @@ fn open_instance(team: &str, created_at: &str) -> Result<Open> {
     if !created_at.is_empty() && !created_at_matches(entry.get("createdAt"), created_at) {
         return Ok(Open::Refused("stale"));
     }
+    // The collector is closing the team: no work is admitted into it
+    // (`gc::is_closing`; a stale intent gates nothing).
+    if crate::gc::is_closing(&entry, crate::gc::epoch_now()) {
+        return Ok(Open::Refused("closing"));
+    }
     Ok(Open::Ready(Opened { path, entry, _lock }))
 }
 
@@ -635,8 +640,12 @@ pub fn backfill(
 }
 
 /// Edit one entry under the store lock: *edit* sees the entry as stored
-/// and the result is written whole. Ok(false) when there is no such team.
-pub(crate) fn update_entry(team: &str, edit: impl FnOnce(&mut Map<String, Value>)) -> Result<bool> {
+/// and, returning true, has the result written whole. Ok(false) when
+/// there is no such team or *edit* declined.
+pub(crate) fn update_entry(
+    team: &str,
+    edit: impl FnOnce(&mut Map<String, Value>) -> bool,
+) -> Result<bool> {
     let Some(path) = entry_path(team) else {
         return Ok(false);
     };
@@ -644,9 +653,25 @@ pub(crate) fn update_entry(team: &str, edit: impl FnOnce(&mut Map<String, Value>
     let Some(mut entry) = load(team) else {
         return Ok(false);
     };
-    edit(&mut entry);
+    if !edit(&mut entry) {
+        return Ok(false);
+    }
     write_atomic(&path, &entry)?;
     Ok(true)
+}
+
+/// A valid entry read from *path* wherever it sits (a trash payload's
+/// `team.json`, a directory a restore published).
+pub(crate) fn load_at(path: &Path) -> Option<Map<String, Value>> {
+    let text = fs::read_to_string(path).ok()?;
+    let entry: Value = serde_json::from_str(&text).ok()?;
+    if !valid(&entry) {
+        return None;
+    }
+    match entry {
+        Value::Object(o) => Some(o),
+        _ => None,
+    }
 }
 
 /// Write an entry the caller has already placed under the store lock

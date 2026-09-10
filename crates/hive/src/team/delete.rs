@@ -1,10 +1,11 @@
-//! `hive delete`'s body: the registry entry goes (that is what makes the
-//! team deleted), the display hive built closes, the hived stops, the
-//! workspace goes only on request, and the team's grok leaders are swept.
-//! `--down` is the whole-run teardown around it: every member retired
-//! first, the team's own tmux session killed last.
-
-use std::path::Path;
+//! `hive delete`'s body: the display hive built closes, the hived stops,
+//! and the team directory — entry and all, that is what makes the team
+//! deleted — goes whole into the trash (`gc::archive_team`; kept with
+//! `--keep-workspace`, removed here and now with `--delete-workspace`,
+//! which is the one path that also removes an external workspace), and
+//! the team's grok leaders are swept. `--down` is the whole-run teardown
+//! around it: every member retired first, the team's own tmux session
+//! killed last.
 
 use anyhow::{bail, Result};
 
@@ -12,6 +13,44 @@ use super::Team;
 use crate::identity;
 use crate::paths::expanduser;
 use crate::tmux;
+
+/// `--delete-workspace` removes only what is this team's alone: a
+/// workspace another live team's entry also records is shared, and a
+/// path that is a symlink leads somewhere the flag never named.
+fn refuse_shared_or_linked_workspace(team: &str, ws: &str) -> Result<()> {
+    if std::fs::symlink_metadata(ws)?.file_type().is_symlink() {
+        bail!(
+            "workspace {ws} is a symlink; not removed (remove its target yourself if you mean it)"
+        );
+    }
+    let target = normalized(ws);
+    let sharers: Vec<String> = crate::registry::list_entries()
+        .iter()
+        .filter(|entry| crate::json_fields::map_str(entry, "team") != team)
+        .filter(|entry| {
+            let other = crate::json_fields::map_str(entry, "workspace");
+            !other.is_empty() && normalized(&expanduser(&other)) == target
+        })
+        .map(|entry| crate::json_fields::map_str(entry, "team"))
+        .collect();
+    if !sharers.is_empty() {
+        bail!(
+            "workspace {ws} is also recorded by {}; not removed",
+            sharers.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn normalized(path: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(path);
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        std::path::PathBuf::from(crate::paths::getcwd()).join(path)
+    };
+    absolute.components().collect()
+}
 
 /// Grok leader keys serving *team*, as the leader directory has them.
 fn team_grok_daemon_keys(team: &str) -> Vec<String> {
@@ -38,12 +77,13 @@ fn sweep_team_grok_daemons(team: &str) {
 /// The delete body; refuses an unsafe name before touching anything, since
 /// the team directory is joined onto the registry store from it.
 ///
-/// Without `--delete-workspace` only `team.json` goes: the team directory
-/// keeps its bus, run dir and artifacts for reading until the name is
-/// recycled (the next create resets them). With it, the workspace — the
-/// team directory, or the external one the entry records — is removed,
-/// and the team directory with it. An external workspace is never removed
-/// without the flag.
+/// Without `--delete-workspace` the team directory goes whole into the
+/// trash, entry and all, for `gc::TRASH_AFTER_SECONDS` (no purge date with
+/// `--keep-workspace`); an external workspace is only recorded in the
+/// manifest. With it, the workspace — the team directory, or the external
+/// one the entry records — is removed here and now, and the team directory
+/// with it; an external workspace another live team also records, or one
+/// reached through a symlink, is refused.
 ///
 /// With `down`, every member is retired before the entry goes and the
 /// team's owned tmux session (named after the team) is killed after it —
@@ -182,7 +222,8 @@ pub(crate) fn delete_team(
 
     if !resolved_workspace.is_empty() && delete_workspace {
         let ws = expanduser(&resolved_workspace);
-        if Path::new(&ws).exists() {
+        if std::fs::symlink_metadata(&ws).is_ok() {
+            refuse_shared_or_linked_workspace(name, &ws)?;
             std::fs::remove_dir_all(&ws)?;
             println!("Workspace removed: {ws}");
         }
@@ -210,7 +251,7 @@ pub(crate) fn delete_team(
         }
     } else if crate::registry::load(name).is_some() {
         let archive =
-            crate::gc::archive_team(name, "delete", keep_workspace, crate::gc::epoch_now())?;
+            crate::gc::archive_team(name, "delete", keep_workspace, crate::gc::epoch_now(), None)?;
         match archive.purge_after {
             Some(at) => println!(
                 "archived as {} (purge after {}; `hive gc restore {}` brings it back)",
@@ -602,6 +643,39 @@ mod tests {
         assert!(!external.exists());
         assert!(!team_dir(&env, "honey").exists());
         assert_eq!(crate::gc::list_archives().len(), 1);
+    }
+
+    #[test]
+    fn test_delete_workspace_refuses_a_workspace_another_team_records_or_a_symlink() {
+        let env = display_env_outside();
+        let shared = env._tmp.path().join("shared");
+        std::fs::create_dir_all(shared.join("artifacts")).unwrap();
+        for (team, created) in [("honey", "100.0"), ("comb", "200.0")] {
+            crate::registry::record_team(team, shared.to_str().unwrap(), created, &[], "").unwrap();
+        }
+        let _argv = fake_tmux_sessions("", &[], &[], &[]);
+
+        let err = crate::team::delete_team("honey", "", true, false, false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("comb"), "{err}");
+        assert!(shared.join("artifacts").is_dir());
+        assert!(crate::registry::load("honey").is_some());
+
+        // a symlinked workspace is never followed
+        crate::registry::delete_team("comb").unwrap();
+        let real = env._tmp.path().join("real");
+        std::fs::create_dir_all(real.join("artifacts")).unwrap();
+        let link = env._tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        crate::registry::record_team("honey", link.to_str().unwrap(), "300.0", &[], "").unwrap();
+        let err = crate::team::delete_team("honey", "", true, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(real.join("artifacts").is_dir());
+        assert!(link.exists());
     }
 
     #[test]

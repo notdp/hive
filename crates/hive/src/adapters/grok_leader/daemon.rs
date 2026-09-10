@@ -32,6 +32,13 @@ pub fn probe_socket(socket_path: &Path) -> bool {
     socket_path.exists() && connect_within(socket_path, PROBE_TIMEOUT).is_ok()
 }
 
+/// The probe's connect with its error kept: a refused or missing socket is
+/// a leader that died, anything else (a timeout, a permission error) a
+/// socket the caller cannot judge.
+pub(crate) fn probe_connect(socket_path: &Path) -> io::Result<()> {
+    connect_within(socket_path, PROBE_TIMEOUT)
+}
+
 /// Non-blocking unix connect that gives up after *timeout*.
 fn connect_within(socket_path: &Path, timeout: Duration) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;

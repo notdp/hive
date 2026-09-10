@@ -123,28 +123,55 @@ Consequences across modules:
   between leaves something the next run commits or drops. The entry goes
   with the directory, so the name is free at once; nothing is reserved.
   An archive past `purgeAfter` is purged (manifest `purging` first, then
-  the payload, then the rest). `hive gc restore <id> [--as NAME]` moves
-  the payload back under `teams/NAME/` as a new instance — a new
-  `createdAt`, `display` empty, `restoredFrom` recording the archive —
-  refusing a name in use and a member whose engine session a live team's
-  roster holds; no engine starts, the next attach builds the display.
+  the payload, then the rest), unless its payload was written into since
+  it was quarantined — then the purge date moves 30 days out from that
+  write. Every manifest transition re-reads the manifest under the store
+  lock (`teams/.lock`) first: a purge acts only on `quarantined` past its
+  date or a `purging` a crash left, keep only on `quarantined`, and the
+  trash never follows a symlink (a symlinked entry or an unreadable
+  manifest is reported as `corrupt`, never touched). `hive gc restore <id>
+  [--as NAME]` moves the payload back under `teams/NAME/` as a new
+  instance — a new `createdAt`, `display` empty, `restoredFrom` recording
+  the archive — refusing a name in use and a member whose engine session a
+  live team's roster holds; the manifest says `restoring` and the new
+  entry is written into the payload before the directory moves, so a
+  failure publishes nothing; no engine starts, the next attach builds the
+  display, and the arrangement the archive kept follows the new instance.
   The collector (`hive gc run`, and by itself at the tail of create /
   join / spawn / send / kill / delete / attach / workflow / fork at most
-  once a day, stamped in `$HIVE_HOME/state/gc/last-attempt`) classifies
-  every registry team from one tmux window listing, the hived's
-  `team-runtime` when its socket is there, the `run/operations/` journal,
-  one `claude agents --json --all` read only when a claude member needs
-  it, the codex daemon's `turn-open` for a codex member, and the grok
-  leader's socket for a grok member. Displayed, or a member busy or alive,
-  is active and clears `gc.coldSince`; nothing of the kind is cold, and
-  the first cold sight writes `gc.coldSince`; cold for 30 days archives
-  (origin `expired`), after stopping the hived. Anything the collector
-  cannot read — tmux not answering, the ledger call failing, a hived that
-  holds its socket silently, an unfinished node record — blocks that team
-  for this run. `gc.keep` exempts a team; `hive gc keep` toggles it on a
-  team or an archive. `--dry-run` writes nothing, not even a clock. Events
-  (`quarantined`, `purged`, `restored`, `kept`) append to
-  `$HIVE_HOME/state/gc/events.jsonl`.
+  once a day per hive home — the stamp `$HIVE_HOME/state/gc/last-attempt`
+  is checked and written under the store lock — within a 20s budget, the
+  rows it did not reach reported `deferred`) classifies every registry
+  team from one tmux window listing, the hived's `team-runtime` when a
+  hived listens on its socket (a socket nobody listens on is no hived; a
+  socket unreachable for any other reason blocks), the `run/operations/`
+  journal, one `claude agents --json --all` read and the live claude
+  session registry only when a claude member needs them (a desktop
+  conversation's CLI is a live session; a `hostSessionId` whose desktop
+  record cannot be read blocks), the codex daemon's `turn-open` for a
+  codex member, and the grok leader's socket for a grok member (refused or
+  missing is dead, any other failure blocks); a member on an engine the
+  collector has no probe for blocks. Displayed, or a member busy or alive,
+  is active and clears `gc.coldSince`; a blocked team's clock is cleared
+  too, since nothing unseen counts as idle time; nothing of the kind is
+  cold, and the first cold sight writes `gc.coldSince` (a clock from the
+  future starts over); cold for 30 days archives (origin `expired`). The
+  archive is a closed transaction: the collector first writes a close
+  intent `gc.closing = {at, by}` on the entry under the store lock, which
+  `Team::load` and the registry's write lane refuse to admit work into for
+  `CLOSING_TTL_SECONDS` (120s; an older intent is a crashed collector's and
+  gates nothing), asks the team's hived to stop gracefully (a hived with a
+  node result pending declines and the team stays), classifies the team
+  once more, and commits the archive under the lock only if the entry is
+  still that instance under that intent and not kept. `gc.keep` exempts a
+  team; `hive gc keep` toggles it on a team or an archive. `--dry-run`
+  writes nothing in the store or the trash, not even a clock, though it
+  still asks a listening hived for its runtime like a real run. Events
+  (`quarantined`, `deferred`, `purged`, `restored`, `kept`) append to
+  `$HIVE_HOME/state/gc/events.jsonl`, trimmed to its last 1000 lines past
+  1 MiB; the manifests, not the log, are the record. A store directory
+  without `team.json` (an older delete's leftover) is reported as
+  `unmanaged`, never touched.
 - **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
   delete/attach) need no tmux client: `create` outside tmux puts the
   team window in the session named after the team (created detached when
@@ -365,18 +392,26 @@ idle-notify and the roster binding they share — reads one snapshot per
 tick (`hived/snapshot.rs`): a `list-panes -a` with the pane's window, tty,
 pid, cwd and dead flag, a `list-windows -a` for the notify token, and one
 `ps` grouped by tty. Pane liveness, the pane's window, the CLI on its tty
-and the window's token are lookups into it, so a tick costs three forks
-however many members the team has. The roster binding is the registry
+and the window's token are lookups into it, so a successful snapshot costs
+those three forks however many members the team has (a failed listing falls
+back per item, the sleep probe's `window_exists` and the 30s supervisor /
+backfill passes fork on their own). The roster binding is the registry
 joined to the snapshot's `@hive-team` / `@hive-agent` tags — the hived no
 longer calls `Team::load` per tick. While the server does not answer
 (`no-server` or `unknown` alike), the ticks are skipped and the probe backs
 off, doubling from one tick up to `DISPLAY_PROBE_MAX_BACKOFF_SECONDS`, with
 `display.unreachable` / `display.recovered` logged once per flip. The
 request socket keeps its one-second accept loop throughout, and the
-control-mode monitor's reattach backs off the same way (`tmux/control_mode.rs`,
-which also reaps a `tmux -C attach` client of the team session left
-reparented to pid 1 by a hived that was killed), so a dead tmux server
-costs a hived one probe per 30s instead of a fork storm per second.
+control-mode monitor's reattach backs off the same way (`tmux/control_mode.rs`),
+so a dead tmux server costs a hived one probe per 30s instead of a fork
+storm per second. The monitor records every control client it spawns in
+`<run dir>/control-clients.json` — pid, `ps lstart` birth, session — and
+removes the row when the client exits; at start it reaps a `tmux -C attach`
+client left reparented to pid 1 by a hived that was killed only when the
+ledger names that pid with the same birth and argv (a pid alone is reused,
+an argv alone may be a human's client on another server's same-named
+session); a reparented client the ledger does not vouch for is only
+reported (`monitor.orphan_unowned`).
 
 ### Addresses beyond the roster
 
