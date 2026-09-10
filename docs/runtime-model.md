@@ -322,7 +322,7 @@ runner refuses a claude member before anything is spawned.
   its response. A Grok result lookup requires the original generation;
   a replacement client cannot supply a result for the old handle. The hived
   holds the engine handle in memory and writes its operation record under
-  `run/operations/`, keyed by team incarnation and dispatch id. The record is
+  `run/operations/<incarnation>/<dispatchId>.json`. The record is
   prepared before the bus write or engine submission; the handle and native
   terminal result are then saved with atomic rename (without fsync). Completed
   results remain readable by `node-result` after hived restarts. The run record (below) is written `pending`
@@ -346,16 +346,20 @@ runner refuses a claude member before anything is spawned.
   the answer (`grok_leader::PromptResult`). In both engines the result is
   the member's last message of the turn; a member that stops to ask has
   ended its turn with that question.
-- **Retirement.** Shutdown, identity replacement and reexec close the same
-  admission gate and wait for accepted request leases and outstanding native
-  results to be persisted. Ordinary Codex/Grok sends also retain tracked
-  handles until their terminal results are saved. Claude sends record the
-  transport acceptance only: its inbox/job is external to the hived and no
-  native execution result is available. Unresolved live handles or failed
-  journal writes defer voluntary retirement and emit a diagnostic. New requests
-  during shutdown drain are rejected as `notAdmitted`, so callers can retry
-  without replaying accepted work. Explicit member/team removal is
-  recorded as interruption; an abrupt daemon exit leaves an ambiguous record.
+- **Retirement.** A graceful shutdown with pending node operations returns
+  `draining: true` and leaves the hived serving and ticking. An identity
+  upgrade that receives this answer uses the old generation until its normal
+  reexec gate can retire it. A shutdown accepted before a concurrent node
+  dispatch becomes visible also resumes service when that dispatch is seen.
+  Only accepted request leases are waited on, for at most five seconds;
+  graceful timeout resumes service. Explicit deletion uses `force: true`,
+  records unresolved nodes as interrupted/ambiguous and exits after the bounded
+  request wait. During that short wait, new requests receive `notAdmitted`.
+  Ordinary sends stay in memory and do not delay retirement; their terminal
+  entries are removed. Persisted node terminal entries are also removed from
+  memory, with subsequent reads served by the journal. Failed node writes
+  retain the in-memory result and emit a diagnostic. Incarnation lookup for
+  `node-result` reads the registry directly, without tmux or `Team::load`.
 - **The read-back.** The runner polls the hived's `node-result` for the
   dispatch id at 1s: `running` while the turn is open; `ended` with
   `status` (the engine's word), `text` and `error` once it is; `unknown`

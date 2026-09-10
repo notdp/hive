@@ -2855,7 +2855,10 @@ mod tests {
             matches!(env.node_result("nd-abcdef012345"), Some(NodeResult::Ambiguous(reason)) if reason.contains("unresolved"))
         );
 
-        let shutdown = Map::from_iter([("action".to_string(), Value::from("shutdown"))]);
+        let shutdown = Map::from_iter([
+            ("action".to_string(), Value::from("shutdown")),
+            ("force".to_string(), Value::Bool(true)),
+        ]);
         let bye =
             crate::hived::request_hived(&workspace, &shutdown, crate::hived::SOCKET_READY_TIMEOUT);
         assert_eq!(

@@ -131,15 +131,31 @@ pub fn ensure_hived(
             let stopped = stop_hived_generation(
                 workspace,
                 response.as_ref().and_then(|r| r.get("hived")).cloned(),
+                false,
             );
             unsafe {
                 libc::flock(lock_fd, libc::LOCK_EX);
+            }
+            if stopped == StopOutcome::Deferred {
+                return Ok(None);
             }
             let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
             if hived_identity_matches(response.as_ref(), team) {
                 return Ok(None);
             }
-            if !stopped || response.is_some() {
+            if stopped == StopOutcome::TimedOut
+                && response
+                    .as_ref()
+                    .and_then(|r| r.get("team"))
+                    .and_then(Value::as_str)
+                    == Some(team)
+            {
+                if let HivedIdentity::ForeignHome(home) = hived_identity(response.as_ref(), team) {
+                    bail!("hived now serves another hive home: {home}");
+                }
+                return Ok(None);
+            }
+            if stopped != StopOutcome::Stopped || response.is_some() {
                 bail!("hived is draining; retry after accepted operations finish");
             }
         }
@@ -286,8 +302,10 @@ fn hooked_make_busy_monitor(
 
 pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_id: &str) {
     SHUTDOWN.store(false, Ordering::SeqCst);
+    FORCE_SHUTDOWN.store(false, Ordering::SeqCst);
     reopen_admission();
     let hived_started_at = now_iso();
+    let mut retirement_reason = "shutdown";
     let mut idle_notify: HashMap<String, IdleRecord> = HashMap::new();
     let mut notify_debug_state = NotifyDebugState::default();
     let mut code_reexec_state = ReexecState::default();
@@ -358,6 +376,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     // for all of them.
     loop {
         if !Path::new(workspace).is_dir() {
+            retirement_reason = "workspace removed";
             break;
         }
 
@@ -373,6 +392,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             // might be wrong.
             if let Some(path) = crate::registry::entry_path(team) {
                 if !path.is_file() && !hooked_is_tmux_window_alive(tmux_window_id) {
+                    retirement_reason = "team removed";
                     break;
                 }
             }
@@ -392,6 +412,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         if now - last_owner_check >= HIVED_OWNER_CHECK_SECONDS {
             last_owner_check = now;
             if let Some(foreign_pid) = foreign_owner_pid(workspace, &owner_token) {
+                retirement_reason = "hived replaced";
                 hooked_notify_debug_emit(
                     workspace,
                     "hived.retire_orphan",
@@ -492,10 +513,10 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             &hived_started_at,
             IDLE_NOTIFY_TICK_SECONDS,
         ) {
-            while !drain_ready(workspace) {
-                reject_draining_request(server.as_ref());
+            if finish_shutdown(workspace, server.as_ref(), Duration::from_secs(5)) {
+                break;
             }
-            break;
+            continue;
         }
 
         if let (Some(snap), Some(tick_members)) = (snap.as_ref(), tick_members.as_deref()) {
@@ -519,10 +540,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     set_output_busy_monitor(None);
     close_admission();
     if !SHUTDOWN.load(Ordering::SeqCst) && Path::new(workspace).is_dir() {
-        interrupt_operations(
-            workspace,
-            "hived ownership or team removed; execution interrupted outside graceful drain",
-        );
+        interrupt_operations(workspace, retirement_reason);
     }
     server.close();
     // ensure releases this lock before requesting shutdown; competing
@@ -548,25 +566,61 @@ pub(super) fn drain_ready(workspace: &str) -> bool {
     close_admission() && flush_operations(workspace)
 }
 
-pub fn stop_hived(workspace: &str) -> bool {
-    stop_hived_generation(workspace, None)
+/// Await only already accepted request handlers. A late node dispatch or a
+/// slow handler cancels graceful retirement; forced deletion has a deadline.
+pub(super) fn finish_shutdown(
+    workspace: &str,
+    server: &dyn HivedServerApi,
+    timeout: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while requests_in_flight() && std::time::Instant::now() < deadline {
+        reject_draining_request(server);
+    }
+    if FORCE_SHUTDOWN.load(Ordering::SeqCst) {
+        interrupt_operations(workspace, "forced shutdown");
+        return true;
+    }
+    if requests_in_flight() || pending_operations(workspace) > 0 {
+        SHUTDOWN.store(false, Ordering::SeqCst);
+        reopen_admission();
+        return false;
+    }
+    true
 }
 
-fn stop_hived_generation(workspace: &str, expected: Option<Value>) -> bool {
+pub fn stop_hived(workspace: &str) {
+    if stop_hived_generation(workspace, None, true) == StopOutcome::TimedOut {
+        eprintln!("hived did not exit within {SOCKET_READY_TIMEOUT}s");
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum StopOutcome {
+    Stopped,
+    Deferred,
+    TimedOut,
+}
+
+fn stop_hived_generation(workspace: &str, expected: Option<Value>, force: bool) -> StopOutcome {
     let mut request = action_payload("shutdown");
+    request.insert("force".into(), Value::Bool(force));
     if let Some(expected) = expected {
         request.insert("expectedHived".into(), expected);
     }
     let response = request_hived(workspace, &request, SOCKET_READY_TIMEOUT);
+    if response.as_ref().and_then(|r| r.get("draining")) == Some(&Value::Bool(true)) {
+        return StopOutcome::Deferred;
+    }
     if response.as_ref().and_then(|r| r.get("generationChanged")) == Some(&Value::Bool(true)) {
-        return true;
+        return StopOutcome::Stopped;
     }
     let deadline = monotonic() + SOCKET_READY_TIMEOUT;
     while monotonic() < deadline {
         if !socket_path(workspace).exists() {
-            return true;
+            return StopOutcome::Stopped;
         }
         thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
     }
-    false
+    StopOutcome::TimedOut
 }

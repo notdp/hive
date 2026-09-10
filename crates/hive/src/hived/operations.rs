@@ -5,9 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::agent::TurnHandle;
@@ -34,13 +33,46 @@ fn active() -> &'static Mutex<HashMap<PathBuf, Operation>> {
     CELL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn record_path(workspace: &str, team: &str, incarnation: &str, id: &str) -> PathBuf {
-    let key = serde_json::to_vec(&(team, incarnation, id)).unwrap();
-    let digest = Sha256::digest(key);
-    let name: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+fn record_path(workspace: &str, incarnation: &str, id: &str) -> PathBuf {
     hooked_run_dir(workspace)
         .join("operations")
-        .join(format!("{name}.json"))
+        .join(incarnation)
+        .join(format!("{id}.json"))
+}
+
+fn validate_key(incarnation: &str, id: &str) -> Result<()> {
+    let epoch = incarnation
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite() && *n > 0.0);
+    if epoch.is_none()
+        || incarnation.contains(['/', '\\'])
+        || id.is_empty()
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        bail!("invalid operation incarnation or dispatchId");
+    }
+    Ok(())
+}
+
+fn registry_incarnation(team: &str) -> Result<String> {
+    let entry =
+        crate::registry::load(team).ok_or_else(|| anyhow::anyhow!("team registry unavailable"))?;
+    let created = entry
+        .get("createdAt")
+        .ok_or_else(|| anyhow::anyhow!("team incarnation missing"))?;
+    let epoch = created
+        .as_f64()
+        .or_else(|| created.as_str()?.parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n > 0.0)
+        .ok_or_else(|| anyhow::anyhow!("invalid team incarnation"))?;
+    Ok(crate::team::created_at_key(epoch))
+}
+
+fn completed(operation: &Operation) -> bool {
+    operation.record["state"] == "terminal" && operation.persisted
 }
 
 fn write_record(path: &Path, record: &Value) -> Result<()> {
@@ -57,6 +89,10 @@ fn write_record(path: &Path, record: &Value) -> Result<()> {
 }
 
 fn persist_operation(path: &Path, operation: &mut Operation) -> Result<()> {
+    if operation.record["kind"] != "node" {
+        operation.persisted = true;
+        return Ok(());
+    }
     match write_record(path, &operation.record) {
         Ok(()) => {
             operation.persisted = true;
@@ -86,10 +122,13 @@ pub(super) fn prepare_operation(
     target: &str,
     kind: &str,
 ) -> Result<PathBuf> {
-    let path = record_path(workspace, team, incarnation, id);
+    validate_key(incarnation, id)?;
+    let path = record_path(workspace, incarnation, id);
     let mut operations = active().lock().unwrap_or_else(|e| e.into_inner());
     let previous = if let Some(operation) = operations.get(&path) {
         Some(operation.record.clone())
+    } else if kind != "node" {
+        None
     } else {
         match fs::read(&path) {
             Ok(bytes) => Some(serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null)),
@@ -112,7 +151,9 @@ pub(super) fn prepare_operation(
     let record = json!({"team":team,"incarnation":incarnation,"dispatchId":id,"attempt":attempt,
         "target":target,"kind":kind,"state":"prepared",
         "registryBacked": crate::registry::load(team).is_some()});
-    write_record(&path, &record)?;
+    if kind == "node" {
+        write_record(&path, &record)?;
+    }
     operations.insert(
         path.clone(),
         Operation {
@@ -128,7 +169,12 @@ pub(super) fn prepare_operation(
 
 pub(super) fn operation_handle(path: &Path, handle: TurnHandle) -> Result<()> {
     let mut operations = active().lock().unwrap_or_else(|e| e.into_inner());
-    let operation = operations.get_mut(path).expect("prepared operation");
+    let operation = operations
+        .get_mut(path)
+        .ok_or_else(|| anyhow::anyhow!("operation retired"))?;
+    if operation.record["state"] == "terminal" {
+        bail!("operation interrupted");
+    }
     operation.record["state"] = json!("running");
     operation.record["handle"] = match &handle {
         TurnHandle::Codex { thread_id, turn_id } => {
@@ -146,7 +192,12 @@ pub(super) fn operation_handle(path: &Path, handle: TurnHandle) -> Result<()> {
 
 pub(super) fn operation_terminal(path: &Path, mut result: Map<String, Value>) -> Result<()> {
     let mut operations = active().lock().unwrap_or_else(|e| e.into_inner());
-    let operation = operations.get_mut(path).expect("prepared operation");
+    let operation = operations
+        .get_mut(path)
+        .ok_or_else(|| anyhow::anyhow!("operation retired"))?;
+    if operation.record["state"] == "terminal" {
+        bail!("operation interrupted");
+    }
     result.entry("state").or_insert(json!("ended"));
     result.entry("status").or_insert(json!("refused"));
     result.entry("text").or_insert(json!(""));
@@ -157,7 +208,9 @@ pub(super) fn operation_terminal(path: &Path, mut result: Map<String, Value>) ->
     operation.record["state"] = json!("terminal");
     operation.record["result"] = Value::Object(result);
     operation.persisted = false;
-    persist_operation(path, operation)
+    persist_operation(path, operation)?;
+    operations.remove(path);
+    Ok(())
 }
 
 fn retired_reason(record: &Value) -> Option<&'static str> {
@@ -204,14 +257,17 @@ pub(super) fn interrupt_operations(workspace: &str, reason: &str) {
             continue;
         }
         let id = operation.record["dispatchId"].as_str().unwrap_or_default();
-        operation.record["result"] = Value::Object(ambiguous(id, reason));
+        let mut result = ambiguous(id, reason);
+        result.insert("status".into(), json!("interrupted"));
+        operation.record["result"] = Value::Object(result);
         operation.record["state"] = json!("terminal");
         let _ = persist_operation(path, operation);
     }
+    operations.retain(|_, operation| !completed(operation));
 }
 
 /// Called by the serving/draining coordinator even when no runner polls.
-/// An unknown live handle still owns its client; it cannot authorize exec.
+/// An unresolved node handle keeps its result obligation and defers exec.
 pub(super) fn flush_operations(workspace: &str) -> bool {
     let root = hooked_run_dir(workspace).join("operations");
     let mut operations = active().lock().unwrap_or_else(|e| e.into_inner());
@@ -241,17 +297,36 @@ pub(super) fn flush_operations(workspace: &str) -> bool {
         if !operation.persisted {
             let _ = persist_operation(path, operation);
         }
-        ready &= operation.record["state"] == "terminal" && operation.persisted;
+        if operation.record["kind"] == "node" {
+            ready &= completed(operation);
+        }
     }
+    operations.retain(|_, operation| !completed(operation));
     ready
 }
 
+pub(super) fn pending_operations(workspace: &str) -> usize {
+    flush_operations(workspace);
+    let root = hooked_run_dir(workspace).join("operations");
+    active()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|(path, operation)| {
+            path.starts_with(&root) && operation.record["kind"] == "node" && !completed(operation)
+        })
+        .count()
+}
+
 pub(super) fn durable_node_result(workspace: &str, team: &str, id: &str) -> Map<String, Value> {
-    let incarnation = match hooked_team_load(team) {
-        Ok(team) => team.created_at_key(),
+    let incarnation = match registry_incarnation(team) {
+        Ok(incarnation) => incarnation,
         Err(error) => return err_response(error),
     };
-    let path = record_path(workspace, team, &incarnation, id);
+    if let Err(error) = validate_key(&incarnation, id) {
+        return err_response(error);
+    }
+    let path = record_path(workspace, &incarnation, id);
     flush_operations(workspace);
     let operations = active().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(operation) = operations.get(&path) {
@@ -309,10 +384,22 @@ mod tests {
     }
 
     fn hooks(workspace: &str) -> Hook {
-        let loaded = team(workspace);
-        let resolved = loaded.clone();
+        if crate::registry::load("journal").is_none() {
+            crate::registry::record_team(
+                "journal",
+                workspace,
+                "123",
+                &[json!({"name":"worker","cli":"codex"})
+                    .as_object()
+                    .unwrap()
+                    .clone()],
+                "",
+            )
+            .unwrap();
+        }
+        let resolved = team(workspace);
         Hook {
-            team_load: Some(Arc::new(move |_| Ok(loaded.clone()))),
+            team_load: Some(Arc::new(|_| panic!("node-result must not load Team"))),
             resolve_live_agent: Some(Arc::new(move |_, _| {
                 Ok((
                     resolved.clone(),
@@ -455,7 +542,7 @@ mod tests {
         fs::remove_file(dir).unwrap();
         fs::rename(saved, dir).unwrap();
         assert!(flush_operations(workspace));
-        active().lock().unwrap().remove(&path);
+        assert!(!active().lock().unwrap().contains_key(&path));
         assert_eq!(
             durable_node_result(workspace, "journal", "nd-done")["text"],
             "result from native engine"
@@ -506,18 +593,16 @@ mod tests {
             "",
         )
         .unwrap();
-        assert!(!drain_ready(workspace));
+        let id = answer["dispatchId"].as_str().unwrap();
+        let path = record_path(workspace, "123", id);
+        assert!(active().lock().unwrap().contains_key(&path));
+        assert!(!hooked_run_dir(workspace).join("operations").exists());
+        assert!(drain_ready(workspace));
         reopen_admission();
         testhook::update(|h| h.cas_turn_result = hooks(workspace).cas_turn_result);
         assert!(drain_ready(workspace));
-        let id = answer["dispatchId"].as_str().unwrap();
-        let record: Value = serde_json::from_slice(
-            &fs::read(record_path(workspace, "journal", "123", id)).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(record["kind"], "send");
-        assert_eq!(record["handle"]["turnId"], "turn");
-        assert_eq!(record["result"]["text"], "result from native engine");
+        assert!(!active().lock().unwrap().contains_key(&path));
+        assert!(!hooked_run_dir(workspace).join("operations").exists());
     }
 
     #[test]
@@ -637,5 +722,25 @@ mod tests {
         assert_eq!(result["state"], "ended");
         let record: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(record["result"], Value::Object(result));
+    }
+
+    #[test]
+    fn test_journal_paths_are_readable_and_reject_untrusted_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = EnvGuard::new();
+        env.set("HIVE_HOME", tmp.path().join("home"));
+        let workspace = tmp.path().to_str().unwrap();
+        let _guard = testhook::install(hooks(workspace));
+        for id in ["../escape", "/absolute", "a/b", "a\\b", ""] {
+            assert!(prepare_operation(workspace, "journal", "123", id, "worker", "node").is_err());
+            assert_eq!(durable_node_result(workspace, "journal", id)["ok"], false);
+        }
+        assert!(!hooked_run_dir(workspace).join("operations").exists());
+        let path =
+            prepare_operation(workspace, "journal", "123", "nd-visible", "worker", "node").unwrap();
+        assert_eq!(
+            path,
+            hooked_run_dir(workspace).join("operations/123/nd-visible.json")
+        );
     }
 }

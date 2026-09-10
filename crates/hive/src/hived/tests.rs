@@ -3691,6 +3691,16 @@ fn test_handle_request_send_defaults_to_the_hived_team_and_writes_the_bus_event(
 #[test]
 fn test_handle_request_node_dispatch_carries_no_sender() {
     let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path().join("home"));
+    crate::registry::record_team(
+        "team-a",
+        tmp.path().to_str().unwrap(),
+        "123",
+        &[json_obj(&[("name", Value::from("b"))])],
+        "",
+    )
+    .unwrap();
     let workspace = tmp.path().join("ws");
     bus::init_workspace(&workspace).unwrap();
     let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4751,13 +4761,15 @@ fn test_serve_connection_round_trips_ping_over_a_real_socket() {
 // ---- send payload ------------------------------------------------------
 
 fn saved_operation(workspace: &Path, id: &str) -> Value {
-    fs::read_dir(hooked_run_dir(workspace.to_str().unwrap()).join("operations"))
-        .unwrap()
-        .map(|entry| {
-            serde_json::from_slice::<Value>(&fs::read(entry.unwrap().path()).unwrap()).unwrap()
-        })
-        .find(|record| record["dispatchId"] == id)
-        .unwrap()
+    serde_json::from_slice(
+        &fs::read(
+            hooked_run_dir(workspace.to_str().unwrap())
+                .join("operations/123")
+                .join(format!("{id}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap()
 }
 
 fn wire_send(hook: &mut Hook, workspace: &Path) {
@@ -6412,4 +6424,132 @@ fn test_team_member_bindings_join_the_roster_to_tagged_panes_without_tmux() {
     assert_eq!(row("dodo")["role"], "mirror");
     assert_eq!(row("dodo")["cli"], "claude");
     assert!(team_member_bindings_impl("team-z", &snap).is_err());
+}
+
+#[test]
+fn test_shutdown_refused_while_operations_pending_keeps_serving() {
+    let env = loop_probe_env("ok");
+    let path =
+        prepare_operation(&env.workspace, "probe", "123", "nd-busy", "worker", "node").unwrap();
+    operation_handle(&path, TurnHandle::Unknown("awaiting native result".into())).unwrap();
+    let workspace = env.workspace.clone();
+    let serves = Arc::clone(&env.serves);
+    testhook::update(|h| {
+        h.serve_requests = Some(Arc::new(move || {
+            let mut count = serves.lock().unwrap();
+            *count += 1;
+            assert!(!admission().lock().unwrap().closed);
+            let mut request = action_payload("shutdown");
+            if *count == 2 {
+                request.insert("force".into(), Value::Bool(true));
+            }
+            let (answer, keep_running) =
+                handle_request(&workspace, "probe", "", "", "start", &request);
+            if *count == 1 {
+                assert_eq!(answer["draining"], true);
+                assert_eq!(answer["pendingOperations"], 1);
+                assert!(keep_running);
+                assert_eq!(
+                    handle_request(
+                        &workspace,
+                        "probe",
+                        "",
+                        "",
+                        "start",
+                        &action_payload("ping")
+                    )
+                    .0["ok"],
+                    true
+                );
+            } else {
+                assert_eq!(*count, 2);
+                assert_eq!(answer["ok"], true);
+                assert!(!keep_running);
+                SHUTDOWN.store(true, Ordering::SeqCst);
+            }
+            keep_running
+        }))
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert_eq!(*env.serves.lock().unwrap(), 2);
+    assert_eq!(*env.bindings.lock().unwrap(), 2);
+    let record: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(record["result"]["status"], "interrupted");
+    assert_eq!(record["result"]["reason"], "forced shutdown");
+}
+
+#[test]
+fn test_ensure_hived_uses_old_generation_when_graceful_shutdown_is_deferred() {
+    let tmp = short_workspace();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path().join("home"));
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let server = Arc::new(open_server_socket(&workspace).unwrap());
+    let _guard = testhook::install(Hook {
+        request_ping: Some(Arc::new(|_, _| {
+            Some(json_obj(&[
+                ("ok", Value::Bool(true)),
+                ("team", Value::from("t")),
+                (
+                    "hiveHome",
+                    Value::from(crate::paths::hive_home().to_string_lossy().to_string()),
+                ),
+                ("buildHash", Value::from("old")),
+                ("hived", Value::Object(hived_metadata("start"))),
+            ]))
+        })),
+        popen: Some(Arc::new(|_, _| panic!("old generation is still serving"))),
+        cleanup_socket: Some(Arc::new(|_| panic!("must not unlink live socket"))),
+        ..Default::default()
+    });
+    let path = prepare_operation(&workspace, "t", "123", "nd-busy", "worker", "node").unwrap();
+    operation_handle(&path, TurnHandle::Unknown("pending".into())).unwrap();
+    let serving_ws = workspace.clone();
+    let serving_socket = Arc::clone(&server);
+    let serving = thread::spawn(move || {
+        serve_requests(
+            serving_socket.as_ref(),
+            &serving_ws,
+            "t",
+            "",
+            "",
+            "start",
+            0.2,
+        )
+    });
+    assert_eq!(ensure_hived(&workspace, "t", "", "").unwrap(), None);
+    assert_eq!(
+        request_hived(&workspace, &action_payload("ping"), 1.0).unwrap()["ok"],
+        true
+    );
+    assert!(serving.join().unwrap());
+    assert!(!admission().lock().unwrap().closed);
+    server.close();
+}
+
+#[test]
+fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
+    let _guard = testhook::install(Hook::default());
+    let tmp = short_workspace();
+    admission().lock().unwrap().leases += 1;
+    let lease = RequestLease;
+    let server = RecServer {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    };
+    SHUTDOWN.store(true, Ordering::SeqCst);
+    close_admission();
+    assert!(!finish_shutdown(
+        tmp.path().to_str().unwrap(),
+        &server,
+        Duration::ZERO
+    ));
+    assert!(!SHUTDOWN.load(Ordering::SeqCst));
+    assert!(!admission().lock().unwrap().closed);
+    FORCE_SHUTDOWN.store(true, Ordering::SeqCst);
+    assert!(finish_shutdown(
+        tmp.path().to_str().unwrap(),
+        &server,
+        Duration::ZERO
+    ));
+    drop(lease);
 }

@@ -84,6 +84,7 @@ pub(super) fn codex_reattach_at() -> &'static Mutex<HashMap<String, f64>> {
 }
 
 pub(super) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+pub(super) static FORCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// Admission and the outstanding count share one lock. The accept loop
 /// reserves a lease before waiting for a connection, then transfers it to
 /// the handler. Closing the gate also accounts for an accept already waiting.
@@ -116,7 +117,6 @@ pub(super) fn reopen_admission() {
     admission().lock().unwrap_or_else(|e| e.into_inner()).closed = false;
 }
 
-#[cfg(test)]
 pub(crate) fn requests_in_flight() -> bool {
     admission().lock().unwrap_or_else(|e| e.into_inner()).leases > 0
 }

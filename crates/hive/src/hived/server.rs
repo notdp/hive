@@ -224,6 +224,24 @@ pub(crate) fn handle_request(
                     return (response, true);
                 }
             }
+            close_admission();
+            let force = FORCE_SHUTDOWN.load(Ordering::SeqCst)
+                || request
+                    .get("force")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            let pending = pending_operations(workspace);
+            if !force && pending > 0 {
+                reopen_admission();
+                return (
+                    serde_json::json!({"ok":false,"draining":true,"pendingOperations":pending})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    true,
+                );
+            }
+            FORCE_SHUTDOWN.store(force, Ordering::SeqCst);
             let mut response = Map::new();
             response.insert("ok".to_string(), Value::Bool(true));
             (response, false)
@@ -350,7 +368,8 @@ pub(super) fn reject_draining_request(server: &dyn HivedServerApi) {
     let _ = conn.set_read_timeout(timeout);
     let _ = conn.set_write_timeout(timeout);
     let mut buf = [0u8; 65536];
-    loop {
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < deadline {
         match conn.read(&mut buf) {
             Ok(0) | Err(_) => break,
             Ok(_) => {}
