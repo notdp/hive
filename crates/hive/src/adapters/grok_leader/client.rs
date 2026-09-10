@@ -877,6 +877,13 @@ impl GrokStdioClient {
         }
     }
 
+    /// Retirement needs both completed turn evidence and no outstanding RPC.
+    pub(super) fn idle_for_sleep(&self) -> bool {
+        self.is_alive()
+            && self.turn_open() == Some(false)
+            && self.inner.pending.lock().unwrap().is_empty()
+    }
+
     /// Turn evidence, replay included: `Some(false)` for a session whose
     /// history ends in a completed turn, `Some(true)` for one mid-turn,
     /// `None` while no turn event has been seen at all.

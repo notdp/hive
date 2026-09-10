@@ -282,7 +282,7 @@ When bumping, scan all commits since the last version bump commit and determine 
 ## Security & runtime notes
 
 Do not hardcode secrets, session IDs, or local machine paths.
-The hived is a long-lived workspace process. When validating hived-related runtime changes manually, use the isolated dev lane described under build and test (a disposable `HIVE_HOME` with its own team) and restart that lane's hived onto the checkout build before trusting `doctor`, delivery, or activity output; the live team's hived stays on the stable install.
+The hived stays resident while it has a display or an obligation; after ten minutes with neither it retires gracefully and the next command that needs it starts a new generation. When validating hived-related runtime changes manually, use the isolated dev lane described under build and test (a disposable `HIVE_HOME` with its own team) and restart that lane's hived onto the checkout build before trusting `doctor`, delivery, or activity output; the live team's hived stays on the stable install.
 
 ## Debug logs
 

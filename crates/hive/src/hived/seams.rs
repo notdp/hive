@@ -622,6 +622,15 @@ pub(super) fn hooked_gl_kill_daemon_key(key: &str) {
     crate::adapters::grok_leader::kill_daemon_key(key)
 }
 
+pub(super) fn hooked_gl_park_daemon_key(key: &str) {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_park_daemon_key.clone()).flatten() {
+        f(key);
+        return;
+    }
+    crate::adapters::grok_leader::park_daemon_key(key)
+}
+
 pub(super) fn hooked_gl_pool_drop_key(key: &str) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.gl_pool_drop_key.clone()).flatten() {

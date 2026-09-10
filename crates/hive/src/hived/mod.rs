@@ -19,6 +19,7 @@ mod reexec;
 mod runtime;
 mod seams;
 mod server;
+mod sleep;
 mod snapshot;
 mod state;
 mod status;
@@ -41,6 +42,7 @@ pub use reexec::*;
 pub(crate) use runtime::*;
 pub use seams::*;
 pub use server::*;
+use sleep::*;
 pub(crate) use snapshot::*;
 pub use state::*;
 pub use status::*;
@@ -53,6 +55,7 @@ pub const IDLE_NOTIFY_MISSING_PRUNE_TICKS: i64 = 5;
 pub const NOTIFY_DEBUG_HEARTBEAT_SECONDS: f64 = 30.0;
 pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
+pub const HIVED_SLEEP_AFTER_SECONDS: f64 = 600.0;
 // The display (tmux server) is probed every tick while it answers — that
 // listing is the pane snapshot the status and view ticks read — and on a
 // doubling schedule capped here while it does not. A dead server must not
@@ -95,6 +98,10 @@ const SEND_GATE_WAIVED_REASONS: [&str; 1] = ["registry:dialog open"];
 // A stamp that must read as "long ago" seeds NEG_INFINITY, not 0.0: zero is
 // only moments before the first tick on this clock.
 fn monotonic() -> f64 {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.monotonic.clone()).flatten() {
+        return f();
+    }
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
 }

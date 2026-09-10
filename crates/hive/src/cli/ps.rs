@@ -515,10 +515,19 @@ fn collect() -> Result<Vec<Value>, String> {
             json!(hived_teams.contains(&(team.clone(), workspace)))
         };
         item["displayPresent"] = display_present(panes.as_deref(), server, &team);
+        item["state"] = json!(team_state(&item["hivedPresent"], &item["displayPresent"]));
         item["orchSession"] = json!(orch_state(entry));
         rows.push(item);
     }
     Ok(rows)
+}
+
+fn team_state(hived: &Value, display: &Value) -> &'static str {
+    match (hived.as_bool(), display.as_bool()) {
+        (Some(false), Some(false)) => "asleep",
+        (Some(true), _) | (_, Some(true)) => "running",
+        _ => UNKNOWN,
+    }
 }
 
 fn render_json(rows: &[Value]) -> String {
@@ -597,6 +606,21 @@ pub(super) fn run(json: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_registered_team_without_hived_or_display_is_asleep() {
+        let state = team_state(&json!(false), &json!(false));
+        assert_eq!(state, "asleep");
+        let item = json!({"kind":"team", "logicalOwner":"cedar", "state":state});
+        assert!(render_table(&[item.clone()]).contains("state=asleep"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&render_json(&[item])).unwrap()[0]["state"],
+            "asleep"
+        );
+        assert_eq!(team_state(&json!(true), &json!(false)), "running");
+        assert_eq!(team_state(&json!(false), &json!(true)), "running");
+        assert_eq!(team_state(&json!(false), &json!("unknown")), "unknown");
+    }
 
     #[test]
     fn test_orphan_client_keeps_logical_owner_separate_from_os_parent() {

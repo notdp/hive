@@ -61,6 +61,31 @@ Consequences across modules:
   it, and hived identity is `(workspace socket, team, hive home)`, so a dead
   window does not retire a hived on its own; a missing registry entry with
   no window left behind it does.
+- **The desk sleeps.** A hived stays resident while it has a display or an
+  obligation. With neither for 600 seconds, it closes admission and retires
+  gracefully; registry, bus and run files stay in place. A display is absent
+  when tmux is unreachable, or both the original window and the registry's
+  cached window are gone. An accepted request, a pending node result or an
+  owned Grok client whose idle state cannot be established blocks sleep.
+  Grok needs completed-turn evidence and no outstanding RPC; observing the
+  pool does not connect or spawn a client. Claude background jobs belong to
+  their supervisor and do not keep the desk awake. Ordinary Codex sends do
+  not own a node-result obligation.
+  Read-only ping, doctor, team-runtime, runtime-snapshot, node-result and
+  turn-open requests do not renew the timer, though their replies must finish
+  before exit. Other requests renew it even if they finish between ticks.
+  Display recovery or an obligation resets the timer. An arrival during the
+  sleep drain cancels retirement; a queued connection gets `notAdmitted` and
+  can retry. Before exit the hived backfills the registry, stops only its own
+  idle Grok clients' team keys, emits `hived.sleep` with `idleSeconds` and
+  `display-unreachable` / `window-gone`, and performs owner-checked socket
+  cleanup. Grok session records and aliases survive parking; the next send
+  starts the member leader and loads the recorded session. Runtime reads do
+  not start parked leaders. Codex shared daemons are left to their home. The existing ensure
+  path starts the next generation on demand, including a subsequent send or
+  attach. `hive ps` reports a registered team with neither hived nor display
+  as `state: "asleep"`; either present is `running`, incomplete evidence is
+  `unknown`. This is a read-only inventory, not a request to wake the team.
 - **The hive home is part of the identity.** A hived answers `ping` with
   the `HIVE_HOME` it resolved. A client of the same home that finds another
   build, api version or team on the socket restarts the hived from its own

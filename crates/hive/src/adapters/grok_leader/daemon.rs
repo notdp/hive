@@ -557,6 +557,15 @@ fn terminate_process_group(pid: libc::pid_t) {
 /// record naming a dead or recycled pid is removed without touching the
 /// process.
 pub fn kill_daemon_key(key: &str) {
+    retire_daemon_key(key, false);
+}
+
+/// Stop an idle leader while retaining the session and alias used to resume it.
+pub(crate) fn park_daemon_key(key: &str) {
+    retire_daemon_key(key, true);
+}
+
+fn retire_daemon_key(key: &str, retain_session: bool) {
     // The alias this kill resolved through, read once up front: the reap
     // below takes seconds, and a join could bind the member to another
     // launch meanwhile — that alias is not this kill's to remove.
@@ -571,10 +580,13 @@ pub fn kill_daemon_key(key: &str) {
         sock.clone(),
         sock.with_extension("lock"),
         sock.with_extension("pid"),
-        sock.with_extension("session"),
     ] {
         let _ = fs::remove_file(path);
     }
+    if retain_session {
+        return;
+    }
+    let _ = fs::remove_file(sock.with_extension("session"));
     // The member's alias goes under the same lock a bind or rollback holds,
     // and only while it still names the launch this kill reaped; the lock
     // file itself stays — flock is by inode, and a lock file unlinked under
