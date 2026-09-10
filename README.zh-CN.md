@@ -49,7 +49,7 @@ hive plugin setup
 ```bash
 # 一次性设置：在 shell rc 里加 eval "$(hive shell-init zsh)"，
 # 放在 installer 已写入的 PATH 那一行之后
-# 在这里启动 Claude；hcodex / hgrok 需要一个已有的 tmux pane
+# 在这里启动 agent，在不在 tmux 里都行
 $ hclaude      # 或：hcodex / hgrok
 
 # 在 agent 会话里输入：

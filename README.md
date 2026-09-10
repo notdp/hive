@@ -63,7 +63,7 @@ Remove any `hive shell-init` line from your shell rc file manually. As with `hiv
 ```bash
 # one-time setup: add eval "$(hive shell-init zsh)" to your shell rc,
 # after the PATH line the installer already wrote there
-# Start Claude here; hcodex / hgrok need an existing tmux pane
+# Start an agent here, inside tmux or not
 $ hclaude      # or: hcodex / hgrok
 
 # In the agent session, type:

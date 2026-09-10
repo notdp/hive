@@ -49,7 +49,7 @@ hive plugin setup
 ```bash
 # 初回のみ: シェルの rc に eval "$(hive shell-init zsh)" を追加
 # (インストーラが書いた PATH の行より後ろに)
-# ここで Claude を起動する。hcodex / hgrok は既存の tmux pane が必要
+# ここでエージェントを起動する。tmux の内外どちらでも可
 $ hclaude      # もしくは: hcodex / hgrok
 
 # エージェントセッションで以下を入力:
