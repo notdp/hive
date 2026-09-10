@@ -471,8 +471,11 @@ fn remember_drag(
         plan_key: planned.key.clone(),
         size,
         layout,
-        leaves: panes
+        // A swap between the reads preserves the pane set but changes
+        // its order. Pair members with the cells this layout actually names.
+        leaves: ids
             .iter()
+            .filter_map(|id| panes.iter().find(|p| p.pane_id == *id))
             .map(|p| arrangement::Leaf {
                 member: p.agent.clone(),
                 role: p.role.clone(),
@@ -810,6 +813,25 @@ mod tests {
             Outcome::Unchanged(planned)
         );
         assert_eq!(arrangement::drag(&me).unwrap().layout, dragged());
+    }
+
+    #[test]
+    fn test_drag_uses_layout_order_when_panes_swap_between_reads() {
+        let (tmp, mut tmux) = arranged((220, 60), &TEAM);
+        let planned = expected_tagged((220, 60), &TEAM);
+        tmux.key = Some(planned.key.clone());
+        // list-panes still describes the order before the user's swap;
+        // window_layout is read afterwards and names the swapped cells.
+        let body = "220x60,0,0{60x60,0,0,1,159x60,61,0[159x10,61,0,3,159x49,61,11,2]}";
+        tmux.layout = Some(format!("{:04x},{body}", layout_checksum(body)));
+        ensure_with("dev:0", Mode::Hook, &mut tmux);
+        let drag = arrangement::drag(&identity(&tmp, "100.0")).unwrap();
+        let members: Vec<_> = drag
+            .leaves
+            .iter()
+            .map(|leaf| leaf.member.as_str())
+            .collect();
+        assert_eq!(members, ["orch", "sage", "scout"]);
     }
 
     #[test]
