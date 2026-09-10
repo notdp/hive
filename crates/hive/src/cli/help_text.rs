@@ -601,11 +601,11 @@ Options:
     # ~/.config/fish/config.fish
     hive shell-init fish | source
 
-  Outside tmux, hclaude shows a background job in the current terminal.
+  Outside tmux, the launcher shows the session in the current terminal.
   Creating or joining a team moves the same conversation into its team
-  window. Detach returns to the shell; resuming an enrolled job opens its
-  team window. hcodex/hgrok outside tmux, management subcommands,
-  non-interactive flags and launches without a terminal run the plain CLI.
+  window. Detach returns to the shell; resuming an enrolled session opens
+  its team window. Management subcommands, non-interactive flags and
+  launches without a terminal run the plain CLI.
 
 Options:
   -h, --help  Show this message and exit.

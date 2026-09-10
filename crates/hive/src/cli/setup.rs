@@ -110,7 +110,48 @@ fn setup_step(label: &str, argv: &[&str]) -> bool {
 }
 
 pub(crate) fn plugin_setup() {
-    std::process::exit(i32::from(!setup_plugins()));
+    let ok = setup_plugins();
+    if ok {
+        print_launcher_hint(Path::new(&env_string("HOME")));
+    }
+    std::process::exit(i32::from(!ok));
+}
+
+/// The rc files the docs tell people to put the shell-init line in, in the
+/// order they are checked. The hint is read-only: hive never writes an rc.
+const SHELL_INIT_RC_FILES: [&str; 4] = [
+    ".zshrc",
+    ".bashrc",
+    ".bash_profile",
+    ".config/fish/config.fish",
+];
+
+/// Which of `SHELL_INIT_RC_FILES` under *home* already sources
+/// `hive shell-init`, if any.
+fn shell_init_rc(home: &Path) -> Option<&'static str> {
+    SHELL_INIT_RC_FILES.iter().copied().find(|rc| {
+        std::fs::read_to_string(home.join(rc))
+            .map(|text| text.contains("hive shell-init"))
+            .unwrap_or(false)
+    })
+}
+
+/// A fresh install ends here (`install.sh` execs `hive plugin setup`), so
+/// this is the one place a new user learns the launchers exist and that
+/// they are opt-in.
+fn print_launcher_hint(home: &Path) {
+    if let Some(rc) = shell_init_rc(home) {
+        println!("setup: launchers: shell-init already in ~/{rc}");
+        return;
+    }
+    println!(
+        "setup: launchers: hclaude / hcodex / hgrok start claude / codex / grok under hive\n\
+         \x20 (team-ready, with a cd-ready resume command printed when the session exits);\n\
+         \x20 plain claude / codex / grok are never touched. Add one line to your shell rc:\n\
+         \x20   eval \"$(hive shell-init zsh)\"      # zsh, bash\n\
+         \x20   hive shell-init fish | source      # fish\n\
+         \x20 Without it, `hive claude` / `hive codex` / `hive grok` do the same launch."
+    );
 }
 
 fn setup_plugins() -> bool {
@@ -193,10 +234,10 @@ fn which_on_path(name: &str) -> bool {
 const SHELL_INIT_POSIX: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
-# cd-ready resume hint when it exits. Outside tmux, hclaude views a bg job
-# locally until create/join moves it into the team window; hcodex/hgrok run
-# the plain CLI. Management commands and launches without a terminal pass
-# through. Plain `codex` / `claude` / `grok` are never touched.
+# cd-ready resume hint when it exits. Outside tmux, the launcher shows the
+# session in the current terminal until create/join moves it into the team
+# window. Management commands and launches without a terminal pass through.
+# Plain `codex` / `claude` / `grok` are never touched.
 function hcodex {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hcodex: hive is not on PATH" >&2; return 127
@@ -237,10 +278,10 @@ function hgrok {
 const SHELL_INIT_FISH: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
-# cd-ready resume hint when it exits. Outside tmux, hclaude views a bg job
-# locally until create/join moves it into the team window; hcodex/hgrok run
-# the plain CLI. Management commands and launches without a terminal pass
-# through. Plain `codex` / `claude` / `grok` are never touched.
+# cd-ready resume hint when it exits. Outside tmux, the launcher shows the
+# session in the current terminal until create/join moves it into the team
+# window. Management commands and launches without a terminal pass through.
+# Plain `codex` / `claude` / `grok` are never touched.
 function hcodex
     if not type -q hive
         echo "hcodex: hive is not on PATH" >&2
@@ -411,6 +452,27 @@ mod tests {
         env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
         assert!(!setup_plugins());
         assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 5);
+    }
+
+    #[test]
+    fn test_shell_init_rc_finds_the_sourcing_rc_and_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(shell_init_rc(tmp.path()), None);
+        std::fs::write(tmp.path().join(".bashrc"), "export FOO=1\n").unwrap();
+        assert_eq!(shell_init_rc(tmp.path()), None);
+        std::fs::create_dir_all(tmp.path().join(".config/fish")).unwrap();
+        std::fs::write(
+            tmp.path().join(".config/fish/config.fish"),
+            "hive shell-init fish | source\n",
+        )
+        .unwrap();
+        assert_eq!(shell_init_rc(tmp.path()), Some(".config/fish/config.fish"));
+        std::fs::write(
+            tmp.path().join(".zshrc"),
+            "eval \"$(hive shell-init zsh)\"\n",
+        )
+        .unwrap();
+        assert_eq!(shell_init_rc(tmp.path()), Some(".zshrc"));
     }
 
     #[test]
