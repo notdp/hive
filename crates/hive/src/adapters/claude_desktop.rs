@@ -76,30 +76,55 @@ fn parse_record(obj: &serde_json::Map<String, Value>) -> Option<DesktopRecord> {
 /// one is unreadable, or the copies the app keeps under different accounts
 /// disagree — an unknown never drives a roster write.
 pub fn desktop_record(host_session_id: &str) -> Option<DesktopRecord> {
+    scan_record(host_session_id).ok().flatten()
+}
+
+/// Presence of a readable, consistent desktop record across account copies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordPresence {
+    Present,
+    Absent,
+    Unknown,
+}
+
+/// Absent only after a complete readable search finds no record. Invalid ids,
+/// unreadable directories, malformed records and conflicting copies are unknown.
+/// This observation neither creates directories nor changes desktop records.
+pub fn record_presence(host_session_id: &str) -> RecordPresence {
+    match scan_record(host_session_id) {
+        Ok(Some(_)) => RecordPresence::Present,
+        Ok(None) => RecordPresence::Absent,
+        Err(()) => RecordPresence::Unknown,
+    }
+}
+
+fn scan_record(host_session_id: &str) -> Result<Option<DesktopRecord>, ()> {
     if !is_host_session_id(host_session_id) {
-        return None;
+        return Err(());
     }
     let root = sessions_root();
     let mut found: Option<DesktopRecord> = None;
     // a directory that cannot be listed may hold a copy that disagrees:
     // unknown, never "absent"
-    for account in list_dirs(&root)? {
-        for org in list_dirs(&account)? {
+    for account in list_dirs(&root).ok_or(())? {
+        for org in list_dirs(&account).ok_or(())? {
             let path = org.join(format!("{host_session_id}.json"));
             match fs::metadata(&path) {
                 Ok(m) if m.is_file() => {}
-                Ok(_) => continue,
+                Ok(_) => return Err(()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return None,
+                Err(_) => return Err(()),
             }
-            let record = read_json_object(&path).and_then(|o| parse_record(&o))?;
+            let record = read_json_object(&path)
+                .and_then(|o| parse_record(&o))
+                .ok_or(())?;
             match &found {
-                Some(seen) if *seen != record => return None,
+                Some(seen) if *seen != record => return Err(()),
                 _ => found = Some(record),
             }
         }
     }
-    found
+    Ok(found)
 }
 
 /// The subdirectories of *dir*; an absent *dir* is no directories, any
@@ -218,6 +243,7 @@ mod tests {
         write_record(tmp.path(), "a1", "o1", "local_x", same.clone());
         write_record(tmp.path(), "a2", "o2", "local_x", same);
         assert!(desktop_record("local_x").is_some());
+        assert_eq!(record_presence("local_x"), RecordPresence::Present);
         write_record(
             tmp.path(),
             "a2",
@@ -226,6 +252,7 @@ mod tests {
             json!({"cliSessionId": "other", "priorCliSessionIds": ["old"]}),
         );
         assert_eq!(desktop_record("local_x"), None);
+        assert_eq!(record_presence("local_x"), RecordPresence::Unknown);
     }
 
     #[cfg(unix)]
@@ -243,9 +270,32 @@ mod tests {
             .join("Library/Application Support/Claude/claude-code-sessions/a2");
         fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
         let got = desktop_record("local_y");
+        let presence = record_presence("local_y");
         fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(got, None);
+        assert_eq!(presence, RecordPresence::Unknown);
         assert!(desktop_record("local_y").is_some());
+    }
+
+    #[test]
+    fn test_record_presence_requires_complete_readable_search() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = EnvGuard::new();
+        env.set("HOME", tmp.path());
+        assert_eq!(record_presence("local_missing"), RecordPresence::Absent);
+        assert!(!sessions_root().exists());
+        for id in ["", "local_", "../etc", "local_../etc"] {
+            assert_eq!(record_presence(id), RecordPresence::Unknown);
+        }
+        let org = sessions_root().join("account/org");
+        fs::create_dir_all(&org).unwrap();
+        assert_eq!(record_presence("local_missing"), RecordPresence::Absent);
+        let path = org.join("local_missing.json");
+        fs::write(&path, "broken").unwrap();
+        assert_eq!(record_presence("local_missing"), RecordPresence::Unknown);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert_eq!(record_presence("local_missing"), RecordPresence::Unknown);
     }
 
     #[test]

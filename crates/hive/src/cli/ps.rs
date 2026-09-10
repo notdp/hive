@@ -164,34 +164,6 @@ fn hash_matches(reply: Option<&Map<String, Value>>, pid: i64, hash: &str) -> Val
     }
 }
 
-fn desktop_absent(root: &Path, host: &str) -> Option<bool> {
-    fn dirs(root: &Path) -> Option<Vec<PathBuf>> {
-        let entries = match fs::read_dir(root) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(vec![]),
-            Err(_) => return None,
-        };
-        let mut dirs = vec![];
-        for entry in entries {
-            let entry = entry.ok()?;
-            if entry.file_type().ok()?.is_dir() {
-                dirs.push(entry.path());
-            }
-        }
-        Some(dirs)
-    }
-    for account in dirs(root)? {
-        for org in dirs(&account)? {
-            match fs::metadata(org.join(format!("{host}.json"))) {
-                Ok(_) => return Some(false),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return None,
-            }
-        }
-    }
-    Some(true)
-}
-
 fn orch_state(entry: &Map<String, Value>) -> &'static str {
     let host = entry
         .get("members")
@@ -199,23 +171,10 @@ fn orch_state(entry: &Map<String, Value>) -> &'static str {
         .and_then(|members| members.iter().find(|m| m["name"] == "orch"))
         .and_then(|m| m.get("hostSessionId"))
         .and_then(Value::as_str);
-    let Some(host) = host.filter(|h| {
-        h.starts_with("local_")
-            && h.len() > 6
-            && h.bytes()
-                .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
-    }) else {
-        return UNKNOWN;
-    };
-    if claude_desktop::desktop_record(host).is_some() {
-        return "present";
-    }
-    let root = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join("Library/Application Support/Claude/claude-code-sessions");
-    if desktop_absent(&root, host) == Some(true) {
-        "absent"
-    } else {
-        UNKNOWN
+    match host.map(claude_desktop::record_presence) {
+        Some(claude_desktop::RecordPresence::Present) => "present",
+        Some(claude_desktop::RecordPresence::Absent) => "absent",
+        _ => UNKNOWN,
     }
 }
 
@@ -698,20 +657,6 @@ mod tests {
             Some(("/tmp/a  workspace".into(), "cedar".into()))
         );
         assert_eq!(owners(&entries, "claude", "abcdef12"), "cedar.worker");
-    }
-
-    #[test]
-    fn test_desktop_absence_requires_complete_readable_search() {
-        let root = tempfile::tempdir().unwrap();
-        let org = root.path().join("account/org");
-        fs::create_dir_all(&org).unwrap();
-        assert_eq!(desktop_absent(root.path(), "local_missing"), Some(true));
-        fs::write(org.join("local_missing.json"), "broken").unwrap();
-        assert_eq!(desktop_absent(root.path(), "local_missing"), Some(false));
-        assert_eq!(
-            desktop_absent(&org.join("local_missing.json"), "local_missing"),
-            None
-        );
     }
 
     #[test]
