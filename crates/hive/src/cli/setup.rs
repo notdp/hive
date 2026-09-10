@@ -112,46 +112,27 @@ fn setup_step(label: &str, argv: &[&str]) -> bool {
 pub(crate) fn plugin_setup() {
     let ok = setup_plugins();
     if ok {
-        print_launcher_hint(Path::new(&env_string("HOME")));
+        print_launcher_hint();
     }
     std::process::exit(i32::from(!ok));
 }
 
-/// The rc files the docs tell people to put the shell-init line in, in the
-/// order they are checked. The hint is read-only: hive never writes an rc.
-const SHELL_INIT_RC_FILES: [&str; 4] = [
-    ".zshrc",
-    ".bashrc",
-    ".bash_profile",
-    ".config/fish/config.fish",
-];
-
-/// Which of `SHELL_INIT_RC_FILES` under *home* already sources
-/// `hive shell-init`, if any.
-fn shell_init_rc(home: &Path) -> Option<&'static str> {
-    SHELL_INIT_RC_FILES.iter().copied().find(|rc| {
-        std::fs::read_to_string(home.join(rc))
-            .map(|text| text.contains("hive shell-init"))
-            .unwrap_or(false)
-    })
+fn print_launcher_hint() {
+    let color = super::util::stdout_isatty() && std::env::var_os("NO_COLOR").is_none();
+    println!("{}", launcher_hint(color));
 }
 
-/// A fresh install ends here (`install.sh` execs `hive plugin setup`), so
-/// this is the one place a new user learns the launchers exist and that
-/// they are opt-in.
-fn print_launcher_hint(home: &Path) {
-    if let Some(rc) = shell_init_rc(home) {
-        println!("setup: launchers: shell-init already in ~/{rc}");
-        return;
-    }
-    println!(
-        "setup: launchers: hclaude / hcodex / hgrok start claude / codex / grok under hive\n\
-         \x20 (team-ready, with a cd-ready resume command printed when the session exits);\n\
-         \x20 plain claude / codex / grok are never touched. Add one line to your shell rc:\n\
-         \x20   eval \"$(hive shell-init zsh)\"      # zsh, bash\n\
-         \x20   hive shell-init fish | source      # fish\n\
-         \x20 Without it, `hive claude` / `hive codex` / `hive grok` do the same launch."
-    );
+fn launcher_hint(color: bool) -> String {
+    let (bold, reset) = if color {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    format!(
+        "Launchers: hclaude / hcodex / hgrok\n\
+         Add to ~/.zshrc or ~/.bashrc: {bold}eval \"$(hive shell-init zsh)\"{reset}\n\
+         Save, then open a new terminal. Other shells: hive shell-init --help"
+    )
 }
 
 fn setup_plugins() -> bool {
@@ -455,24 +436,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_init_rc_finds_the_sourcing_rc_and_none_when_absent() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert_eq!(shell_init_rc(tmp.path()), None);
-        std::fs::write(tmp.path().join(".bashrc"), "export FOO=1\n").unwrap();
-        assert_eq!(shell_init_rc(tmp.path()), None);
-        std::fs::create_dir_all(tmp.path().join(".config/fish")).unwrap();
-        std::fs::write(
-            tmp.path().join(".config/fish/config.fish"),
-            "hive shell-init fish | source\n",
-        )
-        .unwrap();
-        assert_eq!(shell_init_rc(tmp.path()), Some(".config/fish/config.fish"));
-        std::fs::write(
-            tmp.path().join(".zshrc"),
-            "eval \"$(hive shell-init zsh)\"\n",
-        )
-        .unwrap();
-        assert_eq!(shell_init_rc(tmp.path()), Some(".zshrc"));
+    fn test_launcher_hint_is_short_and_plain_without_color() {
+        let hint = launcher_hint(false);
+        assert!(hint.lines().count() <= 4);
+        assert!(hint.contains("hive shell-init"));
+        assert!(!hint.contains('\x1b'));
     }
 
     #[test]
