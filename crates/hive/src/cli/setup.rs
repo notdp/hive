@@ -110,7 +110,29 @@ fn setup_step(label: &str, argv: &[&str]) -> bool {
 }
 
 pub(crate) fn plugin_setup() {
-    std::process::exit(i32::from(!setup_plugins()));
+    let ok = setup_plugins();
+    if ok {
+        print_launcher_hint();
+    }
+    std::process::exit(i32::from(!ok));
+}
+
+fn print_launcher_hint() {
+    let color = super::util::stdout_isatty() && std::env::var_os("NO_COLOR").is_none();
+    println!("{}", launcher_hint(color));
+}
+
+fn launcher_hint(color: bool) -> String {
+    let (bold, reset) = if color {
+        ("\x1b[1m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    format!(
+        "Launchers: hclaude / hcodex / hgrok\n\
+         Add to ~/.zshrc or ~/.bashrc: {bold}eval \"$(hive shell-init zsh)\"{reset}\n\
+         Save, then open a new terminal. Other shells: hive shell-init --help"
+    )
 }
 
 fn setup_plugins() -> bool {
@@ -193,10 +215,10 @@ fn which_on_path(name: &str) -> bool {
 const SHELL_INIT_POSIX: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
-# cd-ready resume hint when it exits. Outside tmux, hclaude views a bg job
-# locally until create/join moves it into the team window; hcodex/hgrok run
-# the plain CLI. Management commands and launches without a terminal pass
-# through. Plain `codex` / `claude` / `grok` are never touched.
+# cd-ready resume hint when it exits. Outside tmux, the launcher shows the
+# session in the current terminal until create/join moves it into the team
+# window. Management commands and launches without a terminal pass through.
+# Plain `codex` / `claude` / `grok` are never touched.
 function hcodex {
   if ! command -v hive >/dev/null 2>&1; then
     echo "hcodex: hive is not on PATH" >&2; return 127
@@ -237,10 +259,10 @@ function hgrok {
 const SHELL_INIT_FISH: &str = r#"# hive launchers — `hcodex` / `hclaude` / `hgrok` start a hive-connected codex /
 # claude / grok in the current tmux pane (shared app-server daemon for codex,
 # pane-keyed leader for grok, supervisor-hosted bg job for claude) and print a
-# cd-ready resume hint when it exits. Outside tmux, hclaude views a bg job
-# locally until create/join moves it into the team window; hcodex/hgrok run
-# the plain CLI. Management commands and launches without a terminal pass
-# through. Plain `codex` / `claude` / `grok` are never touched.
+# cd-ready resume hint when it exits. Outside tmux, the launcher shows the
+# session in the current terminal until create/join moves it into the team
+# window. Management commands and launches without a terminal pass through.
+# Plain `codex` / `claude` / `grok` are never touched.
 function hcodex
     if not type -q hive
         echo "hcodex: hive is not on PATH" >&2
@@ -411,6 +433,14 @@ mod tests {
         env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
         assert!(!setup_plugins());
         assert_eq!(std::fs::read_to_string(log).unwrap().lines().count(), 5);
+    }
+
+    #[test]
+    fn test_launcher_hint_is_short_and_plain_without_color() {
+        let hint = launcher_hint(false);
+        assert!(hint.lines().count() <= 4);
+        assert!(hint.contains("hive shell-init"));
+        assert!(!hint.contains('\x1b'));
     }
 
     #[test]
