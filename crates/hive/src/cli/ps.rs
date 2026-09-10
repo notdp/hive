@@ -612,7 +612,7 @@ mod tests {
         let state = team_state(&json!(false), &json!(false));
         assert_eq!(state, "asleep");
         let item = json!({"kind":"team", "logicalOwner":"cedar", "state":state});
-        assert!(render_table(&[item.clone()]).contains("state=asleep"));
+        assert!(render_table(std::slice::from_ref(&item)).contains("state=asleep"));
         assert_eq!(
             serde_json::from_str::<Value>(&render_json(&[item])).unwrap()[0]["state"],
             "asleep"
