@@ -19,6 +19,7 @@ pub fn new_session(
     cwd: Option<&str>,
     command: Option<&str>,
 ) -> anyhow::Result<String> {
+    let cwd = super::pane_cwd(cwd)?;
     let w = width.to_string();
     let h = height.to_string();
     let mut args = vec![
@@ -61,6 +62,7 @@ pub fn new_window(
     detach: bool,
     command: Option<&str>,
 ) -> anyhow::Result<(String, String)> {
+    let cwd = super::pane_cwd(cwd)?;
     // Force `-t` to reference a session, not a window index. Bare numeric
     // session names (e.g. "613") are ambiguous and tmux can treat `-t 613`
     // as an index rather than a session, which fails with "index N in use"

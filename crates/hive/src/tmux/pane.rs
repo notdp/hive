@@ -13,12 +13,7 @@ pub fn split_window(
     detach: bool,
     cwd: Option<&str>,
 ) -> anyhow::Result<String> {
-    if let Some(cwd) = cwd {
-        anyhow::ensure!(
-            std::path::Path::new(cwd).is_dir(),
-            "cannot spawn pane: working directory {cwd:?} is unavailable or is not a directory"
-        );
-    }
+    let cwd = super::pane_cwd(cwd)?;
     let command = cwd.map(super::shell_start_command);
     let mut args: Vec<&str> = vec!["split-window", "-t", target];
     if detach {

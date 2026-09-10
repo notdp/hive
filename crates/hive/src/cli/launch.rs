@@ -394,7 +394,7 @@ fn codex_launch_cwd(args: &[String], source: Option<&str>) -> String {
 fn exec_codex_outside(args: &[String]) -> ! {
     use crate::adapters::codex_app_server;
     if !env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty() {
-        codex_cwd_or_exit(codex_opt_value(args, &["--cd", "-C"]));
+        let _ = codex_cwd_or_exit(codex_opt_value(args, &["--cd", "-C"]));
         codex_raw(args);
     }
     let sub_index = codex_subcommand_index(args);

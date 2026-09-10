@@ -21,6 +21,16 @@ pub use status::*;
 #[cfg(test)]
 mod tests;
 
+fn pane_cwd(cwd: Option<&str>) -> anyhow::Result<Option<&str>> {
+    if let Some(cwd) = cwd {
+        anyhow::ensure!(
+            std::path::Path::new(cwd).is_dir(),
+            "cannot spawn pane: working directory {cwd:?} is unavailable or is not a directory"
+        );
+    }
+    Ok(cwd)
+}
+
 /// Change directory before the pane shell becomes interactive. tmux's -c
 /// alone can fail when the server retains a deleted working directory.
 fn shell_start_command(cwd: &str) -> String {

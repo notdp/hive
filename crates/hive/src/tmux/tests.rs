@@ -1151,17 +1151,23 @@ fn test_pane_creation_passes_cwd_and_bootstraps_only_default_shells() {
 }
 
 #[test]
-fn test_split_rejects_missing_cwd_and_regular_file_before_tmux() {
+fn test_pane_creation_rejects_unavailable_cwd_before_tmux() {
     let tmp = tempfile::tempdir().unwrap();
     let missing = tmp.path().join("missing");
     let file = tmp.path().join("file");
     std::fs::write(&file, "").unwrap();
     let calls = capture_run(0, "%9");
-    for path in [missing, file] {
-        let error = split_window("%1", true, None, true, path.to_str()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains(&format!("{:?}", path.to_str().unwrap())));
+    for cwd in ["", missing.to_str().unwrap(), file.to_str().unwrap()] {
+        let mut results = vec![split_window("%1", true, None, true, Some(cwd))];
+        for command in [None, Some("hive view session")] {
+            results.push(new_session("dev", 100, 30, Some(cwd), command));
+            results
+                .push(new_window("dev", "worker", Some(cwd), true, command).map(|(_, pane)| pane));
+        }
+        for result in results {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains(&format!("{cwd:?}")));
+            assert!(calls.borrow().is_empty());
+        }
     }
-    assert!(calls.borrow().is_empty());
 }
