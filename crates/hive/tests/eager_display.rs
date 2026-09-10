@@ -29,6 +29,15 @@ const IDENTITY_VARS: &[&str] = &[
 struct Rig {
     tmp: tempfile::TempDir,
     team: String,
+    /// The rig's private bin dir first, then the developer's PATH: the
+    /// built `hive` under test and every stub CLI live there. tmux gives a
+    /// new pane the PATH of the *client* that asked for it (3.7
+    /// `spawn.c`, when that client sits in no session — every hive
+    /// process here), so it rides on every tmux client and every hive
+    /// process the rig runs; `HOME` is the rig's too, or the pane's login
+    /// shell would rebuild PATH from the developer's dotfiles and find the
+    /// installed hive and the real engines instead.
+    path: String,
 }
 
 impl Rig {
@@ -36,7 +45,20 @@ impl Rig {
         require_tmux();
         let tmp = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(tmp.path().join("ws")).expect("workspace dir");
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        // A pane command is `hive <cli> --resume …`, resolved by the pane
+        // shell: this link, not the developer's installed binary, is what
+        // it finds.
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_hive"), bin.join("hive"))
+            .expect("hive on the rig's PATH");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         Rig {
+            path,
             tmp,
             team: format!("hivetest-{tag}-{}", std::process::id()),
         }
@@ -85,6 +107,8 @@ impl Rig {
             .arg("-S")
             .arg(&socket)
             .args(args)
+            .env("PATH", &self.path)
+            .env("HOME", self.tmp.path())
             .env("TMUX_TMPDIR", self.tmp.path());
         for key in IDENTITY_VARS {
             cmd.env_remove(key);
@@ -138,6 +162,8 @@ impl Rig {
         cmd.args(args)
             .current_dir(self.tmp.path())
             .stdin(Stdio::null())
+            .env("PATH", &self.path)
+            .env("HOME", self.tmp.path())
             .env("HIVE_HOME", self.home())
             .env("CLAUDE_CONFIG_DIR", self.tmp.path().join("claude"))
             .env("CLAUDE_HOME", self.tmp.path().join("claude-home"))
@@ -169,21 +195,15 @@ impl Rig {
         self.stub_cli("claude", script)
     }
 
-    /// A stub *name* on the rig's private bin dir (one dir for every stub,
-    /// so one PATH resolves them all), *script* being its body after the
-    /// shebang; returns that PATH.
+    /// A stub *name* on the rig's private bin dir (the one every pane shell
+    /// and hive process already searches first), *script* being its body
+    /// after the shebang; returns the rig's PATH.
     fn stub_cli(&self, name: &str, script: &str) -> String {
-        let bin = self.tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).expect("stub bin dir");
-        let stub = bin.join(name);
+        let stub = self.tmp.path().join("bin").join(name);
         std::fs::write(&stub, format!("#!/bin/sh\n{script}")).expect("stub cli");
         std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .expect("stub cli mode");
-        format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        )
+        self.path.clone()
     }
 
     /// Roster rows `(name, cli, sessionId)` added to the team's registry
@@ -1158,18 +1178,20 @@ fn test_attach_rebuilds_in_the_team_session_and_keeps_the_mirror_parked() {
 #[test]
 fn test_attach_restores_the_dragged_arrangement_of_a_rebuilt_window() {
     let rig = Rig::new("arrange");
-    // The rebuilt member panes run their engine's launcher; `grok` on PATH
-    // is a stub that exits at once, so no real engine is ever started and
-    // nothing outlives the pane. The panes stay, dead, tags and all.
-    let path = rig.stub_cli("grok", "exit 0\n");
+    // The rebuilt member panes run their engine's launcher; `grok` on the
+    // rig's PATH is a stub that records the call and exits at once, so no
+    // real engine is ever started and nothing outlives the pane. The panes
+    // stay, dead, tags and all.
+    let grok_calls = rig.tmp.path().join("grok-calls");
+    rig.stub_cli(
+        "grok",
+        &format!("echo \"$@\" >> {}\nexit 0\n", grok_calls.display()),
+    );
     let ws = rig.ws();
     rig.hive_as_claude_ok(
         &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
         None,
     );
-    // Pane shells take the server's environment: the stub must be first
-    // on their PATH too.
-    rig.tmux_ok(&["set-environment", "-g", "PATH", &path]);
     rig.tmux_ok(&["set-option", "-g", "remain-on-exit", "on"]);
     let (_, window) = rig.team_windows().into_iter().next().unwrap();
     let socket = rig.socket_path();
@@ -1179,6 +1201,21 @@ fn test_attach_restores_the_dragged_arrangement_of_a_rebuilt_window() {
     let panes = rig.panes(&window);
     let agents: Vec<&str> = panes.iter().map(|p| p.2.as_str()).collect();
     assert_eq!(agents, vec!["orch", "sage", "scout"], "{panes:?}");
+    // The panes' launchers reached the stub, not an engine: the built
+    // hive's `hive grok` spawned the stub as the leader and gave up on it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::fs::read_to_string(&grok_calls)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the grok stub was never run"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let calls = std::fs::read_to_string(&grok_calls).unwrap();
+    assert!(calls.contains("agent leader"), "{calls}");
     let plan_key = rig.window_option(&window, "hive-layout");
     assert!(plan_key.contains("/m2/"), "{plan_key}");
 
