@@ -21,6 +21,25 @@ pub use status::*;
 #[cfg(test)]
 mod tests;
 
+fn pane_cwd(cwd: Option<&str>) -> anyhow::Result<Option<&str>> {
+    if let Some(cwd) = cwd {
+        anyhow::ensure!(
+            std::path::Path::new(cwd).is_dir(),
+            "cannot spawn pane: working directory {cwd:?} is unavailable or is not a directory"
+        );
+    }
+    Ok(cwd)
+}
+
+/// Change directory before the pane shell becomes interactive. tmux's -c
+/// alone can fail when the server retains a deleted working directory.
+fn shell_start_command(cwd: &str) -> String {
+    format!(
+        "cd {} && exec \"$SHELL\" -l",
+        crate::agent::shell_escape(cwd)
+    )
+}
+
 /// Terminal type assigned to panes, independent of the caller's tool shell.
 pub(crate) fn default_terminal() -> String {
     match run(&["show-options", "-gv", "default-terminal"], false, 5) {

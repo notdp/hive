@@ -16,8 +16,10 @@ pub fn new_session(
     name: &str,
     width: u32,
     height: u32,
+    cwd: Option<&str>,
     command: Option<&str>,
 ) -> anyhow::Result<String> {
+    let cwd = super::pane_cwd(cwd)?;
     let w = width.to_string();
     let h = height.to_string();
     let mut args = vec![
@@ -33,7 +35,11 @@ pub fn new_session(
         "-F",
         "#{pane_id}",
     ];
-    if let Some(command) = command {
+    if let Some(cwd) = cwd {
+        args.extend(["-c", cwd]);
+    }
+    let shell_command = cwd.map(super::shell_start_command);
+    if let Some(command) = command.or(shell_command.as_deref()) {
         args.push(command);
     }
     let r = run(&args, true, 5)?;
@@ -56,6 +62,7 @@ pub fn new_window(
     detach: bool,
     command: Option<&str>,
 ) -> anyhow::Result<(String, String)> {
+    let cwd = super::pane_cwd(cwd)?;
     // Force `-t` to reference a session, not a window index. Bare numeric
     // session names (e.g. "613") are ambiguous and tmux can treat `-t 613`
     // as an index rather than a session, which fails with "index N in use"
@@ -78,7 +85,8 @@ pub fn new_window(
         args.push(cwd);
     }
     args.extend(["-P", "-F", "#{session_name}:#{window_index}\t#{pane_id}"]);
-    if let Some(command) = command {
+    let shell_command = cwd.map(super::shell_start_command);
+    if let Some(command) = command.or(shell_command.as_deref()) {
         args.push(command);
     }
     let r = run(&args, true, 5)?;

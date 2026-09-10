@@ -13,6 +13,8 @@ pub fn split_window(
     detach: bool,
     cwd: Option<&str>,
 ) -> anyhow::Result<String> {
+    let cwd = super::pane_cwd(cwd)?;
+    let command = cwd.map(super::shell_start_command);
     let mut args: Vec<&str> = vec!["split-window", "-t", target];
     if detach {
         args.push("-d");
@@ -29,6 +31,9 @@ pub fn split_window(
         args.push(cwd);
     }
     args.extend(["-P", "-F", "#{pane_id}"]);
+    if let Some(command) = command.as_deref() {
+        args.push(command);
+    }
     match run(&args, true, 5) {
         Ok(r) => Ok(r.stdout.trim().to_string()),
         Err(TmuxError::CalledProcess { stderr, .. }) => {

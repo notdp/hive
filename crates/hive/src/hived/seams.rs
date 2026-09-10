@@ -443,6 +443,14 @@ pub(super) fn hooked_cas_thread_id_for_pane(pane: &str) -> Option<String> {
     crate::adapters::codex_app_server::thread_id_for_pane(pane)
 }
 
+pub(super) fn hooked_cas_pane_cwd(pane: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(value) = hookget(|h| h.cas_pane_cwd.as_ref().and_then(|f| f(pane))) {
+        return value;
+    }
+    crate::adapters::codex_app_server::read_pane_thread(pane).map(|record| record.cwd)
+}
+
 pub(super) fn hooked_cas_list_recorded_panes() -> Vec<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_list_recorded_panes.clone()).flatten() {

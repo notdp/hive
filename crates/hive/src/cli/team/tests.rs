@@ -254,6 +254,12 @@ fn test_create_outside_tmux_builds_the_team_session_and_records_the_display() {
             "-P",
             "-F",
             "#{pane_id}",
+            "-c",
+            &crate::paths::getcwd(),
+            &format!(
+                "cd {} && exec \"$SHELL\" -l",
+                crate::agent::shell_escape(&crate::paths::getcwd())
+            ),
         ]
     ));
     assert!(has_row(&argv, &["rename-window", "-t", "honey:1", "honey"]));
@@ -516,6 +522,12 @@ fn test_join_outside_tmux_rebuilds_a_missing_team_window_first() {
             "-P",
             "-F",
             "#{pane_id}",
+            "-c",
+            &crate::paths::getcwd(),
+            &format!(
+                "cd {} && exec \"$SHELL\" -l",
+                crate::agent::shell_escape(&crate::paths::getcwd())
+            ),
         ]
     ));
     // orch rides the first pane; the joined session gets the split.

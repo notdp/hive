@@ -87,7 +87,8 @@ pub(super) fn create(mut client: Client, name: &str, description: &str) -> Resul
     let workspace = super::team_workspace(name);
     crate::devlog::check_socket_path_len(std::path::Path::new(&workspace))
         .map_err(anyhow::Error::msg)?;
-    let (window, pane, new_session) = crate::team_display::new_team_session_window(name)?;
+    let (window, pane, new_session) =
+        crate::team_display::new_team_session_window(name, &client.session.cwd)?;
     let mut prepared: Option<Target> = None;
     let built = (|| -> Result<Team> {
         let window_id = tmux::display_value(&pane, "#{window_id}")

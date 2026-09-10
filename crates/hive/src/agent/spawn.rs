@@ -95,6 +95,14 @@ impl Agent {
         } else {
             opts.cwd.clone()
         };
+        let cwd = if std::path::Path::new(&cwd).is_absolute() {
+            cwd
+        } else {
+            std::env::current_dir()?
+                .join(&cwd)
+                .to_string_lossy()
+                .into_owned()
+        };
         // Outside tmux, a concrete target pane still addresses the shared
         // tmux server (targeted commands need no $TMUX) — that is how an
         // external orchestrator (`hive workflow run --team`) spawns visible
@@ -105,7 +113,7 @@ impl Agent {
 
         let initial_prompt = compose_spawn_prompt(cli, &opts, team_name)?;
 
-        let pane_id = open_member_pane(name, team_name, target_pane, &opts)?;
+        let pane_id = open_member_pane(name, team_name, target_pane, &opts, &cwd)?;
 
         // The pane runs hive's managed launcher (`hive claude` / `hive codex` /
         // `hive grok`), the same path a human's `hclaude` / `hcodex` / `hgrok`
@@ -308,12 +316,14 @@ fn open_member_pane(
     team_name: &str,
     target_pane: &str,
     opts: &SpawnOptions,
+    cwd: &str,
 ) -> anyhow::Result<String> {
     let pane_id = if opts.split_window {
         let pane_id = hooked_split_window(
             target_pane,
             opts.split_horizontal,
             opts.split_size.as_deref(),
+            Some(cwd),
         )?;
         // Re-tile the moment the pane exists — the CLI boot below can
         // block for tens of seconds, and a 50% split left un-tiled that

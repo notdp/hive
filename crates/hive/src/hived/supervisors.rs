@@ -252,7 +252,19 @@ pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
                 ("thread", Value::from(thread_id.clone())),
             ],
         );
-        hooked_send_keys(&agent.pane_id, &format!("hive codex resume {thread_id}"));
+        let cwd = hooked_cas_pane_cwd(&agent.pane_id)
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or_else(|| agent.cwd.clone());
+        let resume = format!(
+            "hive codex resume {}",
+            crate::agent::shell_escape(&thread_id)
+        );
+        let command = if cwd.is_empty() {
+            resume
+        } else {
+            format!("cd {} && {resume}", crate::agent::shell_escape(&cwd))
+        };
+        hooked_send_keys(&agent.pane_id, &command);
     }
 }
 

@@ -111,6 +111,7 @@ pub struct Hook {
     // behaviors (Hook::new sets the `_setup_tmux_mocks` defaults)
     pub is_inside_tmux: bool,
     /// None → echo the target pane; Some(Err(msg)) → the split fails with msg.
+    pub split_cwds: Vec<Option<String>>,
     pub split_window_result: Option<Result<String, String>>,
     pub pane_window_target: String,
     pub is_pane_in_mode: bool,

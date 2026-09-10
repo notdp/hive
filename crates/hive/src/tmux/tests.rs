@@ -85,7 +85,7 @@ fn test_session_helpers_delegate_to_tmux() {
     });
 
     assert!(has_session("dev"));
-    assert_eq!(new_session("dev", 200, 50, None).unwrap(), "%9");
+    assert_eq!(new_session("dev", 200, 50, None, None).unwrap(), "%9");
     kill_session("dev");
     kill_window("@7");
 
@@ -1118,4 +1118,56 @@ fn test_same_socket_normalizes_private_tmp() {
     let default = default_socket_path();
     assert_eq!(default.file_name().unwrap(), "default");
     assert!(default.starts_with("/tmp"));
+}
+
+#[test]
+fn test_shell_start_command_quotes_cwd_before_interactive_shell() {
+    assert_eq!(
+        shell_start_command("/work/a'b $HOME"),
+        r#"cd '/work/a'\''b $HOME' && exec "$SHELL" -l"#
+    );
+}
+
+#[test]
+fn test_pane_creation_passes_cwd_and_bootstraps_only_default_shells() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    let calls = capture_run(0, "%9");
+    split_window("%1", true, None, true, Some(cwd)).unwrap();
+    new_window("dev", "worker", Some(cwd), true, None).unwrap();
+    new_session("dev", 100, 30, Some(cwd), None).unwrap();
+    new_window("dev", "viewer", Some(cwd), true, Some("hive view session")).unwrap();
+    new_session("dev", 100, 30, Some(cwd), Some("claude attach job")).unwrap();
+    let calls = calls.borrow();
+    for (index, (args, _, _)) in calls.iter().enumerate() {
+        assert!(args.windows(2).any(|pair| pair == ["-c", cwd]));
+        let expected = match index {
+            3 => "hive view session".to_string(),
+            4 => "claude attach job".to_string(),
+            _ => shell_start_command(cwd),
+        };
+        assert_eq!(args.last(), Some(&expected));
+    }
+}
+
+#[test]
+fn test_pane_creation_rejects_unavailable_cwd_before_tmux() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing = tmp.path().join("missing");
+    let file = tmp.path().join("file");
+    std::fs::write(&file, "").unwrap();
+    let calls = capture_run(0, "%9");
+    for cwd in ["", missing.to_str().unwrap(), file.to_str().unwrap()] {
+        let mut results = vec![split_window("%1", true, None, true, Some(cwd))];
+        for command in [None, Some("hive view session")] {
+            results.push(new_session("dev", 100, 30, Some(cwd), command));
+            results
+                .push(new_window("dev", "worker", Some(cwd), true, command).map(|(_, pane)| pane));
+        }
+        for result in results {
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains(&format!("{cwd:?}")));
+            assert!(calls.borrow().is_empty());
+        }
+    }
 }
