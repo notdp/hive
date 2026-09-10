@@ -246,18 +246,18 @@ fn mark_hive_built(window: &str) {
 /// The team's window in the session named after it: a fresh detached
 /// session when none exists, a new window in it otherwise. Returns
 /// (window target, first pane id, created_session).
-pub(crate) fn new_team_session_window(team: &str) -> Result<(String, String, bool)> {
+pub(crate) fn new_team_session_window(team: &str, cwd: &str) -> Result<(String, String, bool)> {
     // `=` pins the exact name: a bare `-t <team>` falls back to prefix
     // matching and would put the window into a stranger's `<team>-x`.
     let exact = format!("={team}");
     if checked_team_session(team)? {
         // new_window forces "<team>:" so a numeric name is a session, not an index
-        let (window, pane) = tmux::new_window(&exact, team, None, true, None)?;
+        let (window, pane) = tmux::new_window(&exact, team, Some(cwd), true, None)?;
         mark_hive_built(&window);
         install_team_status(&pane);
         return Ok((window, pane, false));
     }
-    let pane = tmux::new_session(team, TEAM_SESSION_COLS, TEAM_SESSION_ROWS, None)?;
+    let pane = tmux::new_session(team, TEAM_SESSION_COLS, TEAM_SESSION_ROWS, Some(cwd), None)?;
     // Never fall back to "<team>:" here — that is a session target, not a
     // window, and the first window's index follows the user's base-index.
     let window = tmux::get_pane_window_target(&pane)
@@ -325,7 +325,7 @@ fn materialize_team_display(
         .map(|(_, member)| map_str(member, "name"))
         .collect();
 
-    let (window, first_pane, _) = new_team_session_window(&team)?;
+    let (window, first_pane, _) = new_team_session_window(&team, &getcwd())?;
 
     tmux::configure_hive_window(&window);
     tmux::set_window_option(&window, "@hive-team", &team);
@@ -483,6 +483,12 @@ mod tests {
                 "-P",
                 "-F",
                 "#{pane_id}",
+                "-c",
+                &crate::paths::getcwd(),
+                &format!(
+                    "cd {} && exec \"$SHELL\" -l",
+                    crate::agent::shell_escape(&crate::paths::getcwd())
+                ),
             ]
         ));
         assert!(has_row(&argv, &["rename-window", "-t", "honey:1", "honey"]));
@@ -569,7 +575,9 @@ mod tests {
             ],
             &["honey"],
         );
-        let error = new_team_session_window("honey").unwrap_err().to_string();
+        let error = new_team_session_window("honey", "/tmp")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("not owned by Hive"));
         assert_eq!(count(&argv, "new-window"), 0);
         assert_eq!(count(&argv, "kill-session"), 0);
@@ -582,7 +590,7 @@ mod tests {
         // bare `-t hornet` would resolve to it and put the team window there.
         let argv = fake_tmux_sessions("", &[], &[], &["hornet-x"]);
 
-        let (window, first_pane, created) = new_team_session_window("hornet").unwrap();
+        let (window, first_pane, created) = new_team_session_window("hornet", "/tmp").unwrap();
 
         assert!(created);
         assert_eq!(window, "hornet:1");
@@ -602,6 +610,12 @@ mod tests {
                 "-P",
                 "-F",
                 "#{pane_id}",
+                "-c",
+                "/tmp",
+                &format!(
+                    "cd {} && exec \"$SHELL\" -l",
+                    crate::agent::shell_escape("/tmp")
+                ),
             ]
         ));
         assert_eq!(count(&argv, "new-window"), 0);

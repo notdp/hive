@@ -327,8 +327,9 @@ fn create_detached_team(
             ));
         }
     }
-    let (window, first_pane, created_session) =
-        ok_or_fail(crate::team_display::new_team_session_window(name));
+    let (window, first_pane, created_session) = ok_or_fail(
+        crate::team_display::new_team_session_window(name, &getcwd()),
+    );
     let undo_window = || {
         if created_session {
             tmux::kill_session(&format!("={name}"));

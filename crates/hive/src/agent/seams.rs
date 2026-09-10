@@ -31,17 +31,19 @@ pub(super) fn hooked_split_window(
     target: &str,
     horizontal: bool,
     size: Option<&str>,
+    cwd: Option<&str>,
 ) -> anyhow::Result<String> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
         h.event_order.push(format!("split:{target}"));
+        h.split_cwds.push(cwd.map(str::to_string));
         h.split_window_result
             .clone()
             .unwrap_or_else(|| Ok(target.to_string()))
     }) {
         return v.map_err(|msg| anyhow::anyhow!(msg));
     }
-    crate::tmux::split_window(target, horizontal, size, true, None)
+    crate::tmux::split_window(target, horizontal, size, true, cwd)
 }
 
 pub(super) fn hooked_get_pane_window_target(pane_id: &str) -> String {

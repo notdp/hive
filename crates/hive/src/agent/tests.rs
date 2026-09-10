@@ -2306,3 +2306,44 @@ fn test_codex_dispatch_preserves_unknown_for_pane_and_headless_members() {
         );
     }
 }
+
+#[test]
+fn test_spawn_passes_resolved_cwd_to_split() {
+    let _guard = setup();
+    mock_grok_leader_up();
+    let tmp = tempfile::tempdir().unwrap();
+    let cwd = tmp.path().to_str().unwrap();
+    Agent::spawn(
+        "worker",
+        "team",
+        "%1",
+        spawn_opts(|opts| {
+            opts.cli = "grok".into();
+            opts.cwd = cwd.into();
+        }),
+    )
+    .unwrap();
+    assert_eq!(hook(|h| h.split_cwds.clone()), vec![Some(cwd.to_string())]);
+}
+
+#[test]
+fn test_spawn_resolves_relative_cwd_before_shell_changes_directory() {
+    let _guard = setup();
+    mock_grok_leader_up();
+    let agent = Agent::spawn(
+        "worker",
+        "team",
+        "%1",
+        spawn_opts(|opts| {
+            opts.cli = "grok".into();
+            opts.cwd = ".".into();
+        }),
+    )
+    .unwrap();
+    assert!(std::path::Path::new(&agent.cwd).is_absolute());
+    assert_eq!(
+        hook(|h| h.split_cwds.clone()),
+        vec![Some(agent.cwd.clone())]
+    );
+    assert!(calls()[0].starts_with(&format!("cd {} && ", shell_escape(&agent.cwd))));
+}

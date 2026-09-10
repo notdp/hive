@@ -63,6 +63,7 @@ impl OrchSource {
                 team,
                 super::TEAM_SESSION_COLS,
                 super::TEAM_SESSION_ROWS,
+                Some(&self.cwd),
                 Some(PLACEHOLDER_COMMAND),
             )?
         } else {

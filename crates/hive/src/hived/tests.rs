@@ -2065,6 +2065,8 @@ struct SuperState {
     record_sockets: HashMap<String, String>, // pane -> tmuxSocket; absent = legacy record
     own_socket: Option<String>,
     threads: HashMap<String, String>,
+    cwds: HashMap<String, String>,
+    roster_cwd: String,
     daemon_alive: bool,
     auth: AuthVerdict,
     spawn: DaemonOutcome,
@@ -2084,6 +2086,8 @@ fn super_state() -> SuperState {
                 .into_owned(),
         ),
         threads: HashMap::from([("%1".to_string(), "tid-1".to_string())]),
+        cwds: HashMap::new(),
+        roster_cwd: String::new(),
         daemon_alive: true,
         auth: AuthVerdict::Fresh,
         spawn: DaemonOutcome::Started,
@@ -2111,7 +2115,10 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
             .panes
             .iter()
             .filter(|(_, agent, _)| !agent.is_empty())
-            .map(|(pane, agent, cli)| fake_agent(agent, pane, cli))
+            .map(|(pane, agent, cli)| Agent {
+                cwd: s.roster_cwd.clone(),
+                ..fake_agent(agent, pane, cli)
+            })
             .collect();
         Ok(fake_team("t", agents))
     };
@@ -2124,6 +2131,7 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
     let s_sockets = Arc::clone(&state);
     let s_own = Arc::clone(&state);
     let s_threads = Arc::clone(&state);
+    let s_cwds = Arc::clone(&state);
     let s_alive = Arc::clone(&state);
     let s_stale = Arc::clone(&state);
     let s_spawn = Arc::clone(&state);
@@ -2140,6 +2148,7 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
             clear_sink.lock().unwrap().push(format!("clear {pane}"))
         })),
         cas_thread_id_for_pane: Some(Arc::new(move |pane| s_threads.threads.get(pane).cloned())),
+        cas_pane_cwd: Some(Arc::new(move |pane| s_cwds.cwds.get(pane).cloned())),
         cas_daemon_alive: Some(Arc::new(move || s_alive.daemon_alive)),
         cas_daemon_auth_verdict: Some(Arc::new(move || s_stale.auth)),
         cas_drop_client: Some(Arc::new(move || {
@@ -2318,7 +2327,7 @@ fn test_supervisor_reattaches_retained_shell() {
     let (_guard, calls) = super_env(state);
     codex_supervisor_tick("/tmp/ws", "t");
     let calls = calls.lock().unwrap();
-    assert!(calls.contains(&"send %1 hive codex resume tid-1".to_string()));
+    assert!(calls.contains(&"send %1 hive codex resume 'tid-1'".to_string()));
     assert!(calls.contains(
         &"emit codex.member.reattach {\"pane\":\"%1\",\"agent\":\"val\",\"thread\":\"tid-1\"}"
             .to_string()
@@ -5850,4 +5859,32 @@ fn test_supervisor_reaps_own_record_spelled_through_private_tmp() {
     state.record_sockets =
         HashMap::from([("%dead".to_string(), "/tmp/tmux-501/default".to_string())]);
     assert_eq!(reap_calls(state), vec!["clear %dead".to_string()]);
+}
+
+#[test]
+fn test_supervisor_reattach_prefers_recorded_cwd_and_escapes_both_values() {
+    let mut state = super_state();
+    state.cli_process.clear();
+    state.cwds.insert("%1".into(), "/work/a'b $HOME".into());
+    state.roster_cwd = "/fallback".into();
+    state.threads.insert("%1".into(), "tid'quoted".into());
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    assert!(calls.lock().unwrap().contains(
+        &r#"send %1 cd '/work/a'\''b $HOME' && hive codex resume 'tid'\''quoted'"#.to_string()
+    ));
+}
+
+#[test]
+fn test_supervisor_reattach_uses_roster_cwd_for_empty_record() {
+    let mut state = super_state();
+    state.cli_process.clear();
+    state.cwds.insert("%1".into(), String::new());
+    state.roster_cwd = "/fallback dir".into();
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    assert!(calls
+        .lock()
+        .unwrap()
+        .contains(&"send %1 cd '/fallback dir' && hive codex resume 'tid-1'".to_string()));
 }

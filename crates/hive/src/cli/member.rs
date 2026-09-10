@@ -17,6 +17,17 @@ use crate::team::{
     start_team_hived_or_warn, Team,
 };
 
+fn spawn_timeout_payload(agent: &str, pane: &str) -> Value {
+    json!({
+        "status": "spawn_ready_timeout",
+        "agent": agent,
+        "pane": pane,
+        "paneCwd": crate::tmux::display_value(pane, "#{pane_current_path}").unwrap_or_default(),
+        "paneCommand": crate::tmux::display_value(pane, "#{pane_current_command}").unwrap_or_default(),
+        "hint": "pane spawned but did not reach ready within 30s; dispatch manually via `hive send`",
+    })
+}
+
 /// Send a message to another agent — the only message verb.
 pub(crate) fn send(to_agent: &str, body: &str, artifact: &str) {
     if let Some(label) = to_agent.strip_prefix("ccd.") {
@@ -438,12 +449,7 @@ pub(crate) fn spawn(
         if !not_ready.is_empty() {
             println!(
                 "{}",
-                json_pretty(&json!({
-                    "status": "spawn_ready_timeout",
-                    "agent": agent_name,
-                    "pane": agent.pane_id,
-                    "hint": "pane spawned but did not reach ready within 30s; dispatch manually via `hive send`",
-                }))
+                json_pretty(&spawn_timeout_payload(agent_name, &agent.pane_id))
             );
             std::process::exit(1);
         }
@@ -501,6 +507,25 @@ mod tests {
     use crate::testkit::{
         args, count, display_env, fake_tmux, fake_tmux_tagged, hived_answering_ping, member_row,
     };
+
+    #[test]
+    fn test_spawn_timeout_payload_includes_pane_diagnostics() {
+        crate::tmux::set_run_override(|args, _, _| {
+            let value = match args.last().map(String::as_str) {
+                Some("#{pane_current_path}") => "/missing/cwd",
+                Some("#{pane_current_command}") => "zsh",
+                _ => panic!("unexpected tmux call: {args:?}"),
+            };
+            Ok(crate::tmux::ok_run(0, value, ""))
+        });
+        let payload = spawn_timeout_payload("worker", "%7");
+        assert_eq!(payload["status"], "spawn_ready_timeout");
+        assert_eq!(payload["agent"], "worker");
+        assert_eq!(payload["pane"], "%7");
+        assert_eq!(payload["paneCwd"], "/missing/cwd");
+        assert_eq!(payload["paneCommand"], "zsh");
+        assert!(payload.get("hint").is_some());
+    }
 
     #[test]
     fn test_kill_address_prefers_the_explicit_team_over_the_prefix() {

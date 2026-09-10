@@ -241,14 +241,12 @@ fn exec_codex_managed(args: &[String]) -> ! {
     if pane.is_empty() || !identity::is_inside_tmux() {
         exec_codex_outside(args);
     }
+    let cwd = codex_cwd_or_exit(codex_opt_value(args, &["--cd", "-C"]));
     let sub_index = codex_subcommand_index(args);
     let sub = sub_index.map(|i| args[i].as_str());
     if !codex_app_server::spawn_daemon() {
         codex_raw(args); // daemon would not bind — fall back to embedded codex
     }
-    let cwd = codex_opt_value(args, &["--cd", "-C"])
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(getcwd);
     let _ = codex_app_server::ensure_dir_trusted(&cwd);
     let sock = codex_app_server::shared_socket_path();
     // -c check_for_update_on_startup=false mirrors the hive-spawned path so a
@@ -367,21 +365,36 @@ fn normalize_codex_cwd(args: &mut [String], cwd: &str) {
     }
 }
 
+fn resolve_codex_cwd(
+    explicit: Option<String>,
+    current: impl FnOnce() -> std::io::Result<std::path::PathBuf>,
+) -> anyhow::Result<String> {
+    if let Some(cwd) = explicit.filter(|cwd| !cwd.is_empty()) {
+        return Ok(cwd);
+    }
+    current()
+        .map(|cwd| cwd.to_string_lossy().into_owned())
+        .map_err(|error| anyhow::anyhow!("Codex working directory is unavailable: {error}; change to an existing directory before launching"))
+}
+
+fn codex_cwd_or_exit(explicit: Option<String>) -> String {
+    resolve_codex_cwd(explicit, std::env::current_dir)
+        .unwrap_or_else(|error| super::util::fail(&error.to_string()))
+}
+
 fn codex_launch_cwd(args: &[String], source: Option<&str>) -> String {
     use crate::adapters::base::SessionAdapter;
-    codex_opt_value(args, &["--cd", "-C"])
-        .or_else(|| {
-            let adapter = crate::adapters::codex::CodexAdapter;
-            let path = adapter.find_session_file(source?, None)?;
-            adapter.read_meta(&path).and_then(|meta| meta.cwd)
-        })
-        .filter(|cwd| !cwd.is_empty())
-        .unwrap_or_else(getcwd)
+    codex_cwd_or_exit(codex_opt_value(args, &["--cd", "-C"]).or_else(|| {
+        let adapter = crate::adapters::codex::CodexAdapter;
+        let path = adapter.find_session_file(source?, None)?;
+        adapter.read_meta(&path).and_then(|meta| meta.cwd)
+    }))
 }
 
 fn exec_codex_outside(args: &[String]) -> ! {
     use crate::adapters::codex_app_server;
     if !env_string("TMUX").is_empty() || !stdin_isatty() || !stdout_isatty() {
+        codex_cwd_or_exit(codex_opt_value(args, &["--cd", "-C"]));
         codex_raw(args);
     }
     let sub_index = codex_subcommand_index(args);
@@ -1103,6 +1116,21 @@ fn pane_team_identity() -> Option<(String, String, String)> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_codex_cwd_resolution_rejects_unavailable_process_directory() {
+        let missing = || Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(resolve_codex_cwd(None, missing).is_err());
+        assert!(resolve_codex_cwd(Some(String::new()), missing).is_err());
+        assert_eq!(
+            resolve_codex_cwd(Some("/explicit".into()), missing).unwrap(),
+            "/explicit"
+        );
+        assert_eq!(
+            resolve_codex_cwd(None, || Ok("/current".into())).unwrap(),
+            "/current"
+        );
+    }
+
     #[test]
     fn test_codex_cwd_flags_ignore_option_values_and_literal_prompts() {
         for input in [vec!["--", "--cd=/prompt"], vec!["-c", "--cd=/config"]] {
