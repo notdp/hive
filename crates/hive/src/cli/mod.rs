@@ -10,6 +10,7 @@ mod fork;
 pub mod help_text;
 mod launch;
 mod member;
+mod ps;
 mod setup;
 mod team;
 mod uninstall;
@@ -48,6 +49,7 @@ const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "resume-hint",
     "worktree",
     "ls",
+    "ps",
     "ccd",
     "create",
     "join",
@@ -67,6 +69,7 @@ const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
     "codex",
     "config",
     "doctor",
+    "ps",
     "grok",
     "inject",
     "plugin",
@@ -414,6 +417,9 @@ pub(crate) fn build_cli() -> Command {
                 .about("Jump to a team's tmux window, rebuilding it first when it is gone.")
                 .arg(Arg::new("team_name").required(true)),
         )
+        .subcommand(Command::new("ps")
+            .about("List Hive processes and recorded resources without changing them.")
+            .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)))
         .subcommand(json_default_options(
             Command::new("ls")
                 .about("List hive teams from the registry, with their display state."),
@@ -632,6 +638,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "ls",
     "send",
     "doctor",
+    "ps",
     "capture",
     "interrupt",
     "kill",
@@ -1005,6 +1012,7 @@ fn dispatch(matches: &ArgMatches) {
         },
         Some(("view", m)) => member::view_cmd(arg_str(m, "session_id")),
         Some(("attach", m)) => attach::attach_cmd(arg_str(m, "team_name")),
+        Some(("ps", m)) => ps::run(m.get_flag("json")),
         Some(("ls", m)) => team::ls_cmd(m.get_flag("plain")),
         Some(("send", m)) => member::send(
             arg_str(m, "to_agent"),
