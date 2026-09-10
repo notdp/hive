@@ -250,6 +250,7 @@ pub(crate) fn handle_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_connection(
     conn: UnixStream,
     workspace: &str,
