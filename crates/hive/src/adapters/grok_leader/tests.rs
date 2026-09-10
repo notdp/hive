@@ -1366,7 +1366,47 @@ fn test_prompt_tracked_leaves_the_echo_ack_path_alone() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn test_permission_request_is_cancelled_and_marks_waiting_user() {
+fn test_tracked_prompt_waits_for_the_tui_permission_decision() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("write the requested file").unwrap();
+    proc.feed(&agent_chunk(Some(P), "preparing"));
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "id": 77,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": SID,
+            "toolCall": {"toolCallId": "write-file", "title": "write file"},
+            "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}],
+        },
+    }));
+    let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
+    assert!(runtime.busy);
+    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
+    assert!(!proc
+        .sent()
+        .iter()
+        .any(|msg| msg.get("id") == Some(&json!(77))));
+    assert!(!proc
+        .sent()
+        .iter()
+        .any(|msg| msg["method"] == "session/cancel"));
+
+    // The leader forwards the tool result after the TUI answers its modal.
+    proc.feed(&update(
+        "tool_call_update",
+        json!({"toolCallId": "write-file", "status": "completed"}),
+    ));
+    settle(&client, |rt| rt.input_state == "ready");
+    proc.feed(&turn_completed(P, "end_turn"));
+    proc.feed(&prompt_response(rid, P, "end_turn"));
+    assert_eq!(settle_ended(&client, rid), ended("end_turn", "preparing"));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_permission_request_marks_waiting_user_without_answering() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&json!({
@@ -1379,14 +1419,11 @@ fn test_permission_request_is_cancelled_and_marks_waiting_user() {
             "options": [{"optionId": "a", "name": "Allow", "kind": "allow_once"}],
         },
     }));
-    let answer = settle_sent(&proc, |msg| {
-        msg.get("id").and_then(Value::as_i64) == Some(77)
-    });
-    assert_eq!(
-        answer["result"],
-        json!({"outcome": {"outcome": "cancelled"}})
-    );
     let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
+    assert!(!proc
+        .sent()
+        .iter()
+        .any(|msg| msg.get("id") == Some(&json!(77))));
     // a prompt alone is not turn evidence
     assert_eq!(runtime.turn_open, None);
     teardown(&client, &proc);

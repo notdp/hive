@@ -320,20 +320,15 @@ fn fail_pending(inner: &ClientInner) {
     }
 }
 
-/// Answer a permission prompt with `cancelled`.
-///
-/// The decision belongs to the human at the TUI, which gets its own copy of
-/// the request; hive must still answer its copy or the turn stalls, and
-/// cancelling is the only answer that neither approves nor rejects for them.
-fn on_request(inner: &ClientInner, rid: &Value, method: &str, params: &Value) {
+/// Observe the shared permission modal without answering for the human.
+/// Grok broadcasts it to every subscriber and takes the first answer;
+/// even a `cancelled` reply from this observer would decide the request.
+/// With no human answering, the turn stays pending until a decision or
+/// explicit cancellation; a later TUI attach receives the pending modal.
+fn on_request(inner: &ClientInner, method: &str, params: &Value) {
     if method != "session/request_permission" {
         return;
     }
-    inner.write(&json!({
-        "jsonrpc": "2.0",
-        "id": rid,
-        "result": {"outcome": {"outcome": "cancelled"}},
-    }));
     let mut state = inner.state.lock().unwrap();
     if params.get("sessionId").and_then(Value::as_str) != state.runtime.session_id.as_deref() {
         return;
@@ -594,7 +589,7 @@ fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
         let rid = msg.get("id").filter(|rid| !rid.is_null()).cloned();
         let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
         match (method, rid) {
-            (Some(method), Some(rid)) => on_request(&inner, &rid, &method, &params),
+            (Some(method), Some(_)) => on_request(&inner, &method, &params),
             (Some(method), None) => on_notification(&inner, &method, &params),
             _ => {
                 // Pop atomically: a `call()` that timed out concurrently may have
