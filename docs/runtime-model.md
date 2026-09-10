@@ -271,11 +271,16 @@ verbatim. They are display of the runtime fields below, never a source for
 them.
 
 Every tick that reads the display — the status tick, the claude view tick,
-idle-notify and the roster binding they share — runs behind one probe per
-tick, `tmux::list_panes_all_status`. While the server answers, that listing
-is the pane snapshot those ticks read; while it does not (`no-server` or
-`unknown` alike), they are skipped and the probe backs off, doubling from
-one tick up to `DISPLAY_PROBE_MAX_BACKOFF_SECONDS`, with
+idle-notify and the roster binding they share — reads one snapshot per
+tick (`hived/snapshot.rs`): a `list-panes -a` with the pane's window, tty,
+pid, cwd and dead flag, a `list-windows -a` for the notify token, and one
+`ps` grouped by tty. Pane liveness, the pane's window, the CLI on its tty
+and the window's token are lookups into it, so a tick costs three forks
+however many members the team has. The roster binding is the registry
+joined to the snapshot's `@hive-team` / `@hive-agent` tags — the hived no
+longer calls `Team::load` per tick. While the server does not answer
+(`no-server` or `unknown` alike), the ticks are skipped and the probe backs
+off, doubling from one tick up to `DISPLAY_PROBE_MAX_BACKOFF_SECONDS`, with
 `display.unreachable` / `display.recovered` logged once per flip. The
 request socket keeps its one-second accept loop throughout, and the
 control-mode monitor's reattach backs off the same way (`tmux/control_mode.rs`,

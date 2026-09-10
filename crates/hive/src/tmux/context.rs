@@ -280,3 +280,72 @@ pub(crate) fn sole_window_client(window_id: &str) -> Option<String> {
     let client = matches.next()?;
     matches.next().is_none().then_some(client)
 }
+
+/// The whole process table grouped by tty (`ttys003`, as `ps` prints it):
+/// the hived's tick reads it once and answers every pane's "what runs on
+/// this tty" from it, where `list_tty_processes` costs one `ps` per pane.
+/// None when `ps` itself failed.
+pub fn list_all_tty_processes() -> Option<std::collections::HashMap<String, Vec<TTYProcessInfo>>> {
+    let argv: Vec<String> = ["ps", "-axo", "pid=,tty=,comm=,command="]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let result = exec_capture(&argv, 5, None, None).ok()?;
+    if result.returncode != 0 {
+        return None;
+    }
+    Some(parse_all_tty_processes(&result.stdout))
+}
+
+pub fn parse_all_tty_processes(
+    stdout: &str,
+) -> std::collections::HashMap<String, Vec<TTYProcessInfo>> {
+    let mut by_tty: std::collections::HashMap<String, Vec<TTYProcessInfo>> =
+        std::collections::HashMap::new();
+    for line in stdout.lines() {
+        let row = line.trim();
+        if row.is_empty() {
+            continue;
+        }
+        let parts = split_whitespace_max4(row);
+        if parts.len() < 3 || parts[1] == "??" || parts[1] == "-" {
+            continue; // no controlling tty: never a pane's process
+        }
+        by_tty
+            .entry(parts[1].to_string())
+            .or_default()
+            .push(TTYProcessInfo {
+                pid: parts[0].to_string(),
+                command: parts[2].to_string(),
+                argv: if parts.len() > 3 { parts[3] } else { parts[2] }.to_string(),
+            });
+    }
+    by_tty
+}
+
+/// The `ps` tty column for a pane's `/dev/ttys003`.
+pub fn tty_key(pane_tty: &str) -> &str {
+    pane_tty
+        .trim()
+        .strip_prefix("/dev/")
+        .unwrap_or(pane_tty.trim())
+}
+
+/// Split on whitespace runs, at most 4 parts.
+fn split_whitespace_max4(row: &str) -> Vec<&str> {
+    let mut parts: Vec<&str> = Vec::new();
+    let mut rest = row.trim_start();
+    for _ in 0..3 {
+        match rest.find(|c: char| c.is_whitespace()) {
+            Some(idx) => {
+                parts.push(&rest[..idx]);
+                rest = rest[idx..].trim_start();
+            }
+            None => break,
+        }
+    }
+    if !rest.is_empty() {
+        parts.push(rest);
+    }
+    parts
+}

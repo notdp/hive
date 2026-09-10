@@ -2517,7 +2517,18 @@ fn idle_setup_default() -> IdleSetup {
 }
 
 fn idle_tick(state: &mut HashMap<String, IdleRecord>, monitor: &IdleBusyMonitor, now: f64) {
-    idle_notify_tick("team-a", "dev", state, Some(monitor), now, "", None, None);
+    let snap = TickSnapshot::collect();
+    idle_notify_tick(
+        "team-a",
+        "dev",
+        state,
+        Some(monitor),
+        now,
+        "",
+        None,
+        None,
+        &snap,
+    );
 }
 
 fn idle_tick_dbg(
@@ -2526,6 +2537,7 @@ fn idle_tick_dbg(
     now: f64,
     debug_state: &mut NotifyDebugState,
 ) {
+    let snap = TickSnapshot::collect();
     idle_notify_tick(
         "team-a",
         "dev",
@@ -2535,6 +2547,7 @@ fn idle_tick_dbg(
         "",
         Some(debug_state),
         None,
+        &snap,
     );
 }
 
@@ -2969,7 +2982,11 @@ fn test_idle_notify_agent_panes_filters_to_live_agent_roles() {
     };
     let _guard = testhook::install(hook);
 
-    assert_eq!(idle_notify_agent_panes("team-a"), vec!["%1".to_string()]);
+    let snap = TickSnapshot::collect();
+    assert_eq!(
+        idle_notify_agent_panes("team-a", &snap),
+        vec!["%1".to_string()]
+    );
 }
 
 // ---- socket server / lifecycle -----------------------------------------
@@ -5227,7 +5244,8 @@ fn test_idle_notify_excludes_retained_shell_pane() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
-    assert_eq!(idle_notify_agent_panes("t"), vec!["%1".to_string()]);
+    let snap = TickSnapshot::collect();
+    assert_eq!(idle_notify_agent_panes("t", &snap), vec!["%1".to_string()]);
 }
 
 #[test]
@@ -5574,14 +5592,14 @@ fn status_members(rows: &[(&str, &str)]) -> Vec<(String, Map<String, Value>)> {
 }
 
 fn tick_status(env: &mut StatusEnv, members: &[(String, Map<String, Value>)], now: i64) {
-    let panes = hooked_list_panes_all();
+    let snap = TickSnapshot::collect();
     status_tick(
         &env.workspace.to_string_lossy(),
         members,
         None,
         &mut env.state,
         now,
-        &panes,
+        &snap,
     );
 }
 
@@ -6075,4 +6093,132 @@ fn test_hived_loop_runs_display_ticks_every_tick_while_tmux_answers() {
     );
     assert!(display_events(&env, "display.unreachable").is_empty());
     assert!(display_events(&env, "display.recovered").is_empty());
+}
+
+// --------------------------------------------------------------------------
+// tick snapshot: every per-pane answer is a lookup
+// --------------------------------------------------------------------------
+
+fn snapshot_fixture() -> TickSnapshot {
+    let listing = "%1\tclaude\tclaude\tagent\trex\tteam-a\tclaude\t\tdev:1\t0\t/dev/ttys003\t501\t/tmp/a\n\
+                   %2\tshell\tzsh\tagent\tdodo\tteam-a\tcodex\t\tdev:1\t1\t/dev/ttys004\t502\t/tmp/b\n";
+    let (panes, extras) = crate::tmux::parse_panes_snapshot(listing);
+    let processes = crate::tmux::parse_all_tty_processes(
+        "  501 ttys003 /Users/x/.local/bin/claude claude --resume abc\n  600 ttys004 -zsh -zsh\n  700 ??   /sbin/launchd /sbin/launchd\n",
+    );
+    let mut tokens = HashMap::new();
+    tokens.insert("dev:1".to_string(), "tok-1".to_string());
+    TickSnapshot::with_extras("ok", panes, extras, Some(tokens), Some(processes))
+}
+
+#[test]
+fn test_tick_snapshot_answers_liveness_window_cli_and_token_without_probing() {
+    let mut env = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
+    let _guard = testhook::install(Hook {
+        is_pane_alive: Some(Arc::new(|_p| panic!("probed is_pane_alive"))),
+        detect_cli_process_for_pane: Some(Arc::new(|_p| panic!("probed detect_cli"))),
+        get_pane_window_target: Some(Arc::new(|_p| panic!("probed window target"))),
+        get_window_option: Some(Arc::new(|_w, _k| panic!("probed window option"))),
+        ..Default::default()
+    });
+    let snap = snapshot_fixture();
+    assert!(snap.reachable());
+    assert!(snap.is_alive("%1"));
+    assert!(!snap.is_alive("%2"), "pane_dead=1");
+    assert!(
+        !snap.is_alive("%9"),
+        "a pane the listing does not hold is gone"
+    );
+    assert_eq!(snap.window_of("%1").as_deref(), Some("dev:1"));
+    assert_eq!(snap.window_of("%9"), None);
+    assert_eq!(snap.cli_profile("%1").map(|p| p.name), Some("claude"));
+    assert_eq!(
+        snap.cli_profile("%2"),
+        None,
+        "a shell on the tty is not a CLI"
+    );
+    assert_eq!(snap.cli_profile("%9"), None);
+    assert_eq!(snap.window_token("dev:1").as_deref(), Some("tok-1"));
+    assert_eq!(snap.window_token("dev:2"), None);
+}
+
+#[test]
+fn test_tick_snapshot_without_columns_answers_through_the_hooked_seams() {
+    let _guard = testhook::install(Hook {
+        list_panes_all: Some(Arc::new(|| {
+            vec![crate::tmux::PaneInfo {
+                pane_id: "%1".to_string(),
+                ..Default::default()
+            }]
+        })),
+        is_pane_alive: Some(Arc::new(|pane| pane == "%1")),
+        detect_cli_process_for_pane: Some(Arc::new(|_p| claude_profile())),
+        get_pane_window_target: Some(Arc::new(|_p| Some("dev:1".to_string()))),
+        get_window_option: Some(Arc::new(|w, _k| (w == "dev:1").then(|| "tok".to_string()))),
+        ..Default::default()
+    });
+    let snap = TickSnapshot::collect();
+    assert!(snap.reachable());
+    assert!(snap.is_alive("%1"));
+    assert!(!snap.is_alive("%2"));
+    assert_eq!(snap.window_of("%1").as_deref(), Some("dev:1"));
+    assert_eq!(snap.cli_profile("%1").map(|p| p.name), Some("claude"));
+    assert_eq!(snap.window_token("dev:1").as_deref(), Some("tok"));
+    assert_eq!(snap.window_token("dev:2"), None);
+}
+
+#[test]
+fn test_team_member_bindings_join_the_roster_to_tagged_panes_without_tmux() {
+    let mut env = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    let dir = tmp.path().join(".hive/teams/team-a");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("team.json"),
+        serde_json::json!({
+            "team": "team-a",
+            "workspace": dir.to_string_lossy(),
+            "createdAt": "1",
+            "members": [
+                {"name": "orch", "cli": "claude"},
+                {"name": "rex", "cli": "codex"},
+                {"name": "dodo"}
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let listing = "%2\tcodex\tcodex\tagent\trex\tteam-a\tcodex\t\tdev:1\t0\t/dev/ttys004\t502\t/tmp\n\
+                   %3\tzsh\tzsh\tagent\tghost\tteam-a\tclaude\t\tdev:1\t0\t/dev/ttys005\t503\t/tmp\n\
+                   %4\tgrok\tgrok\tagent\tdodo\tteam-b\tgrok\t\tdev:2\t0\t/dev/ttys006\t504\t/tmp\n\
+                   %5\tview\thive\tmirror\tdodo\tteam-a\t\t\tdev:1\t0\t/dev/ttys007\t505\t/tmp\n";
+    let (panes, extras) = crate::tmux::parse_panes_snapshot(listing);
+    let snap = TickSnapshot::with_extras("ok", panes, extras, None, None);
+    let _guard = testhook::install(Hook::default());
+    let rows = team_member_bindings_impl("team-a", &snap).unwrap();
+    let names: Vec<&str> = rows.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        names,
+        ["dodo", "orch", "rex"],
+        "roster names sorted; a pane tagged for a name the roster lacks is not a member"
+    );
+    let row = |name: &str| rows.iter().find(|(n, _)| n == name).unwrap().1.clone();
+    assert_eq!(row("rex")["pane"], "%2");
+    assert_eq!(row("rex")["role"], "agent");
+    assert_eq!(row("rex")["cli"], "codex");
+    assert_eq!(
+        row("orch")["pane"],
+        "",
+        "a member without a pane still binds"
+    );
+    assert_eq!(row("orch")["role"], "agent");
+    // dodo's team-b pane belongs to another team; the team-a mirror pane
+    // binds with its role, and a roster row without a cli defaults to claude.
+    assert_eq!(row("dodo")["pane"], "%5");
+    assert_eq!(row("dodo")["role"], "mirror");
+    assert_eq!(row("dodo")["cli"], "claude");
+    assert!(team_member_bindings_impl("team-z", &snap).is_err());
 }
