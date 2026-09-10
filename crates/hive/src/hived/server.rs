@@ -338,3 +338,25 @@ pub(crate) fn serve_requests(
     }
     !SHUTDOWN.load(Ordering::SeqCst)
 }
+
+/// The coordinator owns this synchronous rejection while admission is shut.
+/// No handler or engine operation is started, and the reply is sent before
+/// the coordinator can proceed to teardown.
+pub(super) fn reject_draining_request(server: &dyn HivedServerApi) {
+    let Some(mut conn) = server.accept_timeout(0.1) else {
+        return;
+    };
+    let timeout = Some(Duration::from_millis(100));
+    let _ = conn.set_read_timeout(timeout);
+    let _ = conn.set_write_timeout(timeout);
+    let mut buf = [0u8; 65536];
+    loop {
+        match conn.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    let reply = b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining; request not admitted; retry later\"}\n";
+    let _ = conn.write_all(reply);
+    let _ = conn.shutdown(std::net::Shutdown::Write);
+}

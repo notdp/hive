@@ -493,7 +493,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             IDLE_NOTIFY_TICK_SECONDS,
         ) {
             while !drain_ready(workspace) {
-                thread::sleep(Duration::from_millis(20));
+                reject_draining_request(server.as_ref());
             }
             break;
         }

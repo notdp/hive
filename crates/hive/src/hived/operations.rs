@@ -26,6 +26,7 @@ struct Operation {
     handle: Option<TurnHandle>,
     last_result: Option<Map<String, Value>>,
     persisted: bool,
+    write_error: Option<String>,
 }
 
 fn active() -> &'static Mutex<HashMap<PathBuf, Operation>> {
@@ -53,6 +54,28 @@ fn write_record(path: &Path, record: &Value) -> Result<()> {
     })();
     let _ = fs::remove_file(tmp);
     result
+}
+
+fn persist_operation(path: &Path, operation: &mut Operation) -> Result<()> {
+    match write_record(path, &operation.record) {
+        Ok(()) => {
+            operation.persisted = true;
+            operation.write_error = None;
+            Ok(())
+        }
+        Err(error) => {
+            operation.persisted = false;
+            let reason = error.to_string();
+            if operation.write_error.as_deref() != Some(reason.as_str()) {
+                eprintln!(
+                    "hived: operation {} journal write failed: {reason}",
+                    operation.record["dispatchId"].as_str().unwrap_or_default()
+                );
+            }
+            operation.write_error = Some(reason);
+            Err(error)
+        }
+    }
 }
 
 pub(super) fn prepare_operation(
@@ -97,6 +120,7 @@ pub(super) fn prepare_operation(
             handle: None,
             last_result: None,
             persisted: true,
+            write_error: None,
         },
     );
     Ok(path)
@@ -117,9 +141,7 @@ pub(super) fn operation_handle(path: &Path, handle: TurnHandle) -> Result<()> {
     };
     operation.handle = Some(handle);
     operation.persisted = false;
-    write_record(path, &operation.record)?;
-    operation.persisted = true;
-    Ok(())
+    persist_operation(path, operation)
 }
 
 pub(super) fn operation_terminal(path: &Path, mut result: Map<String, Value>) -> Result<()> {
@@ -135,9 +157,7 @@ pub(super) fn operation_terminal(path: &Path, mut result: Map<String, Value>) ->
     operation.record["state"] = json!("terminal");
     operation.record["result"] = Value::Object(result);
     operation.persisted = false;
-    write_record(path, &operation.record)?;
-    operation.persisted = true;
-    Ok(())
+    persist_operation(path, operation)
 }
 
 fn retired_reason(record: &Value) -> Option<&'static str> {
@@ -186,7 +206,7 @@ pub(super) fn interrupt_operations(workspace: &str, reason: &str) {
         let id = operation.record["dispatchId"].as_str().unwrap_or_default();
         operation.record["result"] = Value::Object(ambiguous(id, reason));
         operation.record["state"] = json!("terminal");
-        operation.persisted = write_record(path, &operation.record).is_ok();
+        let _ = persist_operation(path, operation);
     }
 }
 
@@ -218,8 +238,8 @@ pub(super) fn flush_operations(workspace: &str) -> bool {
                 operation.persisted = false;
             }
         }
-        if !operation.persisted && write_record(path, &operation.record).is_ok() {
-            operation.persisted = true;
+        if !operation.persisted {
+            let _ = persist_operation(path, operation);
         }
         ready &= operation.record["state"] == "terminal" && operation.persisted;
     }

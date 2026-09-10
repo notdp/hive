@@ -6245,3 +6245,25 @@ fn test_shutdown_wins_over_reexec_after_last_lease_drops() {
     assert!(reexec_hived("/unused", "t", "", "", &server, None, None).is_none());
     assert!(calls.lock().unwrap().is_empty());
 }
+
+#[test]
+fn test_draining_rejects_new_requests_before_any_handler_side_effect() {
+    let _guard = testhook::install(Hook {
+        handle_request: Some(Arc::new(|_| panic!("draining request was admitted"))),
+        ..Default::default()
+    });
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let server = open_server_socket(&workspace).unwrap();
+    close_admission();
+    let client_ws = workspace.clone();
+    let client =
+        thread::spawn(move || request_hived(&client_ws, &action_payload("node-dispatch"), 2.0));
+    reject_draining_request(&server);
+    let reply = client.join().unwrap().unwrap();
+    assert_eq!(reply["ok"], false);
+    assert_eq!(reply["notAdmitted"], true);
+    assert!(!requests_in_flight());
+    assert!(!hooked_run_dir(&workspace).join("operations").exists());
+    server.close();
+}

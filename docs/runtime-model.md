@@ -347,7 +347,9 @@ runner refuses a claude member before anything is spawned.
   handles until their terminal results are saved. Claude sends record the
   transport acceptance only: its inbox/job is external to the hived and no
   native execution result is available. Unresolved live handles or failed
-  journal writes defer voluntary retirement. Explicit member/team removal is
+  journal writes defer voluntary retirement and emit a diagnostic. New requests
+  during shutdown drain are rejected as `notAdmitted`, so callers can retry
+  without replaying accepted work. Explicit member/team removal is
   recorded as interruption; an abrupt daemon exit leaves an ambiguous record.
 - **The read-back.** The runner polls the hived's `node-result` for the
   dispatch id at 1s: `running` while the turn is open; `ended` with
