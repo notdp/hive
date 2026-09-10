@@ -671,6 +671,7 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
             );
         }
     }
+    let original_entry = entry.clone();
     let at = now();
     // The archived instance as the manifest has it: a retry after a failed
     // move must not mistake an entry a previous attempt rewrote for it.
@@ -704,13 +705,14 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
         archive.state = "quarantined".to_string();
         archive.restore_as = String::new();
         let _ = archive.write();
-        let _ = fs::write(&entry_path, &text); // the payload's entry as it was
     };
     if let Err(e) = crate::registry::write_entry_file(&entry_path, &entry) {
         revert(&mut archive);
         return Err(anyhow!("cannot write the restored entry: {e}"));
     }
     if let Err(e) = fs::rename(&payload, &target) {
+        // A failed rollback must leave a complete entry for the next retry.
+        let _ = crate::registry::write_entry_file(&entry_path, &original_entry);
         revert(&mut archive);
         return Err(anyhow!(
             "cannot move the archive back to {}: {e}",
