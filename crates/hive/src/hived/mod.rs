@@ -49,6 +49,12 @@ pub const IDLE_NOTIFY_MISSING_PRUNE_TICKS: i64 = 5;
 pub const NOTIFY_DEBUG_HEARTBEAT_SECONDS: f64 = 30.0;
 pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
+// The display (tmux server) is probed every tick while it answers — that
+// listing is the pane snapshot the status and view ticks read — and on a
+// doubling schedule capped here while it does not. A dead server must not
+// cost a fork storm per second; the socket keeps its 1s accept loop either
+// way, so requests never wait on tmux.
+pub const DISPLAY_PROBE_MAX_BACKOFF_SECONDS: f64 = 30.0;
 const HIVED_REEXEC_LOCK_ENV: &str = "HIVE_HIVED_REEXEC_LOCK_FD";
 pub const SOCKET_READY_TIMEOUT: f64 = 2.0;
 // Identity checks must wait strictly longer than the worst tick phase:

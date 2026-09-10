@@ -270,6 +270,19 @@ busy since; the ticker is the two newest bus sends as `from → to · age ·
 verbatim. They are display of the runtime fields below, never a source for
 them.
 
+Every tick that reads the display — the status tick, the claude view tick,
+idle-notify and the roster binding they share — runs behind one probe per
+tick, `tmux::list_panes_all_status`. While the server answers, that listing
+is the pane snapshot those ticks read; while it does not (`no-server` or
+`unknown` alike), they are skipped and the probe backs off, doubling from
+one tick up to `DISPLAY_PROBE_MAX_BACKOFF_SECONDS`, with
+`display.unreachable` / `display.recovered` logged once per flip. The
+request socket keeps its one-second accept loop throughout, and the
+control-mode monitor's reattach backs off the same way (`tmux/control_mode.rs`,
+which also reaps a `tmux -C attach` client of the team session left
+reparented to pid 1 by a hived that was killed), so a dead tmux server
+costs a hived one probe per 30s instead of a fork storm per second.
+
 ### Addresses beyond the roster
 
 Of the send address kinds, only a member names an engine with a transport.

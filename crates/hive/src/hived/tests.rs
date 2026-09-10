@@ -1595,7 +1595,8 @@ fn view_tick_env() -> ViewTickEnv {
 
 fn run_view_tick(env: &mut ViewTickEnv) {
     let members = view_members();
-    claude_view_tick("/tmp/ws", "probe", &members, &mut env.state);
+    let panes = hooked_list_panes_all();
+    claude_view_tick("/tmp/ws", "probe", &members, &mut env.state, &panes);
 }
 
 #[test]
@@ -5573,12 +5574,14 @@ fn status_members(rows: &[(&str, &str)]) -> Vec<(String, Map<String, Value>)> {
 }
 
 fn tick_status(env: &mut StatusEnv, members: &[(String, Map<String, Value>)], now: i64) {
+    let panes = hooked_list_panes_all();
     status_tick(
         &env.workspace.to_string_lossy(),
         members,
         None,
         &mut env.state,
         now,
+        &panes,
     );
 }
 
@@ -5887,4 +5890,189 @@ fn test_supervisor_reattach_uses_roster_cwd_for_empty_record() {
         .lock()
         .unwrap()
         .contains(&"send %1 cd '/fallback dir' && hive codex resume 'tid-1'".to_string()));
+}
+
+// --------------------------------------------------------------------------
+// display probe: the tick's tmux gate and its backoff
+// --------------------------------------------------------------------------
+
+#[test]
+fn test_display_probe_backs_off_doubling_to_the_cap_and_resets_on_recovery() {
+    let mut probe = DisplayProbe::new();
+    assert!(probe.due(0.0));
+    assert_eq!(
+        probe.record("no-server", 0.0),
+        Some(DisplayTransition::Unreachable)
+    );
+    assert!(!probe.due(0.5));
+    assert!(probe.due(1.0));
+    assert_eq!(probe.next_in(0.0), 1.0);
+    assert_eq!(probe.record("no-server", 1.0), None);
+    assert!(!probe.due(2.9));
+    assert!(probe.due(3.0));
+    // `unknown` backs off the same way: the display cannot be read either way.
+    assert_eq!(probe.record("unknown", 3.0), None);
+    assert!(probe.due(7.0));
+    for now in [7.0, 15.0, 31.0, 61.0] {
+        assert_eq!(probe.record("no-server", now), None);
+    }
+    assert_eq!(probe.next_in(61.0), DISPLAY_PROBE_MAX_BACKOFF_SECONDS);
+    assert_eq!(probe.record("ok", 91.0), Some(DisplayTransition::Recovered));
+    assert!(probe.due(91.0));
+    assert_eq!(probe.next_in(91.0), 0.0);
+    assert_eq!(probe.record("ok", 92.0), None);
+    assert_eq!(
+        probe.record("no-server", 93.0),
+        Some(DisplayTransition::Unreachable)
+    );
+    assert_eq!(probe.next_in(93.0), IDLE_NOTIFY_TICK_SECONDS);
+}
+
+struct LoopProbeEnv {
+    _env: EnvGuard,
+    _tmp: tempfile::TempDir,
+    workspace: String,
+    probes: Arc<Mutex<usize>>,
+    bindings: Arc<Mutex<usize>>,
+    serves: Arc<Mutex<usize>>,
+    events: EventSink,
+    _guard: testhook::Guard,
+}
+
+/// A hived loop that serves four ticks then retires, against a display
+/// whose probe answers *status* (`(None, status)` unless `ok`).
+fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
+    let mut env = EnvGuard::cleared(&[HIVED_REEXEC_LOCK_ENV]);
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    let workspace = tmp.path().to_string_lossy().to_string();
+    let probes = Arc::new(Mutex::new(0usize));
+    let bindings = Arc::new(Mutex::new(0usize));
+    let serves = Arc::new(Mutex::new(0usize));
+    let events: EventSink = Arc::new(Mutex::new(Vec::new()));
+    let probes_sink = Arc::clone(&probes);
+    let bindings_sink = Arc::clone(&bindings);
+    let serves_sink = Arc::clone(&serves);
+    let events_sink = Arc::clone(&events);
+    let hook = Hook {
+        open_server_socket: Some(Arc::new(|_workspace| {
+            Ok(Box::new(RecServer {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }) as Box<dyn HivedServerApi>)
+        })),
+        write_hived_owner: Some(Arc::new(|workspace, pid, started_at, token| {
+            write_hived_owner_impl(workspace, pid, started_at, token);
+        })),
+        release_reexec_lock_fd: Some(Arc::new(|_fd| {})),
+        is_tmux_window_alive: Some(Arc::new(|_id| true)),
+        stale_disk_build_hash: Some(Arc::new(|| None)),
+        serve_requests: Some(Arc::new(move || {
+            let mut served = serves_sink.lock().unwrap();
+            *served += 1;
+            *served < 4
+        })),
+        cleanup_socket: Some(Arc::new(|_workspace| {})),
+        make_busy_monitor: Some(Arc::new(|_session| None)),
+        get_most_recent_client_window: Some(Arc::new(|_session| None)),
+        team_load: Some(Arc::new(|_name| anyhow::bail!("no team"))),
+        team_member_bindings: Some(Arc::new(move |_team| {
+            *bindings_sink.lock().unwrap() += 1;
+            Ok(Vec::new())
+        })),
+        list_panes_all: Some(Arc::new(Vec::new)),
+        list_panes_all_status: Some(Arc::new(move || {
+            *probes_sink.lock().unwrap() += 1;
+            if status == "ok" {
+                (Some(Vec::new()), "ok")
+            } else {
+                (None, status)
+            }
+        })),
+        gl_list_daemon_keys: Some(Arc::new(Vec::new)),
+        cb_list_recorded_panes: Some(Arc::new(Vec::new)),
+        cas_list_recorded_panes: Some(Arc::new(Vec::new)),
+        notify_debug_emit: Some(Arc::new(move |_ws, event, fields| {
+            let mut map = Map::new();
+            for (key, value) in fields {
+                map.insert(key.to_string(), value.clone());
+            }
+            events_sink.lock().unwrap().push((event.to_string(), map))
+        })),
+        ..Default::default()
+    };
+    LoopProbeEnv {
+        _env: env,
+        _tmp: tmp,
+        workspace,
+        probes,
+        bindings,
+        serves,
+        events,
+        _guard: testhook::install(hook),
+    }
+}
+
+fn display_events(env: &LoopProbeEnv, name: &str) -> Vec<Map<String, Value>> {
+    env.events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(event, _)| event == name)
+        .map(|(_, fields)| fields.clone())
+        .collect()
+}
+
+#[test]
+fn test_hived_loop_skips_display_ticks_and_backs_off_while_tmux_is_unreachable() {
+    let env = loop_probe_env("no-server");
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert_eq!(
+        *env.serves.lock().unwrap(),
+        4,
+        "requests are served every tick"
+    );
+    assert_eq!(
+        *env.bindings.lock().unwrap(),
+        0,
+        "no display tick may run while tmux is unreachable"
+    );
+    assert_eq!(
+        *env.probes.lock().unwrap(),
+        1,
+        "the probe backs off: one probe for four ticks, not one per tick"
+    );
+    let unreachable = display_events(&env, "display.unreachable");
+    assert_eq!(unreachable.len(), 1, "the flip is logged once");
+    assert_eq!(
+        unreachable[0].get("status"),
+        Some(&Value::from("no-server"))
+    );
+    let next = unreachable[0]
+        .get("nextProbeSeconds")
+        .and_then(Value::as_f64)
+        .unwrap();
+    assert!(
+        (next - IDLE_NOTIFY_TICK_SECONDS).abs() < 1e-6,
+        "next probe in {next}s"
+    );
+    assert!(display_events(&env, "display.recovered").is_empty());
+}
+
+#[test]
+fn test_hived_loop_runs_display_ticks_every_tick_while_tmux_answers() {
+    let env = loop_probe_env("ok");
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert_eq!(*env.serves.lock().unwrap(), 4);
+    assert_eq!(
+        *env.probes.lock().unwrap(),
+        4,
+        "a reachable display is probed every tick"
+    );
+    assert_eq!(
+        *env.bindings.lock().unwrap(),
+        4,
+        "display ticks run every tick"
+    );
+    assert!(display_events(&env, "display.unreachable").is_empty());
+    assert!(display_events(&env, "display.recovered").is_empty());
 }

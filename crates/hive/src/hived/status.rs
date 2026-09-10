@@ -68,18 +68,18 @@ pub fn ticker_head(body: &str) -> String {
     head.replace('#', "##")
 }
 
-/// One status tick. Only `agent` panes get the two pane options — a
-/// mirror's `hive view` repaint would read as output, and a mirror or
-/// terminal pane has no chip to mark unread; the ticker lands on the window
-/// of the first bound engine pane.
+/// One status tick over *panes*, the tick's `list-panes -a` snapshot. Only
+/// `agent` panes get the two pane options — a mirror's `hive view` repaint
+/// would read as output, and a mirror or terminal pane has no chip to mark
+/// unread; the ticker lands on the window of the first bound engine pane.
 pub(crate) fn status_tick(
     workspace: &str,
     members: &[(String, Map<String, Value>)],
     monitor: Option<&dyn OutputMonitor>,
     state: &mut StatusTickState,
     now_epoch: i64,
+    panes: &[crate::tmux::PaneInfo],
 ) {
-    let panes = hooked_list_panes_all();
     if panes.is_empty() {
         return; // an empty listing is a tmux failure, not an empty server
     }

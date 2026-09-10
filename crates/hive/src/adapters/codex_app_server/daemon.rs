@@ -8,7 +8,7 @@ use std::io;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -200,14 +200,42 @@ pub fn ensure_daemon() -> DaemonOutcome {
                 }
                 None => clear_auth_baseline(),
             }
+            reap_in_background(child);
             return DaemonOutcome::Started;
         }
         thread::sleep(Duration::from_millis(200));
     }
+    terminate_and_reap(child);
+    DaemonOutcome::Failed
+}
+
+/// Wait on a started daemon from a thread. The daemon outlives this process
+/// by design (setsid), but while both live this process is its parent, and
+/// a dropped `Child` leaves a zombie behind when the daemon later exits or
+/// is replaced — a hived collects one per daemon generation otherwise.
+fn reap_in_background(mut child: Child) {
+    let _ = thread::Builder::new()
+        .name("codex-daemon-reaper".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+}
+
+/// SIGTERM a daemon that never bound, escalate to SIGKILL after 2s, and
+/// wait so it does not linger as a zombie.
+fn terminate_and_reap(mut child: Child) {
     unsafe {
         libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
     }
-    DaemonOutcome::Failed
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The pid hive recorded for the daemon, only while a process by that pid
@@ -668,4 +696,46 @@ pub fn fork_member_thread(thread_id: &str, name: &str) -> Option<String> {
     let client = shared_client()?;
     freshen_models_cache();
     client.fork_thread(thread_id, name)
+}
+
+#[cfg(test)]
+mod reap_tests {
+    use super::*;
+
+    /// `ps -o stat=` for *pid*: empty once the process is collected; `Z` while
+    /// it is a zombie.
+    fn stat(pid: u32) -> String {
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn test_reap_in_background_collects_a_child_that_exits_after_start() {
+        let child = Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        reap_in_background(child);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let stat = stat(pid);
+            if stat.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pid {pid} still present: stat {stat}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn test_terminate_and_reap_kills_and_collects_a_child_that_never_bound() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = child.id();
+        terminate_and_reap(child);
+        assert_eq!(stat(pid), "", "pid {pid} must be gone, not a zombie");
+    }
 }

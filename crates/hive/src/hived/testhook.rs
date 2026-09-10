@@ -55,6 +55,8 @@ pub struct Hook {
     pub set_window_option: Option<S3<()>>,
     pub send_keys: Option<S2<()>>,
     pub list_panes_all: Option<F0<Vec<crate::tmux::PaneInfo>>>,
+    #[allow(clippy::type_complexity)]
+    pub list_panes_all_status: Option<F0<(Option<Vec<crate::tmux::PaneInfo>>, &'static str)>>,
     pub tmux_socket_path: Option<F0<Option<String>>>,
     pub is_tmux_window_alive: Option<S1<bool>>,
     // agent_cli

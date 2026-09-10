@@ -23,6 +23,73 @@ pub(crate) fn is_tmux_window_alive_impl(tmux_window_id: &str) -> bool {
     crate::tmux::window_exists(tmux_window_id)
 }
 
+/// A display probe result that flipped the display's reachability; the
+/// loop logs each flip once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayTransition {
+    Unreachable,
+    Recovered,
+}
+
+impl DisplayTransition {
+    pub fn event(self) -> &'static str {
+        match self {
+            DisplayTransition::Unreachable => "display.unreachable",
+            DisplayTransition::Recovered => "display.recovered",
+        }
+    }
+}
+
+/// The display probe schedule: every tick while the tmux server answers,
+/// doubling from one tick up to `DISPLAY_PROBE_MAX_BACKOFF_SECONDS` while
+/// it does not (`no-server` and `unknown` alike: neither lets the display
+/// be read right now), reset by the first reachable probe.
+#[derive(Debug)]
+pub struct DisplayProbe {
+    next_at: f64,
+    backoff: f64,
+    unreachable: bool,
+}
+
+impl Default for DisplayProbe {
+    fn default() -> Self {
+        DisplayProbe::new()
+    }
+}
+
+impl DisplayProbe {
+    pub fn new() -> DisplayProbe {
+        DisplayProbe {
+            next_at: f64::NEG_INFINITY,
+            backoff: IDLE_NOTIFY_TICK_SECONDS,
+            unreachable: false,
+        }
+    }
+
+    pub fn due(&self, now: f64) -> bool {
+        now >= self.next_at
+    }
+
+    /// Seconds until the next probe, 0 while the display is reachable.
+    pub fn next_in(&self, now: f64) -> f64 {
+        (self.next_at - now).max(0.0)
+    }
+
+    /// Record a probe's status (`tmux::list_panes_all_status`); the
+    /// transition when reachability flipped.
+    pub fn record(&mut self, status: &str, now: f64) -> Option<DisplayTransition> {
+        if status == "ok" {
+            self.next_at = f64::NEG_INFINITY;
+            self.backoff = IDLE_NOTIFY_TICK_SECONDS;
+            return std::mem::replace(&mut self.unreachable, false)
+                .then_some(DisplayTransition::Recovered);
+        }
+        self.next_at = now + self.backoff;
+        self.backoff = (self.backoff * 2.0).min(DISPLAY_PROBE_MAX_BACKOFF_SECONDS);
+        (!std::mem::replace(&mut self.unreachable, true)).then_some(DisplayTransition::Unreachable)
+    }
+}
+
 /// Ensure the team hived socket is alive.
 ///
 /// A hived of this hive home that is another build, api version or team
@@ -202,6 +269,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     let mut code_reexec_state = ReexecState::default();
     let mut claude_view_state = ClaudeTickState::default();
     let mut status_state = StatusTickState::default();
+    let mut display = DisplayProbe::new();
     // `monotonic()` starts near zero, so a 0.0 seed would skip the first
     // periodic checks; negative infinity makes every one run on the first tick.
     let mut last_window_check = f64::NEG_INFINITY;
@@ -348,19 +416,50 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             }
         }
 
-        let tick_members = hooked_team_member_bindings(team).unwrap_or_default();
-
-        // Job relabelling and border cosmetics must never take the hived
-        // down (the tick fns swallow their own failures).
-        claude_name_tick(&tick_members, team, &mut claude_view_state);
-        claude_view_tick(workspace, team, &tick_members, &mut claude_view_state);
-        status_tick(
-            workspace,
-            &tick_members,
-            busy_monitor.as_deref(),
-            &mut status_state,
-            now_epoch_seconds(),
-        );
+        // One display probe per tick: while the tmux server answers, its
+        // pane listing is the snapshot the status and view ticks read;
+        // while it does not, every display-dependent tick is skipped and
+        // the probe backs off. The socket below keeps its 1s accept loop
+        // either way.
+        let panes = if display.due(now) {
+            let (panes, status) = hooked_list_panes_all_status();
+            if let Some(transition) = display.record(status, now) {
+                hooked_notify_debug_emit(
+                    workspace,
+                    transition.event(),
+                    &[
+                        ("team", Value::from(team)),
+                        ("status", Value::from(status)),
+                        ("nextProbeSeconds", Value::from(display.next_in(now))),
+                    ],
+                );
+            }
+            panes
+        } else {
+            None
+        };
+        let tick_members = panes.as_deref().map(|panes| {
+            let tick_members = hooked_team_member_bindings(team).unwrap_or_default();
+            // Job relabelling and border cosmetics must never take the hived
+            // down (the tick fns swallow their own failures).
+            claude_name_tick(&tick_members, team, &mut claude_view_state);
+            claude_view_tick(
+                workspace,
+                team,
+                &tick_members,
+                &mut claude_view_state,
+                panes,
+            );
+            status_tick(
+                workspace,
+                &tick_members,
+                busy_monitor.as_deref(),
+                &mut status_state,
+                now_epoch_seconds(),
+                panes,
+            );
+            tick_members
+        });
 
         if !hooked_serve_requests(
             server.as_ref(),
@@ -374,16 +473,18 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             break;
         }
 
-        idle_notify_tick(
-            team,
-            &session_target,
-            &mut idle_notify,
-            busy_monitor.as_deref(),
-            monotonic(),
-            workspace,
-            Some(&mut notify_debug_state),
-            Some(tick_members.as_slice()),
-        );
+        if let Some(tick_members) = tick_members.as_deref() {
+            idle_notify_tick(
+                team,
+                &session_target,
+                &mut idle_notify,
+                busy_monitor.as_deref(),
+                monotonic(),
+                workspace,
+                Some(&mut notify_debug_state),
+                Some(tick_members),
+            );
+        }
     }
 
     if let Some(monitor) = busy_monitor.as_ref() {

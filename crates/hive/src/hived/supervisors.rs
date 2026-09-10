@@ -368,14 +368,15 @@ pub(crate) fn claude_name_tick(
 /// Two cheap signals gate the work: the attach journal's entry set (an entry
 /// appears/disappears on every attach, switch and detach) and the panes'
 /// titles (the panel writes the viewed session's name). Probing costs a ps
-/// per pane, so it only runs when one of those changed.
+/// per pane, so it only runs when one of those changed. *panes* is the
+/// tick's `list-panes -a` snapshot.
 pub(crate) fn claude_view_tick(
     workspace: &str,
     team: &str,
     members: &[(String, Map<String, Value>)],
     state: &mut ClaudeTickState,
+    panes: &[crate::tmux::PaneInfo],
 ) {
-    let panes = hooked_list_panes_all();
     if panes.is_empty() {
         return; // an empty listing is a tmux failure, not an empty server
     }
@@ -403,7 +404,7 @@ pub(crate) fn claude_view_tick(
             continue;
         }
         let own_job = hooked_cb_job_id_for_pane(&pane_id).unwrap_or_default();
-        let view = hooked_cv_view_for_pane(&pane_id, Some(panes.as_slice()));
+        let view = hooked_cv_view_for_pane(&pane_id, Some(panes));
         let label = crate::adapters::claude_view::view_label(&view, &own_job);
         if state.labels.get(&pane_id) == Some(&label) {
             continue;

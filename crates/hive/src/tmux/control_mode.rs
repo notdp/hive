@@ -11,6 +11,13 @@ use std::time::{Duration, Instant};
 use super::appearance::{session_colour_snapshot, PaneColourReports};
 
 const CONTROL_MODE_RESTART_DELAY: f64 = 1.0;
+/// Restart delays double from `CONTROL_MODE_RESTART_DELAY` up to this cap
+/// while attaches keep failing fast (no server to attach to), and reset
+/// after a run that stayed attached `CONTROL_MODE_HEALTHY_RUN_SECONDS`.
+const CONTROL_MODE_MAX_RESTART_DELAY: f64 = 30.0;
+const CONTROL_MODE_HEALTHY_RUN_SECONDS: f64 = 10.0;
+/// `stop` joins the monitor thread, so a backoff sleeps in slices this long.
+const STOP_POLL: Duration = Duration::from_millis(200);
 const COLOUR_SAMPLE_FAST_INTERVAL: Duration = Duration::from_secs(2);
 const COLOUR_SAMPLE_IDLE_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -332,14 +339,80 @@ fn record_control_mode_output(inner: &MonitorInner, pane_id: &str, payload: &str
         .insert(pane_id.to_string(), Instant::now());
 }
 
+/// The delay before the next attach: `CONTROL_MODE_RESTART_DELAY` after a
+/// run that stayed attached (or for the first retry), otherwise double the
+/// previous delay up to `CONTROL_MODE_MAX_RESTART_DELAY`.
+fn next_restart_delay(previous: Option<f64>, ran_for_secs: f64) -> f64 {
+    match previous {
+        Some(previous) if ran_for_secs < CONTROL_MODE_HEALTHY_RUN_SECONDS => {
+            (previous * 2.0).min(CONTROL_MODE_MAX_RESTART_DELAY)
+        }
+        _ => CONTROL_MODE_RESTART_DELAY,
+    }
+}
+
+/// Control clients of *session_target* that nobody owns any more, from a
+/// `ps -axo pid=,ppid=,command=` listing: a hived killed with SIGKILL
+/// leaves its `tmux -C attach` child reparented to pid 1, attached forever.
+/// Only a process whose argv is exactly the one `monitor_run_once` spawns
+/// and whose parent is pid 1 matches — a human's own control client keeps
+/// its shell as parent, and a live hived's keeps the hived.
+pub(crate) fn orphan_control_client_pids(ps_output: &str, session_target: &str) -> Vec<i32> {
+    let wanted = format!("tmux -C attach -t {session_target}");
+    ps_output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let pid: i32 = parts.next()?.parse().ok()?;
+            let ppid: i32 = parts.next()?.parse().ok()?;
+            let command = parts.collect::<Vec<_>>().join(" ");
+            (ppid == 1 && command == wanted).then_some(pid)
+        })
+        .collect()
+}
+
+fn reap_orphan_control_clients(session_target: &str, workspace: &str) {
+    let Ok(out) = Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    else {
+        return;
+    };
+    for pid in orphan_control_client_pids(&String::from_utf8_lossy(&out.stdout), session_target) {
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        crate::notify_debug::emit(
+            workspace,
+            "monitor.orphan_reaped",
+            &[
+                ("session", serde_json::json!(session_target)),
+                ("pid", serde_json::json!(pid)),
+            ],
+        );
+    }
+}
+
 fn monitor_run_loop(inner: Arc<MonitorInner>, session_target: String) {
+    reap_orphan_control_clients(&session_target, &inner.workspace);
+    let mut delay: Option<f64> = None;
     while !inner.stop.load(Ordering::SeqCst) {
+        let started = Instant::now();
         // Best-effort monitor: fall back to retry rather than crashing hived.
         let _ = monitor_run_once(&inner, &session_target);
         if inner.stop.load(Ordering::SeqCst) {
             break;
         }
-        thread::sleep(Duration::from_secs_f64(CONTROL_MODE_RESTART_DELAY));
+        let next = next_restart_delay(delay, started.elapsed().as_secs_f64());
+        delay = Some(next);
+        let until = Instant::now() + Duration::from_secs_f64(next);
+        while !inner.stop.load(Ordering::SeqCst) {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            thread::sleep(left.min(STOP_POLL));
+        }
     }
 }
 
@@ -883,5 +956,47 @@ mod colour_tests {
         assert_eq!(events[1]["source"], "client");
         assert_eq!(events[1]["client"], "human");
         assert_eq!(events[1]["appearance"], "dark");
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn test_next_restart_delay_doubles_to_the_cap_and_resets_after_a_healthy_run() {
+        assert_eq!(next_restart_delay(None, 0.0), CONTROL_MODE_RESTART_DELAY);
+        assert_eq!(next_restart_delay(Some(1.0), 0.2), 2.0);
+        assert_eq!(next_restart_delay(Some(2.0), 0.2), 4.0);
+        assert_eq!(
+            next_restart_delay(Some(16.0), 0.2),
+            CONTROL_MODE_MAX_RESTART_DELAY
+        );
+        assert_eq!(
+            next_restart_delay(Some(CONTROL_MODE_MAX_RESTART_DELAY), 0.2),
+            CONTROL_MODE_MAX_RESTART_DELAY
+        );
+        assert_eq!(
+            next_restart_delay(
+                Some(CONTROL_MODE_MAX_RESTART_DELAY),
+                CONTROL_MODE_HEALTHY_RUN_SECONDS
+            ),
+            CONTROL_MODE_RESTART_DELAY
+        );
+    }
+
+    #[test]
+    fn test_orphan_control_client_pids_matches_only_reparented_clients_with_the_exact_argv() {
+        let ps = "  352     1 tmux -C attach -t osct\n\
+                  13506     1 tmux -C attach -t hornet\n\
+                   3390 53702 tmux -C attach -t hornet\n\
+                   4000     1 tmux -C attach -t hornet -f x\n\
+                   4001     1 tmux attach -t hornet\n\
+                   4002     1 /opt/homebrew/bin/tmux -C attach -t hornet\n\
+                   4003     1 tmux -C attach -t hornet2\n\
+                   garbage line\n";
+        assert_eq!(orphan_control_client_pids(ps, "hornet"), vec![13506]);
+        assert_eq!(orphan_control_client_pids(ps, "osct"), vec![352]);
+        assert!(orphan_control_client_pids(ps, "lane").is_empty());
     }
 }

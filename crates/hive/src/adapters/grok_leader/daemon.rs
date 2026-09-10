@@ -106,16 +106,20 @@ pub(super) trait DaemonChild: Send {
     fn terminate(&self);
 }
 
+/// A spawned leader. `None` once the child has been handed to a reaper.
 #[cfg_attr(test, allow(dead_code))]
-struct RealDaemonChild(Mutex<Child>);
+struct RealDaemonChild(Mutex<Option<Child>>);
 
 impl DaemonChild for RealDaemonChild {
     fn pid(&self) -> u32 {
-        self.0.lock().unwrap().id()
+        self.0.lock().unwrap().as_ref().map_or(0, Child::id)
     }
 
     fn poll(&self) -> Option<i32> {
-        let mut child = self.0.lock().unwrap();
+        let mut slot = self.0.lock().unwrap();
+        let Some(child) = slot.as_mut() else {
+            return Some(-1);
+        };
         match child.try_wait() {
             Ok(Some(status)) => Some(status.code().unwrap_or_else(|| {
                 use std::os::unix::process::ExitStatusExt;
@@ -127,13 +131,36 @@ impl DaemonChild for RealDaemonChild {
     }
 
     fn terminate(&self) {
-        let mut child = self.0.lock().unwrap();
+        let mut slot = self.0.lock().unwrap();
+        let Some(child) = slot.as_mut() else {
+            return;
+        };
         if let Ok(Some(_)) = child.try_wait() {
             return;
         }
         unsafe {
             libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
         }
+    }
+}
+
+impl Drop for RealDaemonChild {
+    /// The leader outlives its spawner by design (setsid), but while both
+    /// live the spawner is its parent, and a dropped `Child` would leave a
+    /// zombie behind when the leader later exits or is reaped — so a
+    /// thread waits on it instead.
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return;
+        };
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        let _ = thread::Builder::new()
+            .name("grok-leader-reaper".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            });
     }
 }
 
@@ -160,7 +187,7 @@ fn spawn_leader_real(
             Ok(())
         });
     }
-    Ok(Box::new(RealDaemonChild(Mutex::new(cmd.spawn()?))))
+    Ok(Box::new(RealDaemonChild(Mutex::new(Some(cmd.spawn()?)))))
 }
 
 fn spawn_leader(

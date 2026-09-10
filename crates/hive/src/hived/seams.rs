@@ -150,6 +150,22 @@ pub(super) fn hooked_list_panes_all() -> Vec<crate::tmux::PaneInfo> {
     crate::tmux::list_panes_all()
 }
 
+/// The tick's display probe: `(panes, "ok")`, `(None, "no-server")` or
+/// `(None, "unknown")` (`tmux::list_panes_all_status`).
+pub(super) fn hooked_list_panes_all_status() -> (Option<Vec<crate::tmux::PaneInfo>>, &'static str) {
+    #[cfg(test)]
+    {
+        if let Some(f) = hookget(|h| h.list_panes_all_status.clone()).flatten() {
+            return f();
+        }
+        // A test that fakes only the listing has a reachable display.
+        if let Some(f) = hookget(|h| h.list_panes_all.clone()).flatten() {
+            return (Some(f()), "ok");
+        }
+    }
+    crate::tmux::list_panes_all_status()
+}
+
 pub(super) fn hooked_tmux_socket_path() -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.tmux_socket_path.clone()).flatten() {
