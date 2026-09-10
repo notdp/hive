@@ -136,6 +136,7 @@ pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
     if on {
         if !shown.is_empty() {
             tmux::set_window_option(&window, "@hive-mirror", "on");
+            crate::layout::remember_mirror(&window, true);
             return Ok(format!("mirror on ({team}): already shown"));
         }
         // A roster member's parked pane joins back, a missing one is
@@ -145,6 +146,7 @@ pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
             return Ok(format!("mirror on ({team}): no session mirror to show"));
         }
         tmux::set_window_option(&window, "@hive-mirror", "on");
+        crate::layout::remember_mirror(&window, true);
         return Ok(format!("mirror on ({team})"));
     }
     if window_arg.is_empty() {
@@ -157,6 +159,7 @@ pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
     }
     if shown.is_empty() {
         tmux::set_window_option(&window, "@hive-mirror", "off");
+        crate::layout::remember_mirror(&window, false);
         return Ok(format!("mirror off ({team}): no mirror"));
     }
     if tmux::list_panes(&window).len() == 1 {
@@ -167,6 +170,7 @@ pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
         );
     }
     tmux::set_window_option(&window, "@hive-mirror", "off");
+    crate::layout::remember_mirror(&window, false);
     // The hidden window goes into the team session when there is one; a
     // team built inside the caller's session parks it there.
     let session = format!("={team}");

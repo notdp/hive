@@ -437,12 +437,19 @@ Options:
   sized toward 80x24 cells, and re-plans on every layout event — a
   resize, a spawn or kill, a mirror coming and going — through two window
   hooks. A dragged pane
-  border holds until the plan changes. ``auto`` applies the plan now
-  (the repair for a window dragged out of shape); an explicit preset
-  applies as given and holds until the next event.
+  border holds until the plan changes, and is remembered in the
+  workspace (`state/hive-arrangement/window.json`: the layout, the plan
+  it held under, the member on each leaf): a window planned again to the
+  same plan over the same members — rebuilt by `hive attach` after the
+  tmux server died, or back to that member count after a kill — gets the
+  drag back instead of the plan. ``auto`` applies the plan now and
+  forgets the drag (the repair for a window dragged out of shape); an
+  explicit preset applies as given and holds, and is remembered, the
+  same way.
 
   The window records the applied plan's key as `@hive-layout`; ``auto``
-  prints it as `layout`, with `applied` and a `reason` when it did not.
+  prints it as `layout`, with `applied` and a `reason` when it did not
+  (`restored` when the remembered drag was applied).
 
 Options:
   --on-change      Hook form: apply only when the plan's key changed; prints
@@ -462,7 +469,10 @@ Options:
   `@hive-hidden`), the viewer keeps running, and the window records
   `@hive-mirror off` so `hive attach` and spawn leave it out when they heal
   the display; `on` joins the same pane back as the window's first pane —
-  or rebuilds it when the hidden pane is gone — and records `on`. No
+  or rebuilds it when the hidden pane is gone — and records `on`. The
+  choice is also remembered in the workspace
+  (`state/hive-arrangement/window.json`), so a window rebuilt after the
+  tmux server died withholds the mirror the same way. No
   argument toggles. The status bar's orch chip (▴ closed, ▾ open) and
   prefix+m run the same verb on the current window; --window names the
   window when the caller has no pane (a tmux run-shell job). prefix+m is

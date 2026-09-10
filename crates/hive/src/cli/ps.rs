@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(item["orphan"], true);
         assert_eq!(item["logicalOwner"], "cedar");
         assert_eq!(item["ppid"], 1);
-        let output = render_json(&[item.clone()]);
+        let output = render_json(std::slice::from_ref(&item));
         assert_eq!(serde_json::from_str::<Value>(&output).unwrap()[0], item);
         assert_eq!(output.lines().count(), 3);
         let table = render_table(&[item]);

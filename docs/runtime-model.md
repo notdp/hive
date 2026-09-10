@@ -180,6 +180,35 @@ from a human forces the apply; an explicit preset applies as given and
 holds the same way. `hive delete` (and every tag sweep) unsets the hooks
 and the key with the window tags: a window a human's session lent the
 team is theirs again, not re-tiled at their next split.
+
+A drag outlives the display. The hook that finds the key unchanged and
+`#{window_layout}` away from the plan's layout is looking at the human's
+drag (or a preset), and remembers it — the layout string, the plan key it
+held under, the window's size, and the member and role on each leaf in
+window order — in the workspace's `state/hive-arrangement/window.json`
+(`layout/arrangement.rs`), keyed by the team instance (`@hive-created`),
+under the window's apply lock. An apply that would plan a window (a key
+that differs) first asks the store, and so does the apply that closes a
+build — attach's rebuild, a backfill — whatever the key says, since the
+hooks fire per split and one of them may have planned the half-built
+window before its last pane was tagged: a drag
+whose plan key is the plan's, and whose leaves pair one to one with the
+window's panes by member and role, is applied instead — the panes are
+swapped into leaf order, the drag's layout string is handed to
+`select-layout`, which tmux scales to the window's size as it does on any
+resize, and the plan's key is written, so from then on it holds as a drag
+does, until the plan changes. `hive attach` rebuilding the window after
+the tmux server died and a kill bringing the window back to the count the
+drag had both come through that path; another plan, another member on a
+leaf, another team instance (a recycled name), a corrupt file or a layout
+tmux refuses all fall through to the plan, and the refused drag is
+dropped. `hive layout auto` forgets the drag before it applies the plan;
+the hook the apply fires finds the plan's own layout and remembers
+nothing. `hive mirror on|off` records its choice in the same file, so a
+rebuilt window withholds the mirror the way the last one did. The file
+is display preference: it decides no membership and names no process,
+and a `hive create --state hive-arrangement=…` entry occupying the path
+is left alone (nothing is remembered).
 `@hive-mirror` on the window is the recorded choice: `off`, written by
 `hive mirror off`, keeps heal and backfill from drawing it; `on`, written by
 `hive mirror on` or when a session mirror is built, is what makes the status

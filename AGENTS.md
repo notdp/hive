@@ -27,7 +27,14 @@ behavior is documented in the modules themselves.
   the two window hooks (`layout/hooks.rs`, installed with every other
   window mark by `tmux::configure_hive_window`) re-run the comparison on
   every resize and layout change, and nothing is in the registry; a
-  human's border drag holds until the plan itself changes. The team
+  human's border drag holds until the plan itself changes. The drag and
+  the `hive mirror` choice are remembered as display preference in the
+  workspace, `state/hive-arrangement/window.json`
+  (`layout/arrangement.rs`: the layout string, the plan key it held
+  under, the member on each leaf, the team instance): a window planned to
+  the same key over the same members gets the drag back, `hive layout
+  auto` forgets it, and a file that does not fit the window is ignored —
+  it decides no membership and names no process. The team
   session's status bar
   (`tmux/status.rs`) is rendered from tmux options alone —
   `@hive-busy`/`@hive-unread` per pane and `@hive-ticker` per window are

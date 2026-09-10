@@ -227,7 +227,7 @@ pub(crate) fn backfill_missing_member_panes(
         prev_pane = split;
     }
     if !added.is_empty() {
-        let _ = crate::layout::ensure(window, false);
+        let _ = crate::layout::ensure_built(window);
     }
     Ok(added)
 }
@@ -330,7 +330,14 @@ fn materialize_team_display(
     tmux::configure_hive_window(&window);
     tmux::set_window_option(&window, "@hive-team", &team);
     tmux::set_window_option(&window, "@hive-workspace", &ws);
-    tmux::set_window_option(&window, "@hive-created", &map_str(entry, "createdAt"));
+    let created = map_str(entry, "createdAt");
+    tmux::set_window_option(&window, "@hive-created", &created);
+    // The choice the team's last window recorded (`hive mirror off`)
+    // outlives the display: the rebuilt window withholds the mirror the
+    // same way, before its panes are decided.
+    if crate::layout::remembered_mirror(&team, &ws, &created) == Some(false) {
+        tmux::set_window_option(&window, "@hive-mirror", "off");
+    }
 
     let mut attached: Vec<String> = Vec::new();
     let mut prev_pane = first_pane.clone();
@@ -371,7 +378,7 @@ fn materialize_team_display(
         prev_pane = pane;
     }
 
-    let _ = crate::layout::ensure(&window, false);
+    let _ = crate::layout::ensure_built(&window);
     let _ = crate::registry::set_display(&team, &tmux::get_window_id(&window).unwrap_or_default());
     Ok((window, attached, skipped))
 }
@@ -639,6 +646,44 @@ mod tests {
             crate::registry::load("honey").unwrap()["display"],
             Value::from("@7")
         );
+    }
+
+    #[test]
+    fn test_a_rebuilt_window_withholds_the_mirror_the_last_window_closed() {
+        let mut env = display_env_outside();
+        let _claude = claude_session_me(&mut env);
+        let ws = tempfile::tempdir().unwrap();
+        crate::registry::record_team(
+            "honey",
+            ws.path().to_str().unwrap(),
+            "100.0",
+            &[
+                member_row("orch", "claude", "s-me"),
+                member_row("sage", "grok", "sid-sage"),
+            ],
+            "",
+        )
+        .unwrap();
+        // the last window recorded `hive mirror off` for this instance
+        crate::layout::remember_mirror_for_test("honey", ws.path().to_str().unwrap(), "100.0");
+        let argv = fake_tmux_sessions("", &[], &[], &[]);
+
+        let (window, built) =
+            ensure_team_display(&crate::registry::load("honey").unwrap()).unwrap();
+
+        assert!(built);
+        assert!(has_row(
+            &argv,
+            &["set-window-option", "-t", &window, "@hive-mirror", "off"]
+        ));
+        // the session member gets no mirror pane: one pane, sage's viewer
+        assert_eq!(count(&argv, "split-window"), 0);
+        let views = argv
+            .borrow()
+            .iter()
+            .filter(|a| a[0] == "send-keys" && a.iter().any(|s| s.contains("hive view")))
+            .count();
+        assert_eq!(views, 0);
     }
 
     #[test]
