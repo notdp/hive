@@ -17,10 +17,11 @@ behavior is documented in the modules themselves.
   inherit its predecessor's bus). A team ends by moving its directory whole,
   entry and all, into the trash, `$HIVE_HOME/trash/<archive-id>/payload/`
   beside a `manifest.json` (`gc.rs`): `hive delete` does it at once
-  (`--keep-workspace` with no purge date, `--delete-workspace` purging
-  instead; an external workspace is only recorded unless that flag names
-  it), the collector does it to a team cold for 30 days, and an archive not
-  kept is purged 30 days later. The name is free the moment the entry
+  (`--keep-workspace` with no purge date; `--delete-workspace` removes the
+  directory here and now instead, outside the trash — an external
+  workspace is only recorded unless that flag names it), the collector
+  does it to a team cold for 30 days, and an archive not kept is purged 30
+  days after it was quarantined or last written into, whichever is later. The name is free the moment the entry
   leaves the store — the trash reserves nothing — and `hive gc restore`
   brings an archive back as a new instance (a new `createdAt`). Cold means
   positively seen idle: no window, no engine alive, no hived answering
@@ -32,11 +33,13 @@ behavior is documented in the modules themselves.
   the tail of a mutating verb at most once a day per hive home
   (`$HIVE_HOME/state/gc/last-attempt`, under the store lock). Archiving is
   a closed transaction: `gc.closing = {at, by}` on the entry first, which
-  `Team::load` and the registry's write lane refuse to admit work into
-  while fresh (120s), then a graceful hived stop, a second look, and the
-  archive under the store lock only on the same instance and intent; every
-  trash transition re-reads the manifest under that lock and never follows
-  a symlink. A member mid-turn refuses a plain `hive delete` (the caller's
+  `Team::load` and the registry's write lane (`commit_succession`
+  included) refuse to admit work into while fresh (120s), then a graceful
+  stop of the hived when one listens, a second look from fresh
+  observations, and the archive under the store lock only on the same
+  instance, the same still-expired cold clock and the still-fresh intent;
+  every trash transition re-reads the manifest under that lock, and neither
+  the trash root nor an archive may be reached through a symlink. A member mid-turn refuses a plain `hive delete` (the caller's
   own member excepted); `--down` retires it; `--delete-workspace` refuses
   an external workspace another live team records or a symlinked one. The
   store lock is `$HIVE_HOME/teams/.lock`. tmux is display, resolved on top of it, and a

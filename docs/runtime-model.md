@@ -131,12 +131,15 @@ Consequences across modules:
   with the directory, so the name is free at once; nothing is reserved.
   An archive past `purgeAfter` is purged (manifest `purging` first, then
   the payload, then the rest), unless its payload was written into since
-  it was quarantined — then the purge date moves 30 days out from that
-  write. Every manifest transition re-reads the manifest under the store
-  lock (`teams/.lock`) first: a purge acts only on `quarantined` past its
-  date or a `purging` a crash left, keep only on `quarantined`, and the
-  trash never follows a symlink (a symlinked entry or an unreadable
-  manifest is reported as `corrupt`, never touched). `hive gc restore <id>
+  it was quarantined and that write is less than 30 days old — then the
+  purge date moves to 30 days after the write; a payload the collector
+  cannot read whole is not purged. Every manifest transition re-reads the
+  manifest under the store lock (`teams/.lock`) first: a purge acts only
+  on `quarantined` past its date or a `purging` a crash left, keep only on
+  `quarantined`, and the trash never follows a symlink (a trash root that
+  is one stops the trash side of the run with an error row; a symlinked
+  entry or an unreadable manifest is reported as `corrupt`, never
+  touched). `hive gc restore <id>
   [--as NAME]` moves the payload back under `teams/NAME/` as a new
   instance — a new `createdAt`, `display` empty, `restoredFrom` recording
   the archive — refusing a name in use and a member whose engine session a
@@ -147,15 +150,19 @@ Consequences across modules:
   The collector (`hive gc run`, and by itself at the tail of create /
   join / spawn / send / kill / delete / attach / workflow / fork at most
   once a day per hive home — the stamp `$HIVE_HOME/state/gc/last-attempt`
-  is checked and written under the store lock — within a 20s budget, the
-  rows it did not reach reported `deferred`) classifies every registry
+  is checked and written under the store lock — within a 20s budget: the
+  scan writes clocks, and a scan that has run over the budget does nothing
+  destructive that round, those rows reported `deferred`) classifies every
+  registry
   team from one tmux window listing, the hived's `team-runtime` when a
   hived listens on its socket (a socket nobody listens on is no hived; a
   socket unreachable for any other reason blocks), the `run/operations/`
   journal, one `claude agents --json --all` read and the live claude
   session registry only when a claude member needs them (a desktop
-  conversation's CLI is a live session; a `hostSessionId` whose desktop
-  record cannot be read blocks), the codex daemon's `turn-open` for a
+  conversation's CLI is a live session, under the roster's session id or
+  the one its desktop record names as current when succession has not
+  moved the row yet; a `hostSessionId` whose desktop record cannot be read
+  blocks), the codex daemon's `turn-open` for a
   codex member, and the grok leader's socket for a grok member (refused or
   missing is dead, any other failure blocks); a member on an engine the
   collector has no probe for blocks. Displayed, or a member busy or alive,
@@ -164,13 +171,18 @@ Consequences across modules:
   cold, and the first cold sight writes `gc.coldSince` (a clock from the
   future starts over); cold for 30 days archives (origin `expired`). The
   archive is a closed transaction: the collector first writes a close
-  intent `gc.closing = {at, by}` on the entry under the store lock, which
-  `Team::load` and the registry's write lane refuse to admit work into for
-  `CLOSING_TTL_SECONDS` (120s; an older intent is a crashed collector's and
-  gates nothing), asks the team's hived to stop gracefully (a hived with a
-  node result pending declines and the team stays), classifies the team
-  once more, and commits the archive under the lock only if the entry is
-  still that instance under that intent and not kept. `gc.keep` exempts a
+  intent `gc.closing = {at, by}` on the entry under the store lock — only
+  onto the instance and cold clock the scan saw, still expired — which
+  `Team::load` and the registry's write lane (`commit_succession` too)
+  refuse to admit work into for `CLOSING_TTL_SECONDS` (120s; an older
+  intent is a crashed collector's and gates nothing), asks the team's
+  hived, when one listens, to stop gracefully (a hived with a node result
+  pending declines and the team stays; a socket nobody listens on is no
+  hived), classifies the team once more from fresh observations, and
+  commits the archive under the lock only if the entry is still that
+  instance, its cold clock unchanged and still expired, under that intent
+  still fresh, and not kept — a use in between (a renewed clock) keeps the
+  team and clears its clock. `gc.keep` exempts a
   team; `hive gc keep` toggles it on a team or an archive. `--dry-run`
   writes nothing in the store or the trash, not even a clock, though it
   still asks a listening hived for its runtime like a real run. Events

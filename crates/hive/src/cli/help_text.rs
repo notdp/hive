@@ -266,9 +266,11 @@ Options:
   $HIVE_HOME/trash/<archive-id>/, where it is purged 30 days later unless
   kept (`hive gc keep <archive-id>`); `hive gc restore <archive-id>` brings
   it back. The name is free at once. --keep-workspace archives with no
-  purge date; --delete-workspace purges the team directory here and now —
-  and the external workspace the entry records, which is otherwise only
-  recorded and never removed. The two exclude each other.
+  purge date; --delete-workspace removes the team directory here and now,
+  outside the trash — and the external workspace the entry records, which
+  is otherwise only recorded and never removed; a workspace another live
+  team also records, or one that is a symlink, is refused before anything
+  is stopped. The two exclude each other.
 
   A member mid-turn refuses the delete: let it finish, or --down. --down is
   the teardown of a workflow run (`hive create RUN`, `hive workflow run`
@@ -279,7 +281,8 @@ Options:
 
 Options:
   -w, --workspace TEXT  Workspace path to remove (default: the entry's)
-  --delete-workspace    Purge the workspace at once instead of archiving it
+  --delete-workspace    Remove the workspace at once, outside the trash,
+                        instead of archiving it
   --keep-workspace      Archive with no purge date
   --down                Retire every member first and kill the team's tmux
                         session

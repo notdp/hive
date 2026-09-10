@@ -166,18 +166,18 @@ fn real_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
 }
 
-/// The newest modification time under *path* (symlinks not followed).
-fn newest_mtime(path: &Path) -> Option<f64> {
+/// The newest modification time under *path* (symlinks not followed);
+/// Err when any of it cannot be read — a payload the collector cannot see
+/// whole is not one it may purge.
+fn newest_mtime(path: &Path) -> Result<Option<f64>, String> {
     let mut newest: Option<f64> = None;
     let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(read) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in read.filter_map(|e| e.ok()) {
-            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
-                continue;
-            };
+        let read = fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        for entry in read {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+            let meta = fs::symlink_metadata(entry.path())
+                .map_err(|e| format!("{}: {e}", entry.path().display()))?;
             if let Ok(modified) = meta.modified() {
                 let secs = modified
                     .duration_since(std::time::UNIX_EPOCH)
@@ -190,7 +190,17 @@ fn newest_mtime(path: &Path) -> Option<f64> {
             }
         }
     }
-    newest
+    Ok(newest)
+}
+
+/// The trash root, refused when it is a symlink: no destructive step
+/// follows a link out of the hive home.
+fn trash_root() -> Result<PathBuf> {
+    let dir = trash_dir();
+    if fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("{} is a symlink; the trash is left alone", dir.display());
+    }
+    Ok(dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -319,10 +329,11 @@ fn read_archive(dir: &Path) -> Option<Archive> {
 
 /// Every readable archive, oldest first, and the names of the trash
 /// entries that are not one (a symlink, a directory without a readable
-/// manifest): reported, never touched.
-fn list_trash() -> (Vec<Archive>, Vec<String>) {
-    let Ok(read) = fs::read_dir(trash_dir()) else {
-        return (Vec::new(), Vec::new());
+/// manifest): reported, never touched. Err for a trash root that is
+/// itself a symlink.
+fn list_trash() -> Result<(Vec<Archive>, Vec<String>)> {
+    let Ok(read) = fs::read_dir(trash_root()?) else {
+        return Ok((Vec::new(), Vec::new()));
     };
     let mut archives = Vec::new();
     let mut corrupt = Vec::new();
@@ -344,20 +355,20 @@ fn list_trash() -> (Vec<Archive>, Vec<String>) {
             .then_with(|| a.id.cmp(&b.id))
     });
     corrupt.sort();
-    (archives, corrupt)
+    Ok((archives, corrupt))
 }
 
 /// Every readable archive, oldest first.
 #[cfg(test)]
 pub(crate) fn list_archives() -> Vec<Archive> {
-    list_trash().0
+    list_trash().map(|trash| trash.0).unwrap_or_default()
 }
 
 pub(crate) fn archive(id: &str) -> Option<Archive> {
     if !archive_id_ok(id) {
         return None;
     }
-    read_archive(&trash_dir().join(id))
+    read_archive(&trash_root().ok()?.join(id))
 }
 
 fn new_archive_id() -> String {
@@ -401,10 +412,12 @@ fn append_event(event: &str, archive: &Archive, extra: &[(&str, Value)]) {
     }
 }
 
-/// What an archive must still be for a collector's archive to commit: the
-/// instance it classified and the close intent it wrote.
+/// What an entry must still be for a collector's archive to commit: the
+/// instance it classified, the cold clock it saw expired, and the close
+/// intent it wrote, still fresh.
 pub(crate) struct Expected {
     pub created_at: String,
+    pub cold_since: f64,
     pub closing_by: String,
 }
 
@@ -413,7 +426,9 @@ pub(crate) struct Expected {
 /// an external workspace is only recorded, never moved. The name is free
 /// on return. *keep* gives the archive no purge date, else it is *at* plus
 /// `TRASH_AFTER_SECONDS`. With *expected*, the entry must still be that
-/// instance under that close intent, and not kept, or nothing moves. The
+/// instance, its cold clock unchanged and still expired at *at*, under
+/// that close intent still fresh, and not kept, or nothing moves — a use
+/// between the scan and the commit (a renewed clock) keeps the team. The
 /// caller has stopped what ran for the team; nothing here does.
 pub(crate) fn archive_team(
     team: &str,
@@ -423,12 +438,16 @@ pub(crate) fn archive_team(
     expected: Option<&Expected>,
 ) -> Result<Archive> {
     let dir = crate::registry::team_dir(team).ok_or_else(|| anyhow!("unsafe team name"))?;
+    trash_root()?;
     let _lock = crate::registry::locked()?;
     let entry = crate::registry::load(team).ok_or_else(|| anyhow!("team '{team}' not found"))?;
     if let Some(expected) = expected {
         let same_instance = created_at_string(&entry) == expected.created_at;
-        let our_intent = closing_of(&entry).is_some_and(|(_, by)| by == expected.closing_by);
-        if !same_instance || !our_intent || is_kept(&entry) {
+        let same_clock = cold_since(&entry) == Some(expected.cold_since)
+            && at - expected.cold_since >= COLD_AFTER_SECONDS;
+        let our_intent = is_closing(&entry, at)
+            && closing_of(&entry).is_some_and(|(_, by)| by == expected.closing_by);
+        if !same_instance || !same_clock || !our_intent || is_kept(&entry) {
             bail!("team '{team}' changed while the collector was closing it; left alone");
         }
     }
@@ -481,6 +500,7 @@ pub(crate) enum Purge {
 /// use: deferred, not purged.
 pub(crate) fn purge_archive(id: &str, now: f64) -> Result<Purge> {
     let archive = {
+        trash_root()?;
         let _lock = crate::registry::locked()?;
         let Some(mut archive) = self::archive(id) else {
             return Ok(Purge::Skipped("no such archive"));
@@ -488,15 +508,22 @@ pub(crate) fn purge_archive(id: &str, now: f64) -> Result<Purge> {
         match archive.state.as_str() {
             "purging" => {}
             "quarantined" => {
-                let Some(due) = archive.purge_after.filter(|due| *due <= now) else {
+                if archive.purge_after.is_none_or(|due| due > now) {
                     return Ok(Purge::Skipped("not due"));
-                };
-                let newest = newest_mtime(&archive.payload()).unwrap_or(0.0);
-                if newest > archive.quarantined_at + RECENT_WRITE_SLACK_SECONDS && newest > due {
-                    archive.purge_after = Some(newest + TRASH_AFTER_SECONDS);
+                }
+                // A payload written into after it was quarantined earns the
+                // full trash window from its last write, whenever that fell.
+                let newest = newest_mtime(&archive.payload())
+                    .map_err(|e| anyhow!("archive {id}: payload unreadable ({e}); left alone"))?
+                    .unwrap_or(0.0);
+                if newest > archive.quarantined_at + RECENT_WRITE_SLACK_SECONDS
+                    && newest + TRASH_AFTER_SECONDS > now
+                {
+                    let until = newest + TRASH_AFTER_SECONDS;
+                    archive.purge_after = Some(until);
                     archive.write()?;
                     append_event("deferred", &archive, &[("writtenAt", Value::from(newest))]);
-                    return Ok(Purge::Deferred(newest + TRASH_AFTER_SECONDS));
+                    return Ok(Purge::Deferred(until));
                 }
                 archive.state = "purging".to_string();
                 archive.write()?;
@@ -645,7 +672,9 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
         }
     }
     let at = now();
-    let old_instance = created_at_string(&entry);
+    // The archived instance as the manifest has it: a retry after a failed
+    // move must not mistake an entry a previous attempt rewrote for it.
+    let old_instance = archive.created_at.clone();
     let mut restored_from = Map::new();
     restored_from.insert("archiveId".to_string(), Value::from(archive.id.as_str()));
     restored_from.insert("team".to_string(), Value::from(archive.team.as_str()));
@@ -675,6 +704,7 @@ pub(crate) fn restore_archive(id: &str, as_name: Option<&str>) -> Result<Restore
         archive.state = "quarantined".to_string();
         archive.restore_as = String::new();
         let _ = archive.write();
+        let _ = fs::write(&entry_path, &text); // the payload's entry as it was
     };
     if let Err(e) = crate::registry::write_entry_file(&entry_path, &entry) {
         revert(&mut archive);
@@ -774,10 +804,22 @@ pub(crate) fn is_closing(entry: &Map<String, Value>, now: f64) -> bool {
 }
 
 /// Write the close intent under the store lock, on the instance the
-/// collector classified, unless the team is kept or already closing.
-fn open_close_intent(team: &str, expected_created: &str, by: &str, now: f64) -> Result<bool> {
+/// collector classified with the cold clock it saw, still expired at
+/// *now*, unless the team is kept or already closing. A clock renewed by a
+/// use since the scan is a different team from the one classified.
+fn open_close_intent(
+    team: &str,
+    expected_created: &str,
+    expected_since: f64,
+    by: &str,
+    now: f64,
+) -> Result<bool> {
     crate::registry::update_entry(team, |entry| {
-        if created_at_string(entry) != expected_created || is_kept(entry) || is_closing(entry, now)
+        if created_at_string(entry) != expected_created
+            || cold_since(entry) != Some(expected_since)
+            || now - expected_since < COLD_AFTER_SECONDS
+            || is_kept(entry)
+            || is_closing(entry, now)
         {
             return false;
         }
@@ -788,7 +830,9 @@ fn open_close_intent(team: &str, expected_created: &str, by: &str, now: f64) -> 
     })
 }
 
-/// Take back a close intent this collector wrote.
+/// Take back a close intent this collector wrote, and the cold clock with
+/// it: whatever stopped the archive (activity, missing evidence, a change
+/// under the collector) is not idle time.
 fn drop_close_intent(team: &str, by: &str) {
     let _ = crate::registry::update_entry(team, |entry| {
         match closing_of(entry) {
@@ -797,6 +841,7 @@ fn drop_close_intent(team: &str, by: &str) {
         }
         let mut gc = gc_object(entry);
         gc.remove("closing");
+        gc.insert("coldSince".to_string(), Value::Null);
         entry.insert("gc".to_string(), Value::Object(gc));
         true
     });
@@ -937,11 +982,11 @@ fn runtime_members(runtime: &Map<String, Value>) -> Vec<(String, &Map<String, Va
 /// Ok(None) when the daemon is not there (no turn can be open), Err when
 /// it is and will not say.
 ///
-/// ponytail: `thread/read` is the one read-only question a fresh client can
-/// ask; an approval waiting on the thread (`waiting_user`) is carried by
-/// the hived's `team-runtime` while the hived runs and is not visible
-/// here, so a codex member without a display and without a hived counts as
-/// idle unless a turn is in progress.
+/// `thread/read` is read-only and covers the waiting states too: codex
+/// reports `waitingOnApproval` / `waitingOnUserInput` only as flags of an
+/// *active* thread (`codex_app_server::client::apply_status`), a turn
+/// still in progress, which is what `turn_open_for_thread` reads. A thread
+/// with no turn in progress has nobody waiting on it.
 fn codex_turn_open(thread_id: &str) -> Result<Option<bool>, String> {
     if !crate::adapters::codex_app_server::daemon_alive() {
         return Ok(None);
@@ -1059,15 +1104,37 @@ impl Observations {
                         return Activity::Active(format!("{name}'s claude session is live"));
                     }
                     let host = map_str(&member, "hostSessionId");
-                    if !host.is_empty()
-                        && matches!(
-                            crate::adapters::claude_desktop::record_presence(&host),
-                            crate::adapters::claude_desktop::RecordPresence::Unknown
-                        )
-                    {
-                        return Activity::Unknown(format!(
-                            "{name}'s desktop conversation cannot be read"
-                        ));
+                    if !host.is_empty() {
+                        use crate::adapters::claude_desktop::{
+                            desktop_record, record_presence, RecordPresence,
+                        };
+                        match record_presence(&host) {
+                            RecordPresence::Unknown => {
+                                return Activity::Unknown(format!(
+                                    "{name}'s desktop conversation cannot be read"
+                                ))
+                            }
+                            // The conversation may run a CLI session the
+                            // roster does not name yet (`succession` moves
+                            // the row later): that session live is this
+                            // member live.
+                            RecordPresence::Present => {
+                                if let Some(record) = desktop_record(&host) {
+                                    let current = record.cli_session_id;
+                                    if current != sid
+                                        && self
+                                            .claude_sessions()
+                                            .iter()
+                                            .any(|session| session.session_id == current)
+                                    {
+                                        return Activity::Active(format!(
+                                            "{name}'s desktop conversation runs a live session"
+                                        ));
+                                    }
+                                }
+                            }
+                            RecordPresence::Absent => {}
+                        }
                     }
                 }
                 "codex" => match codex_turn_open(&sid) {
@@ -1278,7 +1345,6 @@ pub(crate) fn run(mode: Mode) -> Result<Report> {
 /// One expired team: close it, stop its hived gracefully, look again,
 /// archive if it is still what the collector saw. Returns the row.
 fn collect_expired(
-    observations: &Observations,
     entry: &Map<String, Value>,
     since: f64,
     now: f64,
@@ -1287,30 +1353,40 @@ fn collect_expired(
     let team = map_str(entry, "team");
     let created = created_at_string(entry);
     let by = format!("gc-{}-{}", std::process::id(), new_archive_id());
-    match open_close_intent(&team, &created, &by, now) {
+    match open_close_intent(&team, &created, since, &by, now) {
         Ok(true) => {}
         Ok(false) => {
             return with_reason(
                 team_row(&team, "skipped"),
-                "changed or already closing".to_string(),
+                "changed, renewed or already closing".to_string(),
             )
         }
         Err(e) => return with_reason(team_row(&team, "error"), e.to_string()),
     }
     let workspace = workspace_of(entry);
-    if crate::hived::socket_path(&workspace).exists()
-        && !crate::hived::stop_hived_graceful(&workspace)
-    {
-        drop_close_intent(&team, &by);
-        return with_reason(
-            team_row(&team, "active"),
-            "the hived declined to stop (work pending)".to_string(),
-        );
+    // The hived, when one listens, is asked to retire; a socket nobody
+    // listens on is no hived, and one that will not answer blocks.
+    match hived_runtime(&workspace, &team) {
+        Err(reason) => {
+            drop_close_intent(&team, &by);
+            return with_reason(team_row(&team, "blocked"), reason);
+        }
+        Ok(Some(_)) => {
+            if !crate::hived::stop_hived_graceful(&workspace) {
+                drop_close_intent(&team, &by);
+                return with_reason(
+                    team_row(&team, "active"),
+                    "the hived declined to stop (work pending)".to_string(),
+                );
+            }
+        }
+        Ok(None) => {}
     }
     let Some(fresh) = crate::registry::load(&team) else {
         return with_reason(team_row(&team, "skipped"), "entry vanished".to_string());
     };
-    match observations.classify(&fresh) {
+    // A second look from fresh observations: nothing the scan cached.
+    match Observations::gather().classify(&fresh) {
         Activity::Active(reason) => {
             drop_close_intent(&team, &by);
             with_reason(team_row(&team, "active"), reason)
@@ -1322,6 +1398,7 @@ fn collect_expired(
         Activity::Inactive => {
             let expected = Expected {
                 created_at: created,
+                cold_since: since,
                 closing_by: by.clone(),
             };
             match archive_team(&team, "expired", false, now, Some(&expected)) {
@@ -1352,7 +1429,9 @@ fn collect_expired(
 /// The collector at *now*: every registry team is classified, the cold
 /// ones clocked and the expired ones closed and archived; every archive
 /// past its purge date is purged, the ones a crash left mid-way repaired.
-/// A team that fails is reported, not fatal to the run.
+/// A team that fails is reported, not fatal to the run. The tail of a verb
+/// (`Mode::Auto`) does nothing destructive once the scan has run over
+/// `AUTO_BUDGET_SECONDS`: the clocks are written, the rest is `deferred`.
 pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
     let write = mode != Mode::DryRun;
     let mut report = Report::default();
@@ -1370,6 +1449,9 @@ pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
     let over_budget =
         || mode == Mode::Auto && started.elapsed().as_secs_f64() > AUTO_BUDGET_SECONDS;
     let observations = Observations::gather();
+    // The expired teams, collected after the whole scan: their row index,
+    // the entry as scanned and the clock it showed.
+    let mut expired: Vec<(usize, Map<String, Value>, f64)> = Vec::new();
     for entry in crate::registry::list_entries() {
         let team = map_str(&entry, "team");
         if is_set(entry.get("corrupt")) {
@@ -1387,10 +1469,11 @@ pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
             continue;
         }
         let since = cold_since(&entry);
+        let mut clock_error: Option<String> = None;
         let mut clock = |at: Option<f64>| {
             if write {
                 if let Err(e) = set_cold_since(&team, at) {
-                    report.actions.push(format!("{team}: {e}"));
+                    clock_error = Some(e.to_string());
                 }
             }
         };
@@ -1420,25 +1503,51 @@ pub(crate) fn run_at(mode: Mode, now: f64) -> Result<Report> {
                     cooling_row(&team, now)
                 }
                 Some(since) if now - since >= COLD_AFTER_SECONDS => {
+                    let mut row = team_row(&team, "expired");
+                    row.insert("coldSince".to_string(), Value::from(since));
                     if write {
-                        collect_expired(&observations, &entry, since, now, &mut report.actions)
-                    } else {
-                        let mut row = team_row(&team, "expired");
-                        row.insert("coldSince".to_string(), Value::from(since));
-                        row
+                        expired.push((report.teams.len(), entry.clone(), since));
                     }
+                    row
                 }
                 Some(since) => cooling_row(&team, since),
             },
         };
+        let row = match clock_error {
+            Some(e) => with_reason(
+                team_row(&team, "error"),
+                format!("cold clock not written: {e}"),
+            ),
+            None => row,
+        };
         report.teams.push(Value::Object(row));
+    }
+    // Destructive work only with the scan complete and within budget.
+    for (index, entry, since) in expired {
+        let team = map_str(&entry, "team");
+        let row = if over_budget() {
+            team_row(&team, "deferred")
+        } else {
+            collect_expired(&entry, since, now, &mut report.actions)
+        };
+        report.teams[index] = Value::Object(row);
     }
     for name in unmanaged_team_dirs() {
         report
             .teams
             .push(Value::Object(team_row(&name, "unmanaged")));
     }
-    let (archives, corrupt) = list_trash();
+    let (archives, corrupt) = match list_trash() {
+        Ok(trash) => trash,
+        Err(e) => {
+            report.archives.push(json!({
+                "archiveId": "trash",
+                "state": "error",
+                "reason": e.to_string(),
+            }));
+            (Vec::new(), Vec::new())
+        }
+    };
     for archive in archives {
         if over_budget() {
             report.archives.push(archive_row(&archive, "deferred"));
@@ -1758,6 +1867,21 @@ mod tests {
         }
     }
 
+    /// Every file and directory under *dir* last modified at *at*.
+    fn touch_all(dir: &Path, at: f64) {
+        let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(at);
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in fs::read_dir(&d).unwrap().filter_map(|e| e.ok()) {
+                let path = entry.path();
+                fs::File::open(&path).unwrap().set_modified(time).unwrap();
+                if path.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+    }
+
     /// Every path under the trash with each manifest's text, for a
     /// failure message.
     fn trash_tree() -> String {
@@ -1946,6 +2070,12 @@ mod tests {
         let report = run_at(Mode::Manual, T0).unwrap();
 
         assert_eq!(state_of(&report, "honey"), "cooling", "{:?}", report.teams);
+        // nor does it stand for a hived that declines to stop once the team
+        // has expired
+        set_cold_since("honey", Some(T0 - 40.0 * DAY)).unwrap();
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "honey"), "archived", "{:?}", report.teams);
+        assert!(crate::registry::load("honey").is_none());
     }
 
     #[test]
@@ -2003,23 +2133,172 @@ mod tests {
         assert!(!is_closing(&entry, now + CLOSING_TTL_SECONDS + 1.0));
         assert!(!is_closing(&entry, now - 60.0));
 
-        // the archive commits only on the instance the intent was written on
+        // a succession does not land on a closing team either
+        team(
+            "comb",
+            &[{
+                let mut row = member_row("orch", "claude", "old");
+                row.insert("hostSessionId".to_string(), Value::from("local_h"));
+                row
+            }],
+        );
+        let mut comb = crate::registry::load("comb").unwrap();
+        let mut gc = gc_object(&comb);
+        gc.insert(
+            "closing".to_string(),
+            json!({"at": now - 5.0, "by": "gc-other"}),
+        );
+        comb.insert("gc".to_string(), Value::Object(gc));
+        crate::registry::write_entry_file(
+            &crate::registry::team_dir("comb").unwrap().join("team.json"),
+            &comb,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::registry::commit_succession("comb", "orch", "old", "local_h", "new", "100.0")
+                .unwrap(),
+            "closing"
+        );
+        assert_eq!(
+            crate::registry::load("comb").unwrap()["members"][0]["sessionId"],
+            "old"
+        );
+
+        // the archive commits only on the instance the intent was written on,
+        // with the cold clock it saw still there…
+        let since = now - 40.0 * DAY;
         let expected = Expected {
             created_at: "999".to_string(),
+            cold_since: since,
             closing_by: "gc-other".to_string(),
         };
-        let err = archive_team("honey", "expired", false, T0, Some(&expected))
+        let err = archive_team("honey", "expired", false, now, Some(&expected))
             .unwrap_err()
             .to_string();
         assert!(err.contains("changed"), "{err}");
         assert!(crate::registry::load("honey").is_some());
         assert!(list_archives().is_empty());
+        // …so a team used between the scan and the commit (its clock
+        // renewed) stays, though nothing else about it changed
+        set_cold_since("honey", Some(now)).unwrap();
         let expected = Expected {
             created_at: "100.0".to_string(),
+            cold_since: since,
             closing_by: "gc-other".to_string(),
         };
-        archive_team("honey", "expired", false, T0, Some(&expected)).unwrap();
+        assert!(archive_team("honey", "expired", false, now, Some(&expected)).is_err());
+        assert!(crate::registry::load("honey").is_some());
+        // and the intent itself is written only on the clock the scan saw
+        assert!(!open_close_intent("honey", "100.0", since, "gc-me", now).unwrap());
+        set_cold_since("honey", Some(since)).unwrap();
+        assert!(archive_team("honey", "expired", false, now, Some(&expected)).is_ok());
         assert!(crate::registry::load("honey").is_none());
+    }
+
+    #[test]
+    fn test_a_desktop_conversation_on_a_successor_session_is_live() {
+        let (tmp, mut env, _ledger) = home();
+        env.set("HOME", tmp.path());
+        let mut orch = member_row("orch", "claude", "old");
+        orch.insert("hostSessionId".to_string(), Value::from("local_conv"));
+        team("honey", &[orch]);
+        // the desktop restarted its CLI: the record names a new session the
+        // roster does not know yet, and that session is live
+        let records = tmp
+            .path()
+            .join("Library/Application Support/Claude/claude-code-sessions/account/org");
+        fs::create_dir_all(&records).unwrap();
+        fs::write(
+            records.join("local_conv.json"),
+            json!({"cliSessionId": "new", "priorCliSessionIds": ["old"]}).to_string(),
+        )
+        .unwrap();
+        let sessions = tmp.path().join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("new.json"),
+            json!({
+                "name": "new",
+                "pid": std::process::id(),
+                "messagingSocketPath": tmp.path().join("new.sock"),
+                "sessionId": "new",
+                "kind": "interactive",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "honey"), "active", "{:?}", report.teams);
+
+        // the conversation's CLI gone: idle, the clock runs
+        fs::remove_file(sessions.join("new.json")).unwrap();
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "honey"), "cooling", "{:?}", report.teams);
+
+        // a record that cannot be read blocks
+        fs::remove_file(records.join("local_conv.json")).unwrap();
+        fs::create_dir_all(records.join("local_conv.json")).unwrap();
+        let report = run_at(Mode::Manual, T0).unwrap();
+        assert_eq!(state_of(&report, "honey"), "blocked", "{:?}", report.teams);
+    }
+
+    #[test]
+    fn test_a_symlinked_trash_root_stops_the_trash_side_of_a_run() {
+        let (tmp, _env, _ledger) = home();
+        team("honey", &[]);
+        let elsewhere = tmp.path().join("elsewhere");
+        let planted = fixture(
+            "planted00000",
+            "quarantined",
+            T0 - 100.0 * DAY,
+            Some(T0 - 60.0 * DAY),
+        );
+        let payload = elsewhere.join(&planted.id).join(PAYLOAD);
+        fs::create_dir_all(&payload).unwrap();
+        fs::write(payload.join("valuable"), "keep me").unwrap();
+        let mut text = serde_json::to_string_pretty(&planted.to_value()).unwrap();
+        text.push('\n');
+        fs::write(elsewhere.join(&planted.id).join(MANIFEST), &text).unwrap();
+        fs::create_dir_all(crate::paths::hive_home()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, trash_dir()).unwrap();
+
+        let report = run_at(Mode::Manual, T0).unwrap();
+
+        assert!(payload.join("valuable").is_file());
+        assert!(report.failed(), "{:?}", report.archives);
+        assert!(list_archives().is_empty());
+        assert!(archive(&planted.id).is_none());
+        assert!(archive_team("honey", "delete", false, T0, None).is_err());
+        assert!(crate::registry::load("honey").is_some());
+    }
+
+    #[test]
+    fn test_a_restore_retried_after_a_failed_move_keeps_the_arrangement() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, _env, _ledger) = home();
+        let dir = team("honey", &[]);
+        crate::layout::remember_mirror_for_test("honey", dir.to_str().unwrap(), "100.0");
+        let archive = archive_team("honey", "delete", false, T0, None).unwrap();
+        let store = crate::registry::store_dir();
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o555)).unwrap();
+
+        let failed = restore_archive(&archive.id, None);
+
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err());
+        let left = self::archive(&archive.id).unwrap();
+        assert_eq!(left.state, "quarantined");
+        // the payload's entry is as it was
+        let entry = crate::registry::load_at(&archive.payload().join("team.json")).unwrap();
+        assert_eq!(entry["createdAt"], "100.0");
+
+        let restored = restore_archive(&archive.id, None).unwrap();
+        let new_instance = map_str(&crate::registry::load("honey").unwrap(), "createdAt");
+        assert_eq!(restored.dir, dir);
+        assert_eq!(
+            crate::layout::remembered_mirror("honey", dir.to_str().unwrap(), &new_instance),
+            Some(false)
+        );
     }
 
     #[test]
@@ -2053,41 +2332,49 @@ mod tests {
     }
 
     #[test]
-    fn test_a_purge_defers_for_a_payload_written_into_and_reads_the_manifest_as_it_is() {
+    fn test_a_purge_waits_thirty_days_after_the_last_write_into_the_payload() {
+        use std::os::unix::fs::PermissionsExt;
         let (_tmp, _env, _ledger) = home();
         team("honey", &[]);
-        // quarantined long ago by the manifest's clock; the payload's files
-        // are written now, long after
-        let archive = archive_team("honey", "delete", false, T0 - 400.0 * DAY, None).unwrap();
-        let note = archive.payload().join("artifacts").join("late.md");
-        fs::write(&note, "still reading this").unwrap();
-        let written = newest_mtime(&archive.payload()).unwrap();
-        assert!(written > archive.quarantined_at + RECENT_WRITE_SLACK_SECONDS);
+        let now = epoch_now();
+        // quarantined 31 days ago, due yesterday; someone wrote into the
+        // payload on day 10 — well inside the original window
+        let archive = archive_team("honey", "delete", false, now - 31.0 * DAY, None).unwrap();
+        let written = now - 21.0 * DAY;
+        touch_all(&archive.payload(), written);
 
-        let outcome = purge_archive(&archive.id, written + 400.0 * DAY).unwrap();
+        let outcome = purge_archive(&archive.id, now).unwrap();
 
-        assert_eq!(outcome, Purge::Deferred(written + TRASH_AFTER_SECONDS));
-        assert!(note.is_file());
-        assert_eq!(
-            self::archive(&archive.id).unwrap().purge_after,
-            Some(written + TRASH_AFTER_SECONDS)
+        let Purge::Deferred(until) = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert!(
+            (until - (written + TRASH_AFTER_SECONDS)).abs() < 1.0,
+            "{until}"
         );
+        assert!(archive.payload().join("hive.db").is_file());
+        assert_eq!(self::archive(&archive.id).unwrap().purge_after, Some(until));
         // not due: nothing
         assert_eq!(
-            purge_archive(&archive.id, written + 1.0).unwrap(),
+            purge_archive(&archive.id, now + 1.0).unwrap(),
             Purge::Skipped("not due")
         );
         // kept meanwhile: the purge sees the manifest as it is now
         set_keep(&archive.id, true).unwrap();
         assert_eq!(
-            purge_archive(&archive.id, written + 900.0 * DAY).unwrap(),
+            purge_archive(&archive.id, now + 900.0 * DAY).unwrap(),
             Purge::Skipped("not due")
         );
-        assert!(note.is_file());
         set_keep(&archive.id, false).unwrap();
-        // due at last (the purge date is now from the keep-off, past every
-        // write into the payload)
         let due = self::archive(&archive.id).unwrap().purge_after.unwrap();
+        // a payload it cannot read whole is not purged
+        let sealed = archive.payload().join("artifacts");
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        let err = purge_archive(&archive.id, due);
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.is_err(), "{err:?}");
+        assert!(archive.payload().join("hive.db").is_file());
+        // due, and the last write is older than the window: purged
         assert_eq!(purge_archive(&archive.id, due).unwrap(), Purge::Purged);
         assert!(!archive.dir().exists());
         assert_eq!(

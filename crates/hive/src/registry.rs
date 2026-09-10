@@ -288,6 +288,11 @@ pub fn commit_succession(
     if !created_at_matches(entry.get("createdAt"), created_at) {
         return Ok("missing");
     }
+    // A team the collector is closing admits no succession either: the
+    // same gate as `open_instance`, inside the same lock.
+    if crate::gc::is_closing(&entry, crate::gc::epoch_now()) {
+        return Ok("closing");
+    }
     if member_for_session(new, None).is_some() {
         return Ok("taken");
     }

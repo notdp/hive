@@ -15,21 +15,24 @@ use crate::paths::expanduser;
 use crate::tmux;
 
 /// `--delete-workspace` removes only what is this team's alone: a
-/// workspace another live team's entry also records is shared, and a
-/// path that is a symlink leads somewhere the flag never named.
+/// workspace another live team's entry also records — by the directory
+/// the paths really name, through whatever links either spells it with —
+/// is shared, and a path that is itself a symlink leads somewhere the
+/// flag never named.
 fn refuse_shared_or_linked_workspace(team: &str, ws: &str) -> Result<()> {
     if std::fs::symlink_metadata(ws)?.file_type().is_symlink() {
         bail!(
             "workspace {ws} is a symlink; not removed (remove its target yourself if you mean it)"
         );
     }
-    let target = normalized(ws);
+    let target = std::fs::canonicalize(ws)?;
     let sharers: Vec<String> = crate::registry::list_entries()
         .iter()
         .filter(|entry| crate::json_fields::map_str(entry, "team") != team)
         .filter(|entry| {
             let other = crate::json_fields::map_str(entry, "workspace");
-            !other.is_empty() && normalized(&expanduser(&other)) == target
+            !other.is_empty()
+                && std::fs::canonicalize(expanduser(&other)).is_ok_and(|real| real == target)
         })
         .map(|entry| crate::json_fields::map_str(entry, "team"))
         .collect();
@@ -40,16 +43,6 @@ fn refuse_shared_or_linked_workspace(team: &str, ws: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-fn normalized(path: &str) -> std::path::PathBuf {
-    let path = std::path::PathBuf::from(path);
-    let absolute = if path.is_absolute() {
-        path
-    } else {
-        std::path::PathBuf::from(crate::paths::getcwd()).join(path)
-    };
-    absolute.components().collect()
 }
 
 /// Grok leader keys serving *team*, as the leader directory has them.
@@ -104,6 +97,24 @@ pub(crate) fn delete_team(
     }
     if delete_workspace && keep_workspace {
         bail!("--delete-workspace and --keep-workspace exclude each other");
+    }
+    // What `--delete-workspace` would remove is checked before anything is
+    // stopped: a refusal must leave the team as it was.
+    if delete_workspace {
+        let recorded = crate::registry::load(name)
+            .map(|entry| crate::json_fields::map_str(&entry, "workspace"))
+            .unwrap_or_default();
+        let early = if !workspace.is_empty() {
+            workspace
+        } else {
+            &recorded
+        };
+        if !early.is_empty() {
+            let ws = expanduser(early);
+            if std::fs::symlink_metadata(&ws).is_ok() {
+                refuse_shared_or_linked_workspace(name, &ws)?;
+            }
+        }
     }
     let session = format!("={name}");
     let had_session = down && crate::team_display::owns_team_session(name);
@@ -662,6 +673,24 @@ mod tests {
         assert!(err.contains("comb"), "{err}");
         assert!(shared.join("artifacts").is_dir());
         assert!(crate::registry::load("honey").is_some());
+
+        // the other team spells the same directory through a linked parent
+        let alias = env._tmp.path().join("alias");
+        std::os::unix::fs::symlink(env._tmp.path(), &alias).unwrap();
+        crate::registry::delete_team("comb").unwrap();
+        crate::registry::record_team(
+            "comb",
+            alias.join("shared").to_str().unwrap(),
+            "250.0",
+            &[],
+            "",
+        )
+        .unwrap();
+        let err = crate::team::delete_team("honey", "", true, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("comb"), "{err}");
+        assert!(shared.join("artifacts").is_dir());
 
         // a symlinked workspace is never followed
         crate::registry::delete_team("comb").unwrap();
