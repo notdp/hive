@@ -31,15 +31,6 @@ fn pane_cwd(cwd: Option<&str>) -> anyhow::Result<Option<&str>> {
     Ok(cwd)
 }
 
-/// Change directory before the pane shell becomes interactive. tmux's -c
-/// alone can fail when the server retains a deleted working directory.
-fn shell_start_command(cwd: &str) -> String {
-    format!(
-        "cd {} && exec \"$SHELL\" -l",
-        crate::agent::shell_escape(cwd)
-    )
-}
-
 /// Terminal type assigned to panes, independent of the caller's tool shell.
 pub(crate) fn default_terminal() -> String {
     match run(&["show-options", "-gv", "default-terminal"], false, 5) {

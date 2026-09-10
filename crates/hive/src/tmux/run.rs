@@ -81,6 +81,7 @@ pub(super) fn exec_capture(
     argv: &[String],
     timeout_secs: u64,
     input: Option<&str>,
+    cwd: Option<&str>,
 ) -> Result<Run, TmuxError> {
     #[cfg(test)]
     {
@@ -94,6 +95,9 @@ pub(super) fn exec_capture(
     }
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     if input.is_some() {
         cmd.stdin(Stdio::piped());
@@ -167,6 +171,18 @@ pub(super) fn exec_capture(
 /// look like a successful send-keys. `check=false` callers are probes that
 /// read "unknown" out of the rc-1 sentinel, so they keep it.
 pub(crate) fn run(args: &[&str], check: bool, timeout: u64) -> Result<Run, TmuxError> {
+    run_from(args, check, timeout, None)
+}
+
+/// `run` with the client started in *cwd*. Only the command that brings a
+/// server up needs it: tmux forks the server out of that first client and
+/// the server keeps the client's working directory for its whole life.
+pub(crate) fn run_from(
+    args: &[&str],
+    check: bool,
+    timeout: u64,
+    cwd: Option<&str>,
+) -> Result<Run, TmuxError> {
     #[cfg(test)]
     {
         let owned: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -181,7 +197,7 @@ pub(crate) fn run(args: &[&str], check: bool, timeout: u64) -> Result<Run, TmuxE
     let mut argv: Vec<String> = Vec::with_capacity(args.len() + 1);
     argv.push("tmux".to_string());
     argv.extend(args.iter().map(|s| s.to_string()));
-    match exec_capture(&argv, timeout, None) {
+    match exec_capture(&argv, timeout, None, cwd) {
         Ok(r) => {
             if check && r.returncode != 0 {
                 Err(TmuxError::CalledProcess {

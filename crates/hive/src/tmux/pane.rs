@@ -14,7 +14,6 @@ pub fn split_window(
     cwd: Option<&str>,
 ) -> anyhow::Result<String> {
     let cwd = super::pane_cwd(cwd)?;
-    let command = cwd.map(super::shell_start_command);
     let mut args: Vec<&str> = vec!["split-window", "-t", target];
     if detach {
         args.push("-d");
@@ -31,9 +30,6 @@ pub fn split_window(
         args.push(cwd);
     }
     args.extend(["-P", "-F", "#{pane_id}"]);
-    if let Some(command) = command.as_deref() {
-        args.push(command);
-    }
     match run(&args, true, 5) {
         Ok(r) => Ok(r.stdout.trim().to_string()),
         Err(TmuxError::CalledProcess { stderr, .. }) => {
@@ -91,7 +87,7 @@ pub fn load_buffer(name: &str, data: &str) -> anyhow::Result<()> {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let r = exec_capture(&argv, 5, Some(data))?;
+    let r = exec_capture(&argv, 5, Some(data), None)?;
     if r.returncode != 0 {
         return Err(TmuxError::CalledProcess {
             returncode: r.returncode,
