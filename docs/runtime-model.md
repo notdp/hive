@@ -1047,9 +1047,18 @@ leader. The alias also lets member teardown reach that leader.
   `turn_completed` closes) is the session's state at load time — so a
   hived restarted onto an idle member answers `turn-open` `false` at once
   instead of `null` until the member's next turn.
-- **Permission requests.** Hive answers its own copy with `cancelled` and
-  reports the member as waiting: the decision belongs to the human at the TUI,
-  which gets its own copy.
+- **Permission requests.** The leader broadcasts a shared request to its
+  subscribers and accepts the first answer. Hive observes it as waiting for
+  the human at the TUI and sends no answer: even `cancelled` would resolve
+  the shared request and cut the turn short. A tool update clears the wait
+  after the human decides; turn completion also clears it. With no one
+  answering (including a headless node), the request and turn remain pending
+  while the engine lives. The leader replays the pending modal to a TUI that
+  attaches later. `hive workflow run` has no post-dispatch deadline while
+  the hived reports `Running`; an outer runner timeout does not itself
+  cancel the engine turn. A human decision or explicit interrupt/kill ends
+  that wait. The routing is in grok `leader/server.rs`: interaction fan-out,
+  unchanged response ids, and pending-modal replay on load.
 - **No transcript-gate fallback.** That gate knows only the claude and codex
   record shapes and would read a pending grok permission request as clear, so
   a grok pane with no leader state reports unknown instead.
