@@ -90,7 +90,7 @@ pub fn list_panes_all() -> Vec<PaneInfo> {
 /// "error connecting to <path> (No such file or directory)" (socket gone).
 /// Anything else — permission denied, connection refused, unexpected text —
 /// stays unknown: a server may well be alive behind the failure.
-fn stderr_means_no_server(stderr: &str) -> bool {
+pub(crate) fn stderr_means_no_server(stderr: &str) -> bool {
     let low = stderr.to_lowercase();
     if low.contains("no server running") {
         return true;

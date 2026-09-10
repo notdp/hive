@@ -634,6 +634,27 @@ pub fn backfill(
     Ok("written")
 }
 
+/// Edit one entry under the store lock: *edit* sees the entry as stored
+/// and the result is written whole. Ok(false) when there is no such team.
+pub(crate) fn update_entry(team: &str, edit: impl FnOnce(&mut Map<String, Value>)) -> Result<bool> {
+    let Some(path) = entry_path(team) else {
+        return Ok(false);
+    };
+    let _lock = locked()?;
+    let Some(mut entry) = load(team) else {
+        return Ok(false);
+    };
+    edit(&mut entry);
+    write_atomic(&path, &entry)?;
+    Ok(true)
+}
+
+/// Write an entry the caller has already placed under the store lock
+/// (`gc::restore_archive` publishes a moved-back team directory this way).
+pub(crate) fn write_entry_file(path: &Path, entry: &Map<String, Value>) -> Result<()> {
+    write_atomic(path, entry)
+}
+
 fn write_atomic(path: &Path, entry: &Map<String, Value>) -> Result<()> {
     let parent = path.parent().context("registry path has no parent")?;
     fs::create_dir_all(parent)?;

@@ -164,6 +164,13 @@ fn hooked_list_jobs(claude_bin: &str) -> Option<Vec<Map<String, Value>>> {
     list_jobs(claude_bin)
 }
 
+/// Every job row, through the test seam: None when the ledger could not
+/// be read at all — the caller that must tell "no job" from "no answer"
+/// (`gc`) reads this, `job_row` folds the two.
+pub(crate) fn jobs_ledger(claude_bin: &str) -> Option<Vec<Map<String, Value>>> {
+    hooked_list_jobs(claude_bin)
+}
+
 /// The ledger row for *job_id*, or None (unknown job, or CLI failure).
 ///
 /// A row without `pid`/`status` is a parked or stopped engine — asleep, not

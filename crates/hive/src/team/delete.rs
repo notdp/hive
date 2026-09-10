@@ -55,11 +55,15 @@ pub(crate) fn delete_team(
     name: &str,
     workspace: &str,
     delete_workspace: bool,
+    keep_workspace: bool,
     down: bool,
 ) -> Result<()> {
     let error = crate::team::validate_team_name(name);
     if !error.is_empty() {
         bail!("cannot delete: {error}");
+    }
+    if delete_workspace && keep_workspace {
+        bail!("--delete-workspace and --keep-workspace exclude each other");
     }
     let session = format!("={name}");
     let had_session = down && crate::team_display::owns_team_session(name);
@@ -72,6 +76,35 @@ pub(crate) fn delete_team(
     let me = crate::identity::default_team()
         .filter(|team| team == name)
         .and_then(|_| crate::identity::default_agent());
+    // Ending a team is not stopping its work: a member mid-turn is finished
+    // or retired (`--down`), never deleted from under. The hived's word when
+    // there is one, else the codex daemon's; what cannot be verified is
+    // said and not fatal — a dead team's remains are the usual delete. The
+    // caller is mid-turn by definition (it is running this) and exempt.
+    if !down {
+        if let Some(entry) = crate::registry::load(name) {
+            match crate::gc::busy_members(&entry) {
+                crate::gc::Turns::Open(members) => {
+                    let others: Vec<String> = members
+                        .into_iter()
+                        .filter(|member| Some(member) != me.as_ref())
+                        .collect();
+                    if !others.is_empty() {
+                        bail!(
+                            "team '{name}' has members mid-turn ({}); let them finish, or `hive delete {name} --down` to retire them",
+                            others.join(", ")
+                        );
+                    }
+                }
+                crate::gc::Turns::Unverified(reason) => {
+                    eprintln!(
+                        "! could not verify that '{name}' is idle ({reason}); deleting anyway"
+                    )
+                }
+                crate::gc::Turns::Idle => {}
+            }
+        }
+    }
     let mut caller = None;
     if down {
         if crate::registry::load(name).is_none() && !had_session {
@@ -160,11 +193,14 @@ pub(crate) fn delete_team(
         let _ = crate::context::clear_current_context();
     }
 
-    // The registry entry is the team's authoritative existence: removing it
+    // The registry entry is the team's authoritative existence: its going
     // is what makes the team deleted (readers and the hived's registry-gone
-    // exit key on it).
-    crate::registry::delete_team(name)?;
+    // exit key on it). By default it goes with its directory into the
+    // trash, whole, for `TRASH_AFTER_SECONDS` (`gc::archive_team`);
+    // `--keep-workspace` gives the archive no purge date;
+    // `--delete-workspace` removes the directory here and now.
     if delete_workspace {
+        crate::registry::delete_team(name)?;
         // The team directory is the default workspace; with an external
         // one it held only the entry, gone above with its directory.
         if let Some(dir) = crate::registry::team_dir(name) {
@@ -172,6 +208,24 @@ pub(crate) fn delete_team(
                 std::fs::remove_dir_all(&dir)?;
             }
         }
+    } else if crate::registry::load(name).is_some() {
+        let archive =
+            crate::gc::archive_team(name, "delete", keep_workspace, crate::gc::epoch_now())?;
+        match archive.purge_after {
+            Some(at) => println!(
+                "archived as {} (purge after {}; `hive gc restore {}` brings it back)",
+                archive.id,
+                crate::gc::date(at),
+                archive.id
+            ),
+            None => println!(
+                "archived as {} (kept; `hive gc restore {}` brings it back)",
+                archive.id, archive.id
+            ),
+        }
+    } else {
+        // No entry to archive: whatever directory is left is not a team's.
+        crate::registry::delete_team(name)?;
     }
 
     // Last, because it is the point of no return for the engines: the hived
@@ -219,7 +273,9 @@ mod tests {
         }
 
         for name in ["../evil", outside.to_str().unwrap(), "a.b", ""] {
-            let err = delete_team(name, "", true, false).unwrap_err().to_string();
+            let err = delete_team(name, "", true, false, false)
+                .unwrap_err()
+                .to_string();
             assert!(err.starts_with("cannot delete:"), "{name}: {err}");
         }
 
@@ -307,7 +363,7 @@ mod tests {
             &["dev", "honey"],
         );
 
-        crate::team::delete_team("honey", &ws, false, false).unwrap();
+        crate::team::delete_team("honey", &ws, false, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert_eq!(count(&argv, "kill-window"), 0);
@@ -326,7 +382,7 @@ mod tests {
             &["honey"],
         );
 
-        crate::team::delete_team("honey", &ws, false, false).unwrap();
+        crate::team::delete_team("honey", &ws, false, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert!(has_row(&argv, &["kill-window", "-t", "@7"]));
@@ -346,7 +402,7 @@ mod tests {
             &["dev"],
         );
 
-        crate::team::delete_team("honey", &ws, false, false).unwrap();
+        crate::team::delete_team("honey", &ws, false, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert_eq!(count(&argv, "kill-window"), 0);
@@ -370,7 +426,7 @@ mod tests {
             &["honey"],
         );
 
-        crate::team::delete_team("honey", &ws, false, false).unwrap();
+        crate::team::delete_team("honey", &ws, false, false, false).unwrap();
 
         let kills: Vec<Vec<String>> = argv
             .borrow()
@@ -404,18 +460,82 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_without_the_flag_removes_only_team_json_from_the_team_dir() {
+    fn test_delete_without_a_flag_moves_the_team_dir_into_the_trash_whole() {
         let env = display_env_outside();
         let ws = team_on_its_own_dir(&env);
         let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-        crate::team::delete_team("honey", "", false, false).unwrap();
+        crate::team::delete_team("honey", "", false, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
-        assert!(!ws.join("team.json").exists());
+        assert!(!ws.exists(), "{}", ws.display());
+        let archives = crate::gc::list_archives();
+        assert_eq!(archives.len(), 1, "{archives:?}");
+        let archive = &archives[0];
+        assert_eq!(archive.team, "honey");
+        assert_eq!(archive.origin, "delete");
+        assert!(!archive.kept());
+        let payload = crate::gc::trash_dir().join(&archive.id).join("payload");
+        assert!(payload.join("team.json").is_file());
+        assert!(payload.join("hive.db").is_file());
+        assert!(payload.join("run").is_dir());
+        assert!(payload.join("artifacts").is_dir());
+        // the name is free at once
+        assert!(crate::registry::team_dir("honey").is_some_and(|d| !d.exists()));
+    }
+
+    #[test]
+    fn test_delete_refuses_a_member_mid_turn_unless_down() {
+        let env = display_env_outside();
+        let ws = team_on_its_own_dir(&env);
+        let _argv = fake_tmux_sessions("", &[], &[], &[]);
+        let runtime = serde_json::json!({"members": {"sage": {"alive": true, "busy": true}}});
+        *crate::gc::fake_hived_runtime().lock().unwrap() = runtime.as_object().cloned();
+
+        let err = crate::team::delete_team("honey", "", false, false, false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("sage") && err.contains("--down"), "{err}");
+        assert!(crate::registry::load("honey").is_some());
         assert!(ws.join("hive.db").is_file());
-        assert!(ws.join("run").is_dir());
-        assert!(ws.join("artifacts").is_dir());
+        assert!(crate::gc::list_archives().is_empty());
+
+        // --down retires them and ends the team
+        crate::team::delete_team("honey", "", false, false, true).unwrap();
+        *crate::gc::fake_hived_runtime().lock().unwrap() = None;
+        assert!(crate::registry::load("honey").is_none());
+        assert_eq!(crate::gc::list_archives().len(), 1);
+    }
+
+    #[test]
+    fn test_delete_keep_workspace_archives_with_no_purge_date() {
+        let env = display_env_outside();
+        let ws = team_on_its_own_dir(&env);
+        let _argv = fake_tmux_sessions("", &[], &[], &[]);
+
+        crate::team::delete_team("honey", "", false, true, false).unwrap();
+
+        assert!(!ws.exists());
+        let archives = crate::gc::list_archives();
+        assert_eq!(archives.len(), 1);
+        assert!(archives[0].kept());
+    }
+
+    #[test]
+    fn test_delete_refuses_both_workspace_flags_before_touching_anything() {
+        let env = display_env_outside();
+        let ws = team_on_its_own_dir(&env);
+        let _argv = fake_tmux_sessions("", &[], &[], &[]);
+
+        let err = crate::team::delete_team("honey", "", true, true, false)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("exclude each other"), "{err}");
+        assert!(crate::registry::load("honey").is_some());
+        assert!(ws.join("hive.db").is_file());
+        assert!(crate::gc::list_archives().is_empty());
     }
 
     #[test]
@@ -424,7 +544,7 @@ mod tests {
         let ws = team_on_its_own_dir(&env);
         let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-        crate::team::delete_team("honey", "", true, false).unwrap();
+        crate::team::delete_team("honey", "", true, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert!(!ws.exists(), "{}", ws.display());
@@ -441,7 +561,7 @@ mod tests {
         env.env.set("CR_WORKSPACE", &stranger);
         let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-        crate::team::delete_team("honey", "", true, false).unwrap();
+        crate::team::delete_team("honey", "", true, false, false).unwrap();
 
         assert!(stranger.join("artifacts").is_dir());
         assert!(!team_dir(&env, "honey").exists());
@@ -463,20 +583,25 @@ mod tests {
         .unwrap();
         let _argv = fake_tmux_sessions("", &[], &[], &[]);
 
-        crate::team::delete_team("honey", "", false, false).unwrap();
+        crate::team::delete_team("honey", "", false, false, false).unwrap();
 
         assert!(crate::registry::load("honey").is_none());
         assert!(external.join("hive.db").is_file());
         assert!(external.join("artifacts").is_dir());
-        // the team dir held only the entry, so it is gone
+        // the team dir held only the entry; it is archived, the external
+        // workspace only recorded
         assert!(!team_dir(&env, "honey").exists());
+        let archives = crate::gc::list_archives();
+        assert_eq!(archives.len(), 1);
+        assert_eq!(archives[0].workspace, external.to_str().unwrap());
 
         // with the flag, the external workspace goes too
         crate::registry::record_team("honey", external.to_str().unwrap(), "200.0", &[], "@7")
             .unwrap();
-        crate::team::delete_team("honey", "", true, false).unwrap();
+        crate::team::delete_team("honey", "", true, false, false).unwrap();
         assert!(!external.exists());
         assert!(!team_dir(&env, "honey").exists());
+        assert_eq!(crate::gc::list_archives().len(), 1);
     }
 
     #[test]
@@ -484,7 +609,7 @@ mod tests {
         let _env = display_env_outside();
         crate::registry::record_team("honey", "", "100.0", &[], "@7").unwrap();
         let argv = fake_tmux_sessions("honey:1\t@7\thoney\t\t\t\n", &[], &[], &["honey"]);
-        delete_team("honey", "", false, true).unwrap();
+        delete_team("honey", "", false, false, true).unwrap();
         assert!(crate::registry::load("honey").is_none());
         assert_eq!(count(&argv, "kill-session"), 0);
         assert_eq!(count(&argv, "kill-window"), 0);
@@ -495,7 +620,9 @@ mod tests {
         let _env = display_env_outside();
         let argv = fake_tmux_sessions("", &[], &[], &["abc-keep"]);
 
-        let err = delete_team("abc", "", false, true).unwrap_err().to_string();
+        let err = delete_team("abc", "", false, false, true)
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("no team named 'abc'"), "{err}");
         assert_eq!(count(&argv, "kill-session"), 0);
@@ -547,7 +674,7 @@ mod tests {
             }]
         });
 
-        delete_team("abc", "", false, false).unwrap();
+        delete_team("abc", "", false, false, false).unwrap();
 
         assert!(crate::registry::load("abc").is_none());
         assert!(crate::registry::load("xyz").is_some());
@@ -599,7 +726,7 @@ mod tests {
                 .collect()
         });
 
-        delete_team("abc", "", false, true).unwrap();
+        delete_team("abc", "", false, false, true).unwrap();
 
         assert!(crate::registry::load("abc").is_none());
         let at = |row: &[&str]| {
@@ -637,7 +764,7 @@ mod tests {
             &["abc", "abc-keep"],
         );
 
-        delete_team("abc", "", false, true).unwrap();
+        delete_team("abc", "", false, false, true).unwrap();
 
         assert!(crate::registry::load("abc").is_none());
         assert!(has_row(&argv, &["kill-window", "-t", "@7"]));
@@ -669,7 +796,7 @@ mod tests {
             &["honey"],
         );
 
-        delete_team("honey", &ws, false, false).unwrap();
+        delete_team("honey", &ws, false, false, false).unwrap();
 
         assert_eq!(count(&argv, "kill-session"), 0);
         assert_eq!(count(&argv, "has-session"), 0);

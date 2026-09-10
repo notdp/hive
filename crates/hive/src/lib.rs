@@ -9,6 +9,7 @@ pub mod context;
 pub mod cvim;
 pub mod devlog;
 pub mod draft_guard;
+pub mod gc;
 pub mod hived;
 pub mod identity;
 pub mod json_fields;

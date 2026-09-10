@@ -102,13 +102,48 @@ Consequences across modules:
   entry's `workspace` field records it; `team.json` stays in the team
   directory. `create` always resets the default workspace (a pool name
   recycled after `hive delete` must not inherit the old bus or event log).
-  `hive delete` removes `team.json` and leaves the rest; `--down` first
-  retires every member and kills the session named after the team only
-  when it contains a window marked `@hive-built=1` and `@hive-team=<team>`;
-  `--delete-workspace` removes the whole directory (or the external
-  workspace); an external workspace is never removed without the flag. A
-  long `HIVE_HOME` relocates the hived socket under `/tmp/hive-<uid>/` as
-  any long workspace does (`devlog.rs::hived_socket_path_in`).
+  `hive delete` moves the team directory whole into the trash (below);
+  `--down` first retires every member and kills the session named after
+  the team only when it contains a window marked `@hive-built=1` and
+  `@hive-team=<team>`; `--delete-workspace` removes the directory at once
+  instead (and the external workspace, which is otherwise only recorded);
+  `--keep-workspace` archives with no purge date. A member mid-turn (the
+  hived's `busy`, the codex daemon's open turn without a hived) refuses
+  the plain form — the caller's own member excepted, it is mid-turn by
+  running the verb — and `--down` is the answer. A long `HIVE_HOME`
+  relocates the hived socket under `/tmp/hive-<uid>/` as any long
+  workspace does (`devlog.rs::hived_socket_path_in`).
+- **The trash and the cold clock (`gc.rs`).** A team ends in one way: its
+  directory becomes `$HIVE_HOME/trash/<archive-id>/payload/` next to a
+  `manifest.json` (team, the archived instance's `createdAt`, origin
+  `delete`/`expired`, `quarantinedAt`, `purgeAfter` or null for kept, the
+  external workspace if any, the member names). The manifest is written
+  `preparing` before the rename and `quarantined` after, so a crash
+  between leaves something the next run commits or drops. The entry goes
+  with the directory, so the name is free at once; nothing is reserved.
+  An archive past `purgeAfter` is purged (manifest `purging` first, then
+  the payload, then the rest). `hive gc restore <id> [--as NAME]` moves
+  the payload back under `teams/NAME/` as a new instance — a new
+  `createdAt`, `display` empty, `restoredFrom` recording the archive —
+  refusing a name in use and a member whose engine session a live team's
+  roster holds; no engine starts, the next attach builds the display.
+  The collector (`hive gc run`, and by itself at the tail of create /
+  join / spawn / send / kill / delete / attach / workflow / fork at most
+  once a day, stamped in `$HIVE_HOME/state/gc/last-attempt`) classifies
+  every registry team from one tmux window listing, the hived's
+  `team-runtime` when its socket is there, the `run/operations/` journal,
+  one `claude agents --json --all` read only when a claude member needs
+  it, the codex daemon's `turn-open` for a codex member, and the grok
+  leader's socket for a grok member. Displayed, or a member busy or alive,
+  is active and clears `gc.coldSince`; nothing of the kind is cold, and
+  the first cold sight writes `gc.coldSince`; cold for 30 days archives
+  (origin `expired`), after stopping the hived. Anything the collector
+  cannot read — tmux not answering, the ledger call failing, a hived that
+  holds its socket silently, an unfinished node record — blocks that team
+  for this run. `gc.keep` exempts a team; `hive gc keep` toggles it on a
+  team or an archive. `--dry-run` writes nothing, not even a clock. Events
+  (`quarantined`, `purged`, `restored`, `kept`) append to
+  `$HIVE_HOME/state/gc/events.jsonl`.
 - **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
   delete/attach) need no tmux client: `create` outside tmux puts the
   team window in the session named after the team (created detached when

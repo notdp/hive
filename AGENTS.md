@@ -14,8 +14,23 @@ behavior is documented in the modules themselves.
   default workspace (`hive.db`, `run/`, `artifacts/`); an explicit
   `--workspace` lives elsewhere and the entry's `workspace` field records
   it. `hive create` on the default resets it (a recycled pool name must not
-  inherit its predecessor's bus); `hive delete` removes `team.json` only,
-  `--delete-workspace` the whole directory. The store lock is
+  inherit its predecessor's bus). A team ends by moving its directory whole,
+  entry and all, into the trash, `$HIVE_HOME/trash/<archive-id>/payload/`
+  beside a `manifest.json` (`gc.rs`): `hive delete` does it at once
+  (`--keep-workspace` with no purge date, `--delete-workspace` purging
+  instead; an external workspace is only recorded unless that flag names
+  it), the collector does it to a team cold for 30 days, and an archive not
+  kept is purged 30 days later. The name is free the moment the entry
+  leaves the store — the trash reserves nothing — and `hive gc restore`
+  brings an archive back as a new instance (a new `createdAt`). Cold means
+  positively seen idle: no window, no engine alive, no hived answering
+  with a busy or alive member, no unfinished node operation; tmux or a
+  ledger not answering blocks, never counts as idle. The cold clock is
+  `gc.coldSince` on the entry, cleared by any use (`Team::load` under a
+  mutating verb) and by `gc.keep`; the collector runs at the tail of a
+  mutating verb at most once a day (`$HIVE_HOME/state/gc/last-attempt`).
+  A member mid-turn refuses a plain `hive delete` (the caller's own
+  member excepted); `--down` retires it. The store lock is
   `$HIVE_HOME/teams/.lock`. tmux is display, resolved on top of it, and a
   pane or a window is not the authority on who is on a team. The orch
   mirror is display state of the same kind: `@hive-role mirror` on the

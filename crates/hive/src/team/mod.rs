@@ -436,6 +436,9 @@ impl Team {
     /// windows claim the same team name.
     pub fn load(name: &str, prefer_pane: &str) -> Result<Team> {
         let snap = crate::registry::load(name);
+        if snap.is_some() {
+            crate::gc::note_team_use(name);
+        }
         let hint = if !prefer_pane.is_empty() {
             prefer_pane.to_string()
         } else {

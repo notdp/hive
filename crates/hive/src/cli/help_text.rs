@@ -52,6 +52,7 @@ Team:
 
   create  Create a team.
   delete  Delete a team and clean up.
+  gc      Archive cold teams, purge expired archives, keep or restore.
   join    Join a team.
   layout  Apply a tmux layout preset to the current team window.
   mirror  Show or hide the team's read-only orch mirror pane.
@@ -260,24 +261,101 @@ Options:
 
   Delete a team and clean up.
 
-  Removes the registry entry ($HIVE_HOME/teams/NAME/team.json), closes the
-  window hive built, stops the hived. The team directory's bus, run/ and
-  artifacts/ stay for reading until the name is recycled; --delete-workspace
-  removes the whole team directory — or the external workspace the entry
-  records, which is never removed without the flag.
+  Closes the window hive built, stops the hived, and moves the team
+  directory ($HIVE_HOME/teams/NAME/, entry and all) into the trash,
+  $HIVE_HOME/trash/<archive-id>/, where it is purged 30 days later unless
+  kept (`hive gc keep <archive-id>`); `hive gc restore <archive-id>` brings
+  it back. The name is free at once. --keep-workspace archives with no
+  purge date; --delete-workspace purges the team directory here and now —
+  and the external workspace the entry records, which is otherwise only
+  recorded and never removed. The two exclude each other.
 
-  --down is the teardown of a workflow run (`hive create RUN`, `hive workflow
-  run` nodes, `hive delete RUN --down`): every member is retired first, and
-  the team's own tmux session — the one `hive create` built outside tmux,
-  named after the team — is killed after, by its exact name, never a prefix
+  A member mid-turn refuses the delete: let it finish, or --down. --down is
+  the teardown of a workflow run (`hive create RUN`, `hive workflow run`
+  nodes, `hive delete RUN --down`): every member is retired first, and the
+  team's own tmux session — the one `hive create` built outside tmux, named
+  after the team — is killed after, by its exact name, never a prefix
   match. Refuses when neither a team nor such a session exists.
 
 Options:
   -w, --workspace TEXT  Workspace path to remove (default: the entry's)
-  --delete-workspace    Also delete the workspace directory
+  --delete-workspace    Purge the workspace at once instead of archiving it
+  --keep-workspace      Archive with no purge date
   --down                Retire every member first and kill the team's tmux
                         session
   -h, --help            Show this message and exit.
+"#
+        }
+        ["gc"] => {
+            r#"Usage: hive gc [OPTIONS] COMMAND [ARGS]...
+
+  Archive cold teams, purge expired archives, keep or restore.
+
+  A team nobody displays, whose engines are gone and whose hived owes
+  nothing is cold. Cold for 30 days it is archived: its directory moves
+  whole to $HIVE_HOME/trash/<archive-id>/payload/ and its name is free.
+  An archive not kept is purged 30 days later. `hive delete` is the same
+  archive without the wait. The collector runs by itself at the tail of a
+  mutating verb (create, join, spawn, send, kill, delete, attach, workflow)
+  at most once a day; it only archives what it has positively seen idle —
+  tmux not answering, an unreadable claude job ledger, a hived that holds
+  its socket silently, an unfinished node operation each block a team.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  keep     Exempt a team from the cold clock, or an archive from purging.
+  restore  Bring an archive back as a new team instance.
+  run      Collect now: clock cold teams, archive the expired, purge the
+           trash.
+"#
+        }
+        ["gc", "run"] => {
+            r#"Usage: hive gc run [OPTIONS]
+
+  Collect now: clock cold teams, archive the expired, purge the trash.
+
+  Prints a row per registry team (active, cooling with its archive date,
+  blocked with why, kept, archived) and per archive (quarantined with its
+  purge date, kept, purged). Runs whatever the daily throttle says.
+
+Options:
+  --dry-run   Report what would happen; write nothing — no clock starts.
+  --json      Machine-readable report
+  -h, --help  Show this message and exit.
+"#
+        }
+        ["gc", "keep"] => {
+            r#"Usage: hive gc keep [OPTIONS] TARGET
+
+  Exempt a team from the cold clock, or an archive from purging.
+
+  TARGET is a team name or an archive id. A kept team is never archived by
+  the collector (`hive delete` still ends it); a kept archive has no purge
+  date. --off lifts the exemption: a team's clock starts over from now, an
+  archive is purged 30 days from now.
+
+Options:
+  --off       Lift the exemption
+  -h, --help  Show this message and exit.
+"#
+        }
+        ["gc", "restore"] => {
+            r#"Usage: hive gc restore [OPTIONS] ARCHIVE_ID
+
+  Bring an archive back as a new team instance.
+
+  The payload moves back to $HIVE_HOME/teams/NAME/ with its bus, artifacts
+  and roster, under the archived name or --as NAME, as a new instance (a
+  new createdAt: nothing the old one left behind lands on it). Refuses a
+  name in use — pass --as — and a member whose engine session is bound to
+  a live team. Data only: no engine starts, `hive attach` builds the
+  display. Absolute paths recorded under the old name are not rewritten.
+
+Options:
+  --as TEXT   Restore under another name
+  -h, --help  Show this message and exit.
 "#
         }
         ["ps"] => {

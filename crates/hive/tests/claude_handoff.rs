@@ -602,21 +602,40 @@ fn test_local_exit_during_unfinished_request_does_not_restart_viewer() {
 }
 
 #[test]
-fn test_plain_delete_retires_the_transferred_job_when_called_from_a_shell() {
+fn test_delete_from_a_shell_refuses_the_transferred_job_mid_turn_and_down_retires_it() {
     let mut r = Rig::new();
     r.launch(false);
     r.ready();
     r.create();
+    // While the job is producing output it is mid-turn to the hived, and a
+    // plain delete from a shell (nobody's own turn) is refused and points
+    // at --down; once the job has gone quiet the plain delete ends the
+    // team. Which one this run sees depends on the job's timing — both
+    // keep the contract: the team ends only with the job retired.
     let out = r
         .command(env!("CARGO_BIN_EXE_hive"))
         .args(["delete", TEAM])
         .output()
         .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        assert!(
+            stderr.contains("mid-turn") && stderr.contains("--down"),
+            "{stderr}"
+        );
+        assert!(r.team_entry().exists());
+        assert!(r.events("stop").is_empty());
+        let out = r
+            .command(env!("CARGO_BIN_EXE_hive"))
+            .args(["delete", TEAM, "--down"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     assert!(!r.team_entry().exists());
     assert!(!r.events("stop").is_empty());
 }
