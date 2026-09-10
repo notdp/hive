@@ -6532,7 +6532,7 @@ fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
     let _guard = testhook::install(Hook::default());
     let tmp = short_workspace();
     admission().lock().unwrap().leases += 1;
-    let lease = RequestLease;
+    let lease = RequestLease::default();
     let server = RecServer {
         calls: Arc::new(Mutex::new(Vec::new())),
     };
@@ -6552,4 +6552,315 @@ fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
         Duration::ZERO
     ));
     drop(lease);
+}
+
+fn sleep_probe_env() -> LoopProbeEnv {
+    let env = loop_probe_env("no-server");
+    crate::registry::record_team("probe", &env.workspace, "123", &[], "").unwrap();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.is_tmux_window_alive = Some(Arc::new(|_| false));
+    });
+    env
+}
+
+fn sleep_server() -> RecServer {
+    RecServer {
+        calls: Arc::new(Mutex::new(Vec::new())),
+    }
+}
+
+#[test]
+fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
+    let env = sleep_probe_env();
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    let backfills = Arc::new(Mutex::new(0));
+    let observed = Arc::clone(&backfills);
+    let swept = Arc::new(Mutex::new(Vec::new()));
+    let dropped = Arc::clone(&swept);
+    let killed = Arc::clone(&swept);
+    testhook::update(|h| {
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.serve_requests = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(*n <= 2, "idle hived failed to sleep");
+            true
+        }));
+        h.team_load = Some(Arc::new(move |_| {
+            *observed.lock().unwrap() += 1;
+            anyhow::bail!("no pane observation")
+        }));
+        h.gl_idle_owned_keys = Some(Arc::new(|team| {
+            assert_eq!(team, "probe");
+            Some(vec!["m-probe.worker".into()])
+        }));
+        h.gl_pool_drop_key = Some(Arc::new(move |key| {
+            dropped.lock().unwrap().push(format!("drop {key}"))
+        }));
+        h.gl_park_daemon_key = Some(Arc::new(move |key| {
+            killed.lock().unwrap().push(format!("park {key}"))
+        }));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert_eq!(*env.serves.lock().unwrap(), 2);
+    let events = display_events(&env, "hived.sleep");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["reason"], "display-unreachable");
+    assert_eq!(events[0]["idleSeconds"], HIVED_SLEEP_AFTER_SECONDS);
+    assert!(SHUTDOWN.load(Ordering::SeqCst));
+    assert!(!FORCE_SHUTDOWN.load(Ordering::SeqCst));
+    assert!(!socket_path(&env.workspace).exists());
+    assert!(crate::registry::load("probe").is_some());
+    assert!(!hooked_run_dir(&env.workspace).join("operations").exists());
+    assert_eq!(*backfills.lock().unwrap(), 3);
+    assert_eq!(
+        *swept.lock().unwrap(),
+        ["drop m-probe.worker", "park m-probe.worker"]
+    );
+}
+
+#[test]
+fn test_sleep_timer_resets_when_display_or_registry_window_returns() {
+    let env = sleep_probe_env();
+    let mut state = SleepState::default();
+    let server = sleep_server();
+    let snap = TickSnapshot::with_extras("ok", Vec::new(), HashMap::new(), None, None);
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    crate::registry::set_display("probe", "@2").unwrap();
+    testhook::update(|h| h.is_tmux_window_alive = Some(Arc::new(|id| id == "@2")));
+    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 599.0));
+    testhook::update(|h| h.is_tmux_window_alive = Some(Arc::new(|_| false)));
+    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 601.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 1200.0));
+    assert!(state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 1201.0));
+    assert_eq!(
+        display_events(&env, "hived.sleep")[0]["reason"],
+        "window-gone"
+    );
+}
+
+#[test]
+fn test_sleep_obligations_reset_the_timer() {
+    let env = sleep_probe_env();
+    let server = sleep_server();
+    let mut state = SleepState::default();
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    admission().lock().unwrap().leases += 1;
+    let lease = RequestLease::default();
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    drop(lease);
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1200.0));
+    let path = prepare_operation(
+        &env.workspace,
+        "probe",
+        "123",
+        "nd-pending",
+        "worker",
+        "node",
+    )
+    .unwrap();
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1800.0));
+    operation_terminal(&path, Map::new()).unwrap();
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 2400.0));
+    testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| None)));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 3000.0));
+    testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 3600.0));
+    assert!(state.tick(&env.workspace, "probe", "@1", None, &server, 4200.0));
+}
+
+#[test]
+fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
+    let env = sleep_probe_env();
+    let server = sleep_server();
+    let mut state = SleepState::default();
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    for action in [
+        "ping",
+        "doctor",
+        "team-runtime",
+        "runtime-snapshot",
+        "node-result",
+        "turn-open",
+    ] {
+        admission().lock().unwrap().leases += 1;
+        let mut lease = RequestLease::default();
+        lease.classify(action);
+        assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 599.0));
+        drop(lease);
+    }
+    admission().lock().unwrap().leases += 1;
+    let mut usage = RequestLease::default();
+    usage.classify("send");
+    drop(usage);
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 601.0));
+    admission().lock().unwrap().leases += 1;
+    let mut reader = RequestLease::default();
+    reader.classify("ping");
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1201.0));
+    drop(reader);
+    assert!(state.tick(&env.workspace, "probe", "@1", None, &server, 1201.0));
+}
+
+#[test]
+fn test_sleep_drain_new_connection_cancels_retirement() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    struct Queued(Mutex<Option<UnixStream>>);
+    impl HivedServerApi for Queued {
+        fn close(&self) {
+            panic!("must continue serving");
+        }
+        fn accept_timeout(&self, _: f64) -> Option<UnixStream> {
+            self.0.lock().unwrap().take()
+        }
+    }
+    let env = sleep_probe_env();
+    let (mut client, accepted) = UnixStream::pair().unwrap();
+    client.write_all(b"{\"action\":\"send\"}").unwrap();
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    let server = Queued(Mutex::new(Some(accepted)));
+    let mut state = SleepState::default();
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!admission().lock().unwrap().closed);
+    assert!(display_events(&env, "hived.sleep").is_empty());
+    let mut answer = String::new();
+    client.read_to_string(&mut answer).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&answer).unwrap()["notAdmitted"],
+        true
+    );
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 601.0));
+    assert_eq!(
+        handle_request(
+            &env.workspace,
+            "probe",
+            "",
+            "",
+            "start",
+            &action_payload("ping")
+        )
+        .0["ok"],
+        true
+    );
+}
+
+#[test]
+fn test_send_wakes_a_sleeping_hived_and_delivers_once() {
+    let env = sleep_probe_env();
+    bus::init_workspace(Path::new(&env.workspace)).unwrap();
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    testhook::update(|h| {
+        h.open_server_socket = Some(Arc::new(|workspace| {
+            Ok(Box::new(open_server_socket(workspace)?) as Box<dyn HivedServerApi>)
+        }));
+        h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.serve_requests = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(*n <= 2);
+            true
+        }));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert!(!socket_path(&env.workspace).exists());
+    assert_eq!(display_events(&env, "hived.sleep").len(), 1);
+    let worker = Arc::new(Mutex::new(None));
+    let spawned = Arc::clone(&worker);
+    let started = Arc::new(Mutex::new(0));
+    let starts = Arc::clone(&started);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let sent = Arc::clone(&delivered);
+    let workspace = env.workspace.clone();
+    testhook::update(|h| {
+        h.monotonic = None;
+        wire_send(h, Path::new(&workspace));
+        h.agent_send = Some(Arc::new(move |_, body, _| {
+            sent.lock().unwrap().push(body.to_string());
+            Ok("udsWriteAccepted".into())
+        }));
+        h.popen = Some(Arc::new(move |argv, _| {
+            assert!(argv.iter().any(|arg| arg == "--hived"));
+            *starts.lock().unwrap() += 1;
+            let server = open_server_socket(&workspace).unwrap();
+            let ws = workspace.clone();
+            SHUTDOWN.store(false, Ordering::SeqCst);
+            reopen_admission();
+            *spawned.lock().unwrap() = Some(thread::spawn(move || {
+                while serve_requests(
+                    &server,
+                    &ws,
+                    "probe",
+                    "probe:1",
+                    "@1",
+                    "new-generation",
+                    0.1,
+                ) {}
+                server.close();
+            }));
+            4242
+        }));
+    });
+    let team = Team {
+        name: "probe".into(),
+        workspace: env.workspace.clone(),
+        tmux_window: "probe:1".into(),
+        tmux_window_id: "@1".into(),
+        ..Default::default()
+    };
+    let result = crate::send::request_send_payload(
+        &env.workspace,
+        &team,
+        "a",
+        "b",
+        "wake-message",
+        "",
+        "send",
+        false,
+    )
+    .unwrap();
+    assert!(result["seq"].as_i64().unwrap() > 0);
+    assert_eq!(*started.lock().unwrap(), 1);
+    assert_eq!(delivered.lock().unwrap().len(), 1);
+    assert!(delivered.lock().unwrap()[0].contains("wake-message"));
+    let answer = request_hived(&env.workspace, &action_payload("shutdown"), 1.0).unwrap();
+    assert_eq!(answer["ok"], true);
+    worker.lock().unwrap().take().unwrap().join().unwrap();
+    assert!(crate::registry::load("probe").is_some());
+}
+
+#[test]
+fn test_sleep_drain_new_node_cancels_without_interrupting_it() {
+    struct LateNode(String);
+    impl HivedServerApi for LateNode {
+        fn close(&self) {
+            panic!("new node keeps the desk awake");
+        }
+        fn accept_timeout(&self, _: f64) -> Option<UnixStream> {
+            prepare_operation(&self.0, "probe", "123", "nd-late", "worker", "node").unwrap();
+            None
+        }
+    }
+    let env = sleep_probe_env();
+    let server = LateNode(env.workspace.clone());
+    let mut state = SleepState::default();
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!admission().lock().unwrap().closed);
+    assert_eq!(pending_operations(&env.workspace), 1);
+    let record = saved_operation(Path::new(&env.workspace), "nd-late");
+    assert_eq!(record["state"], "prepared");
+    assert!(record.get("result").is_none());
+    assert!(display_events(&env, "hived.sleep").is_empty());
 }

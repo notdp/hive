@@ -288,6 +288,8 @@ Options:
   Logical ownership and OS parentage are separate columns. Missing observations
   are unknown. Tmux display observations use the caller's tmux server; engine
   records use the configured homes. Process discovery covers the OS snapshot.
+  A registered team with neither hived nor display is asleep; a team with
+  either is running. Incomplete observations remain unknown.
 
 Options:
   --json      Print a JSON array, one resource object per line.

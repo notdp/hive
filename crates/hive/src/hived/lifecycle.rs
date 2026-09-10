@@ -312,6 +312,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     let mut claude_view_state = ClaudeTickState::default();
     let mut status_state = StatusTickState::default();
     let mut display = DisplayProbe::new();
+    let mut sleep = SleepState::default();
     // `monotonic()` starts near zero, so a 0.0 seed would skip the first
     // periodic checks; negative infinity makes every one run on the first tick.
     let mut last_window_check = f64::NEG_INFINITY;
@@ -384,9 +385,9 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         if now - last_window_check >= 30.0 {
             last_window_check = now;
             // The registry entry is the team's existence; the tmux window
-            // is only its display. A dead window alone never retires the
-            // hived (engines keep running headless); only a *missing*
-            // registry file (`hive delete` removes it) with no display
+            // is only its display. A dead window starts the idle sleep
+            // check below; a missing registry file (`hive delete` removes
+            // it) with no display
             // window left behind it does. Corrupt or foreign-instance
             // entries are not "missing": never retire on a read that
             // might be wrong.
@@ -531,6 +532,16 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
                 Some(tick_members),
                 snap,
             );
+        }
+        if sleep.tick(
+            workspace,
+            team,
+            tmux_window_id,
+            snap.as_ref(),
+            server.as_ref(),
+            monotonic(),
+        ) {
+            break;
         }
     }
 

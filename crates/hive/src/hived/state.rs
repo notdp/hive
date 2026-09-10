@@ -92,6 +92,8 @@ pub(super) static FORCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(super) struct Admission {
     pub closed: bool,
     pub leases: usize,
+    pub readers: usize,
+    pub usage: u64,
 }
 
 pub(super) fn admission() -> &'static Mutex<Admission> {
@@ -99,11 +101,37 @@ pub(super) fn admission() -> &'static Mutex<Admission> {
     CELL.get_or_init(|| Mutex::new(Admission::default()))
 }
 
-pub(super) struct RequestLease;
+#[derive(Default)]
+pub(super) struct RequestLease {
+    read_only: bool,
+}
+
+impl RequestLease {
+    pub(super) fn classify(&mut self, action: &str) {
+        let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+        if read_only_request(action) {
+            self.read_only = true;
+            state.readers += 1;
+        } else {
+            state.usage = state.usage.wrapping_add(1);
+        }
+    }
+}
+
+pub(super) fn read_only_request(action: &str) -> bool {
+    matches!(
+        action,
+        "ping" | "doctor" | "team-runtime" | "runtime-snapshot" | "node-result" | "turn-open"
+    )
+}
 
 impl Drop for RequestLease {
     fn drop(&mut self) {
-        admission().lock().unwrap_or_else(|e| e.into_inner()).leases -= 1;
+        let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+        state.leases -= 1;
+        if self.read_only {
+            state.readers -= 1;
+        }
     }
 }
 

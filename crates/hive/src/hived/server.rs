@@ -259,7 +259,7 @@ fn serve_connection(
     tmux_window_id: &str,
     hived_started_at: &str,
     read_timeout: f64,
-    _lease: RequestLease,
+    mut lease: RequestLease,
 ) {
     let _ = conn.set_read_timeout(Some(Duration::from_secs_f64(read_timeout.max(0.001))));
     let mut raw: Vec<u8> = Vec::new();
@@ -278,6 +278,7 @@ fn serve_connection(
         Ok(Value::Object(map)) => map,
         _ => Map::new(),
     };
+    lease.classify(request.get("action").and_then(Value::as_str).unwrap_or(""));
     let (response, keep_running) = handle_request(
         workspace,
         team,
@@ -326,7 +327,7 @@ pub(crate) fn serve_requests(
                 break;
             }
             state.leases += 1;
-            RequestLease
+            RequestLease::default()
         };
         let Some(conn) = server.accept_timeout(remaining) else {
             break;
@@ -361,9 +362,9 @@ pub(crate) fn serve_requests(
 /// The coordinator owns this synchronous rejection while admission is shut.
 /// No handler or engine operation is started, and the reply is sent before
 /// the coordinator can proceed to teardown.
-pub(super) fn reject_draining_request(server: &dyn HivedServerApi) {
+pub(super) fn reject_draining_request(server: &dyn HivedServerApi) -> bool {
     let Some(mut conn) = server.accept_timeout(0.1) else {
-        return;
+        return false;
     };
     let timeout = Some(Duration::from_millis(100));
     let _ = conn.set_read_timeout(timeout);
@@ -379,4 +380,5 @@ pub(super) fn reject_draining_request(server: &dyn HivedServerApi) {
     let reply = b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining; request not admitted; retry later\"}\n";
     let _ = conn.write_all(reply);
     let _ = conn.shutdown(std::net::Shutdown::Write);
+    true
 }

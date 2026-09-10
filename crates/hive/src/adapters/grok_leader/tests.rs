@@ -3166,3 +3166,129 @@ fn test_a_member_kill_leaves_an_alias_rebound_to_another_launch_meanwhile() {
     assert!(!hive_dir.join("l-ab12.session").exists());
     assert!(hive_dir.join("l-cd34.sock").exists());
 }
+
+#[test]
+fn test_sleep_pool_observation_is_scoped_and_requires_idle_evidence() {
+    let _bed = setup();
+    let pool = GrokClientPool::new();
+    let key = "m-cedar.worker";
+    write_session_key(key, SID, CWD).unwrap();
+    let proc = FakeProc::new(Some(responder(None, vec![])));
+    let handed = Arc::clone(&proc);
+    set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
+    let client = Arc::new(GrokStdioClient::new(key).unwrap());
+    assert!(client.handshake());
+    pool.hold_for_test(key, client.clone());
+    assert_eq!(pool.idle_owned_keys("other"), Some(Vec::new()));
+    assert_eq!(pool.idle_owned_keys("cedar"), None);
+    proc.feed(&activity("working"));
+    settle(&client, |rt| rt.turn_open == Some(true));
+    assert_eq!(pool.idle_owned_keys("cedar"), None);
+    proc.feed(&activity("idle"));
+    settle(&client, |rt| rt.turn_open == Some(false));
+    assert_eq!(
+        pool.idle_owned_keys("cedar"),
+        Some(vec!["m-cedar.worker".into()])
+    );
+    fs::write(alias_path_for_key(key), "l-rebound").unwrap();
+    assert_eq!(
+        pool.idle_owned_keys("cedar"),
+        None,
+        "rebound key is not owned by the held client"
+    );
+    fs::remove_file(alias_path_for_key(key)).unwrap();
+    let rid = client.prompt_tracked("queued").unwrap();
+    assert_eq!(
+        pool.idle_owned_keys("cedar"),
+        None,
+        "outstanding prompt cannot be retired on idle notification alone"
+    );
+    proc.feed(&prompt_response(rid, "queued-prompt", "end_turn"));
+    settle_ended(&client, rid);
+    teardown(&client, &proc);
+    assert_eq!(
+        pool.idle_owned_keys("cedar"),
+        None,
+        "dead client cannot prove leader idle"
+    );
+}
+
+#[test]
+fn test_parked_member_keeps_session_and_alias_and_wakes_only_on_submission() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    let key = "m-cedar.worker";
+    let dir = bed.tmp.path().join("hive");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(alias_path_for_key(key), "l-cafe").unwrap();
+    write_session_key(key, SID, CWD).unwrap();
+    let session = session_path_for_key(key);
+    let mut record: Value = serde_json::from_slice(&fs::read(&session).unwrap()).unwrap();
+    record["extra"] = json!("preserved");
+    fs::write(&session, record.to_string()).unwrap();
+    fs::write(socket_path_for_key(key), "").unwrap();
+    set_process_listing(Vec::new);
+    park_daemon_key(key);
+    assert!(!socket_path_for_key(key).exists());
+    assert_eq!(alias_target(key).as_deref(), Some("l-cafe"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&session).unwrap()).unwrap(),
+        record
+    );
+    crate::registry::record_team(
+        "cedar",
+        CWD,
+        "123",
+        &[json!({"name":"worker", "cli":"grok"})
+            .as_object()
+            .unwrap()
+            .clone()],
+        "",
+    )
+    .unwrap();
+    let listeners = Arc::new(Mutex::new(Vec::new()));
+    let listening = Arc::clone(&listeners);
+    let starts = Arc::new(Mutex::new(0));
+    let starting = Arc::clone(&starts);
+    set_daemon_spawn(move |argv, _| {
+        *starting.lock().unwrap() += 1;
+        let socket = &argv[argv
+            .iter()
+            .position(|arg| arg == "--leader-socket")
+            .unwrap()
+            + 1];
+        assert!(socket.ends_with("l-cafe.sock"));
+        listening
+            .lock()
+            .unwrap()
+            .push(bind_leader_socket(std::path::Path::new(socket)));
+        Ok(Box::new(FakeDaemonChild {
+            pid: 7777,
+            returncode: None,
+            panic_on_terminate: false,
+        }))
+    });
+    let proc = FakeProc::new(Some(responder(Some(on_prompt_queue_echo()), vec![])));
+    let handed = Arc::clone(&proc);
+    set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
+    let pool = GrokClientPool::new();
+    assert!(pool.runtime_for_key(key).is_none());
+    assert_eq!(*starts.lock().unwrap(), 0);
+    assert_eq!(pool.send_to_key(key, "wake"), Some(PROMPT_QUEUED));
+    assert_eq!(*starts.lock().unwrap(), 1);
+    let sent = proc.sent();
+    let load = sent
+        .iter()
+        .find(|msg| msg["method"] == "session/load")
+        .unwrap();
+    assert_eq!(load["params"]["sessionId"], SID);
+    assert!(sent.iter().all(|msg| msg["method"] != "session/new"));
+    assert_eq!(
+        sent.iter()
+            .filter(|msg| msg["method"] == "session/prompt")
+            .count(),
+        1
+    );
+    let client = pool.client_for_key(key).unwrap();
+    teardown(&client, &proc);
+}
