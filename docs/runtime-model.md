@@ -43,16 +43,23 @@ Consequences across modules:
   `priorCliSessionIds`; the roster row still names the old id, so the member
   reads as gone. Every 30s the hived (`hived/succession.rs`) moves such a
   row to the record's current session when, and only when, that record
-  lists the row's session as a prior, the current one is live, no member
-  anywhere holds it, and no other row of any team resolves to it (the tick
+  lists the row's session as a prior, the old one is no longer live, the
+  current one is live, no member anywhere holds it, and no other row of any team resolves to it (the tick
   plans over every team's rows and commits its own); the write is a
   compare-and-set under the store lock (`registry::commit_succession`) on
   the observed session *and* host id, so a row rebound or recreated since
   the observation is left alone, and a desktop record the app keeps under
   another account that cannot be listed makes the whole read unknown, and
   `member.session_succeeded` is emitted only for a write that landed
-  (`member.session_refused` names the reason otherwise). A conversation the
-  human forked has a stable id of its own and never matches — a fork is a
+  (`member.session_refused` names the reason otherwise). After a session-id
+  lookup fails, the CLI identity rung can make the same move synchronously:
+  a validated desktop host marker selects the row, and `succession.rs`
+  supplies the same planner both callers use. The CLI reads the desktop and
+  session records and commits through the same registry CAS, without tmux
+  or a hived; only a successful CLI write emits the success event with
+  `via: "cli"`. This lets a desktop conversation recover its membership
+  after the desk sleeps; an existing session-id binding still wins.
+  A conversation the human forked has a stable id of its own and never matches — a fork is a
   new session, not the member. A CLI's own rewind keeps its session id and
   needs nothing. Out of scope: a bg job member's `/clear` (its roster
   session id is also its job address; following it needs a job id on the

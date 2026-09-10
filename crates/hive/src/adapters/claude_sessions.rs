@@ -188,6 +188,18 @@ pub(crate) fn pid_alive(pid: i32) -> bool {
 /// bare mode) or is a warm spare is not a session anyone is talking to, and
 /// is left out — the same three cuts `/list-agents` makes.
 pub fn list_sessions() -> Vec<ClaudeSession> {
+    session_registrations()
+        .into_iter()
+        .map(|mut session| {
+            session.title = session_title(&session.session_id);
+            session
+        })
+        .collect()
+}
+
+/// Live registration records without transcript-derived titles. Identity and
+/// succession need only these fields and do not read conversation history.
+pub(crate) fn session_registrations() -> Vec<ClaudeSession> {
     let root = registry_dir();
     if !root.is_dir() {
         return Vec::new();
@@ -220,7 +232,6 @@ pub fn list_sessions() -> Vec<ClaudeSession> {
             continue;
         }
         let session_id = truthy_str(obj.get("sessionId"));
-        let title = session_title(&session_id);
         rows.push(ClaudeSession {
             name,
             pid,
@@ -229,7 +240,7 @@ pub fn list_sessions() -> Vec<ClaudeSession> {
             entrypoint: truthy_str(obj.get("entrypoint")),
             socket_path: sock,
             session_id,
-            title,
+            title: String::new(),
         });
     }
     rows.sort_by(|a, b| a.name.cmp(&b.name).then(a.pid.cmp(&b.pid)));
