@@ -445,7 +445,8 @@ pub(crate) fn archive_team(
         let same_instance = created_at_string(&entry) == expected.created_at;
         let same_clock = cold_since(&entry) == Some(expected.cold_since)
             && at - expected.cold_since >= COLD_AFTER_SECONDS;
-        let our_intent = is_closing(&entry, at)
+        // Admission uses wall time too; the scan timestamp cannot renew a lease.
+        let our_intent = is_closing(&entry, epoch_now())
             && closing_of(&entry).is_some_and(|(_, by)| by == expected.closing_by);
         if !same_instance || !same_clock || !our_intent || is_kept(&entry) {
             bail!("team '{team}' changed while the collector was closing it; left alone");
@@ -817,16 +818,17 @@ fn open_close_intent(
     now: f64,
 ) -> Result<bool> {
     crate::registry::update_entry(team, |entry| {
+        let opened_at = epoch_now();
         if created_at_string(entry) != expected_created
             || cold_since(entry) != Some(expected_since)
             || now - expected_since < COLD_AFTER_SECONDS
             || is_kept(entry)
-            || is_closing(entry, now)
+            || is_closing(entry, opened_at)
         {
             return false;
         }
         let mut gc = gc_object(entry);
-        gc.insert("closing".to_string(), json!({"at": now, "by": by}));
+        gc.insert("closing".to_string(), json!({"at": opened_at, "by": by}));
         entry.insert("gc".to_string(), Value::Object(gc));
         true
     })
@@ -1946,7 +1948,7 @@ mod tests {
         // the close intent went with the entry; no trace of it in the payload
         // gates a restore
         let entry = crate::registry::load_at(&archive.payload().join("team.json")).unwrap();
-        assert!(is_closing(&entry, T0 + 30.0 * DAY));
+        assert!(is_closing(&entry, epoch_now()));
 
         // the trash keeps it a day short of its own deadline…
         let kept = run_at(Mode::Manual, T0 + 59.0 * DAY).unwrap();
@@ -2195,6 +2197,31 @@ mod tests {
         set_cold_since("honey", Some(since)).unwrap();
         assert!(archive_team("honey", "expired", false, now, Some(&expected)).is_ok());
         assert!(crate::registry::load("honey").is_none());
+    }
+
+    #[test]
+    fn test_archive_rejects_an_expired_intent_even_with_an_earlier_scan_time() {
+        let (_tmp, _env, _ledger) = home();
+        team("honey", &[]);
+        let scanned_at = epoch_now() - CLOSING_TTL_SECONDS - 10.0;
+        let since = scanned_at - 40.0 * DAY;
+        crate::registry::update_entry("honey", |entry| {
+            entry.insert(
+                "gc".to_string(),
+                json!({"coldSince": since, "closing": {"at": scanned_at, "by": "gc-old"}}),
+            );
+            true
+        })
+        .unwrap();
+        let expected = Expected {
+            created_at: "100.0".to_string(),
+            cold_since: since,
+            closing_by: "gc-old".to_string(),
+        };
+
+        assert!(archive_team("honey", "expired", false, scanned_at, Some(&expected)).is_err());
+        assert!(crate::registry::load("honey").is_some());
+        assert!(list_archives().is_empty());
     }
 
     #[test]
