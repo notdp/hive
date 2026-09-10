@@ -1121,15 +1121,7 @@ fn test_same_socket_normalizes_private_tmp() {
 }
 
 #[test]
-fn test_shell_start_command_quotes_cwd_before_interactive_shell() {
-    assert_eq!(
-        shell_start_command("/work/a'b $HOME"),
-        r#"cd '/work/a'\''b $HOME' && exec "$SHELL" -l"#
-    );
-}
-
-#[test]
-fn test_pane_creation_passes_cwd_and_bootstraps_only_default_shells() {
+fn test_pane_creation_passes_cwd_and_keeps_explicit_commands() {
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path().to_str().unwrap();
     let calls = capture_run(0, "%9");
@@ -1141,12 +1133,12 @@ fn test_pane_creation_passes_cwd_and_bootstraps_only_default_shells() {
     let calls = calls.borrow();
     for (index, (args, _, _)) in calls.iter().enumerate() {
         assert!(args.windows(2).any(|pair| pair == ["-c", cwd]));
-        let expected = match index {
-            3 => "hive view session".to_string(),
-            4 => "claude attach job".to_string(),
-            _ => shell_start_command(cwd),
-        };
-        assert_eq!(args.last(), Some(&expected));
+        let last = args.last().map(String::as_str);
+        match index {
+            3 => assert_eq!(last, Some("hive view session")),
+            4 => assert_eq!(last, Some("claude attach job")),
+            _ => assert!(last == Some(cwd) || last.is_some_and(|arg| arg.starts_with("#{"))),
+        }
     }
 }
 

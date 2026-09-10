@@ -227,7 +227,7 @@ pub fn list_tty_processes(tty: &str) -> Vec<TTYProcessInfo> {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let result = match exec_capture(&argv, 5, None) {
+    let result = match exec_capture(&argv, 5, None, None) {
         Ok(r) => r,
         // TimeoutExpired -> []; a missing ps binary degrades the same way.
         Err(_) => return Vec::new(),

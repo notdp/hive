@@ -1,4 +1,4 @@
-use super::run::run;
+use super::run::{run, run_from};
 use std::process::Command;
 
 // --- Session ---
@@ -12,6 +12,14 @@ pub fn has_session(name: &str) -> bool {
 }
 
 /// Create a detached tmux session. Returns the initial pane id.
+///
+/// The client runs from `$HIVE_HOME`: when no server is up, tmux forks the
+/// server out of this client and the server keeps that working directory
+/// for life. A caller's checkout or worktree can be deleted later, and a
+/// server whose own cwd is gone cannot `getcwd()`, after which tmux skips
+/// the `chdir` for every `-c` it is given (spawn.c) and every new pane is
+/// born in the dead directory. hive's own root lives as long as hive's
+/// state does; `/` stands in when it cannot be created.
 pub fn new_session(
     name: &str,
     width: u32,
@@ -38,11 +46,15 @@ pub fn new_session(
     if let Some(cwd) = cwd {
         args.extend(["-c", cwd]);
     }
-    let shell_command = cwd.map(super::shell_start_command);
-    if let Some(command) = command.or(shell_command.as_deref()) {
+    if let Some(command) = command {
         args.push(command);
     }
-    let r = run(&args, true, 5)?;
+    let root = crate::paths::hive_home();
+    let from = match std::fs::create_dir_all(&root) {
+        Ok(()) => root.to_string_lossy().into_owned(),
+        Err(_) => "/".to_string(),
+    };
+    let r = run_from(&args, true, 5, Some(&from))?;
     Ok(r.stdout.trim().to_string())
 }
 
@@ -85,8 +97,7 @@ pub fn new_window(
         args.push(cwd);
     }
     args.extend(["-P", "-F", "#{session_name}:#{window_index}\t#{pane_id}"]);
-    let shell_command = cwd.map(super::shell_start_command);
-    if let Some(command) = command.or(shell_command.as_deref()) {
+    if let Some(command) = command {
         args.push(command);
     }
     let r = run(&args, true, 5)?;

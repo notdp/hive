@@ -485,10 +485,6 @@ mod tests {
                 "#{pane_id}",
                 "-c",
                 &crate::paths::getcwd(),
-                &format!(
-                    "cd {} && exec \"$SHELL\" -l",
-                    crate::agent::shell_escape(&crate::paths::getcwd())
-                ),
             ]
         ));
         assert!(has_row(&argv, &["rename-window", "-t", "honey:1", "honey"]));
@@ -612,10 +608,6 @@ mod tests {
                 "#{pane_id}",
                 "-c",
                 "/tmp",
-                &format!(
-                    "cd {} && exec \"$SHELL\" -l",
-                    crate::agent::shell_escape("/tmp")
-                ),
             ]
         ));
         assert_eq!(count(&argv, "new-window"), 0);
