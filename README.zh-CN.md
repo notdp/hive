@@ -47,13 +47,16 @@ hive plugin setup
 ## 在 agent 会话中开始
 
 ```bash
-# 一次性设置：在 shell rc 里加 eval "$(hive shell-init zsh)"
-# 在 tmux 里通过 hive 的启动器启动你要用的 agent
+# 一次性设置：在 shell rc 里加 eval "$(hive shell-init zsh)"，
+# 放在 installer 已写入的 PATH 那一行之后
+# 在这里启动 agent，在不在 tmux 里都行
 $ hclaude      # 或：hcodex / hgrok
 
 # 在 agent 会话里输入：
 /hive:hive
 ```
+
+用 `hclaude`、`hcodex` 或 `hgrok`（等价于 `hive claude`、`hive codex`、`hive grok`）开启一个受管会话。在 tmux 外，这些启动器就在当前终端里显示它。建团或入队会把同一 session 的查看器移进团窗口，并在这里打开该窗口；单独聊天不会创建 tmux session。detach 回到 shell；恢复一个已入册的 session 会打开它的团显示。裸终端 CLI 必须先通过受管启动器恢复。桌面 app 的 Claude session 直接入队，团窗口里显示一个只读镜像。
 
 agent 会把当前 pane 立为这个队的 orch，之后按任务需要 spawn 成员。此后的交互发生在与 agent 的对话中，由 agent 管理这支队伍。
 
