@@ -25,6 +25,7 @@ pub mod runtime_snapshot;
 pub mod send;
 pub mod settings;
 pub mod shell;
+pub(crate) mod succession;
 pub mod team;
 pub mod team_display;
 pub(crate) mod terminal_handoff;

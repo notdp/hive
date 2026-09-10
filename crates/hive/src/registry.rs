@@ -256,8 +256,8 @@ fn member_row(member: &Map<String, Value>) -> Map<String, Value> {
 }
 
 /// Move a Claude session member from the session it was enrolled under to
-/// the one its desktop conversation now runs (`hived/succession`): the
-/// hived's one roster write that changes an identity key, so it is a
+/// the one its desktop conversation now runs (`succession`): the hived's
+/// periodic reconcile and the CLI identity fallback share this
 /// compare-and-set under the store lock. Writes only when *name* on
 /// *team* (the instance *created_at* names) still carries *expected_old*
 /// under *expected_host* — the pair the observation was made against — and

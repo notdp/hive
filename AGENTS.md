@@ -72,11 +72,14 @@ behavior is documented in the modules themselves.
   `GROK_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`); `tmux/` is display,
   takes explicit targets, and reads neither markers nor the registry. The
   one host marker, the desktop app's `CLAUDE_CODE_HOST_SESSION_ID`, is read
-  by `adapters/claude_desktop.rs` at enrol alone and never as identity: it
-  stamps `hostSessionId` on the roster row so the hived can follow the
-  conversation when the desktop restarts the CLI under a new session id
-  (`hived/succession.rs`); the who-am-I ladder still matches the session
-  id exactly.
+  by `adapters/claude_desktop.rs` at enrol and when session identity fails.
+  Enrol stamps `hostSessionId` on the roster row; the hived's periodic
+  reconcile and the CLI's synchronous fallback share the succession planner
+  (`succession.rs`) when the desktop restarts its CLI under a new session id.
+  The host marker selects a candidate, checked against the desktop record,
+  live sessions and existing bindings before a registry CAS; it is not
+  identity by itself. The who-am-I ladder still matches an existing session
+  id first, and synchronous succession needs neither tmux nor a hived.
 - `cli/` is one module per domain of verbs (`team`, `member`, `attach`,
   `fork`, `workflow`, `launch`, `setup`, `update`, `worktree`) that parse, print and
   exit; the logic they call lives in the crate and is what `run_node`

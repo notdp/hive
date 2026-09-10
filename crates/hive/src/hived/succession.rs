@@ -6,14 +6,13 @@
 //! the desktop restarts the CLI under a new session id and its record moves
 //! `cliSessionId` on, keeping the old id under `priorCliSessionIds`; the
 //! roster row still names the old one, so the member reads as gone and its
-//! own `hive` calls find no team. This tick moves the row to the
-//! conversation's current session — the hived's recalibration, never a
-//! member's own action — and only for that exact shape: the desktop's
-//! record for the row's own conversation names a different current session
+//! own `hive` calls find no team. This tick and the CLI identity fallback
+//! use `crate::succession` to plan the same move, only for that exact shape:
+//! the desktop's record for the row's own conversation names a different current session
 //! *and* lists the row's session among its priors. A conversation the human
 //! forked has a stable id of its own, so it never matches; a target session
-//! that is not live, or that any member anywhere already holds, is refused;
-//! two rows resolving to one target are both refused; and the write itself
+//! that is not live, an old session still live, or a target any member
+//! anywhere already holds is refused; two rows resolving to one target are both refused; and the write itself
 //! is a compare-and-set under the store lock (`registry::commit_succession`),
 //! so a row rebound or recreated between the observation and the write is
 //! left alone. An event is emitted only for a write that landed.
@@ -28,151 +27,14 @@ use super::seams::{
     hooked_commit_succession, hooked_cs_list_sessions, hooked_desktop_record,
     hooked_notify_debug_emit,
 };
+#[cfg(test)]
 use crate::adapters::claude_desktop::DesktopRecord;
+#[cfg(test)]
 use crate::adapters::claude_sessions::ClaudeSession;
 
-pub(super) const EVENT_SUCCEEDED: &str = "member.session_succeeded";
-pub(super) const EVENT_REFUSED: &str = "member.session_refused";
-
-/// A roster row this tick considers: a claude member with a host session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Row {
-    pub team: String,
-    pub name: String,
-    pub session_id: String,
-    pub host_session_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum Plan {
-    Move {
-        team: String,
-        name: String,
-        from: String,
-        host: String,
-        to: String,
-    },
-    Refused {
-        team: String,
-        name: String,
-        to: String,
-        reason: &'static str,
-    },
-}
-
-/// What each row's desktop record says, against the live sessions and the
-/// sessions members already hold. *rows* is every team's, so two rows of
-/// different teams resolving to one session are seen converging. Rows
-/// whose conversation has not moved, or whose record is unknown, produce
-/// nothing.
-pub(super) fn plan_successions(
-    rows: &[Row],
-    record: impl Fn(&str) -> Option<DesktopRecord>,
-    live: &[ClaudeSession],
-    taken: impl Fn(&str) -> bool,
-) -> Vec<Plan> {
-    let mut plans: Vec<Plan> = Vec::new();
-    for row in rows {
-        let Some(rec) = record(&row.host_session_id) else {
-            continue;
-        };
-        let to = rec.cli_session_id;
-        if to == row.session_id || !rec.prior_cli_session_ids.contains(&row.session_id) {
-            continue;
-        }
-        let (team, name) = (row.team.clone(), row.name.clone());
-        if !live.iter().any(|s| s.session_id == to) {
-            plans.push(Plan::Refused {
-                team,
-                name,
-                to,
-                reason: "target_not_live",
-            });
-        } else if taken(&to) {
-            plans.push(Plan::Refused {
-                team,
-                name,
-                to,
-                reason: "target_taken",
-            });
-        } else {
-            plans.push(Plan::Move {
-                team,
-                name,
-                from: row.session_id.clone(),
-                host: row.host_session_id.clone(),
-                to,
-            });
-        }
-    }
-    // two rows converging on one session: neither can be right
-    let targets: Vec<String> = plans
-        .iter()
-        .filter_map(|p| match p {
-            Plan::Move { to, .. } => Some(to.clone()),
-            Plan::Refused { .. } => None,
-        })
-        .collect();
-    plans
-        .into_iter()
-        .map(|p| match p {
-            Plan::Move { team, name, to, .. }
-                if targets.iter().filter(|t| **t == to).count() > 1 =>
-            {
-                Plan::Refused {
-                    team,
-                    name,
-                    to,
-                    reason: "converge",
-                }
-            }
-            other => other,
-        })
-        .collect()
-}
-
-fn created_at_key(entry: &serde_json::Map<String, Value>) -> String {
-    match entry.get("createdAt") {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Number(n)) => n.to_string(),
-        _ => String::new(),
-    }
-}
-
-fn rows_of(entry: &serde_json::Map<String, Value>) -> Vec<Row> {
-    let team = entry
-        .get("team")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    entry
-        .get("members")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_object)
-                .filter(|m| m.get("cli").and_then(Value::as_str) == Some("claude"))
-                .filter_map(|m| {
-                    let host = m
-                        .get(crate::registry::HOST_SESSION_FIELD)
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let sid = m
-                        .get("sessionId")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    let name = m.get("name").and_then(Value::as_str).unwrap_or_default();
-                    (!team.is_empty() && !host.is_empty() && !sid.is_empty() && !name.is_empty())
-                        .then(|| Row {
-                            team: team.to_string(),
-                            name: name.to_string(),
-                            session_id: sid.to_string(),
-                            host_session_id: host.to_string(),
-                        })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
+use crate::succession::{
+    created_at_key, plan_successions, rows_of, Plan, Row, EVENT_REFUSED, EVENT_SUCCEEDED,
+};
 
 /// The tick: plan over every team's rows (so a target two teams' rows
 /// converge on is refused for both), commit and report only *team*'s.
@@ -349,6 +211,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_plan_refuses_the_previous_session_while_it_is_live() {
+        let plans = plan_successions(
+            &[row("orch", "A", "local_h")],
+            |_| Some(rec("C", &["A"])),
+            &[live("A"), live("C")],
+            |_| false,
+        );
+        assert!(matches!(
+            &plans[..],
+            [Plan::Refused {
+                reason: "old_still_live",
+                ..
+            }]
+        ));
+    }
+
     fn m(pairs: &[(&str, &str)]) -> Map<String, Value> {
         pairs
             .iter()
@@ -505,5 +384,101 @@ mod tests {
             .all(|(e, f)| e == EVENT_REFUSED && f["reason"] == "converge"));
         assert_eq!(got[0].1["team"], "honey");
         assert_eq!(got[1].1["team"], "comb");
+    }
+    #[test]
+    fn test_cli_and_hived_succession_share_one_registry_cas() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = crate::testenv::iso(tmp.path());
+        env.set("HOME", tmp.path());
+        env.set("CLAUDE_HOME", tmp.path().join(".claude"));
+        env.set("CLAUDE_CODE_HOST_SESSION_ID", "local_h");
+        env.set("CLAUDE_CODE_MESSAGING_SOCKET", tmp.path().join("new.sock"));
+        let workspace = tmp.path().join("workspace");
+        record_team(
+            "honey",
+            workspace.to_str().unwrap(),
+            "1.0",
+            &[m(&[
+                ("name", "orch"),
+                ("cli", "claude"),
+                ("sessionId", "A"),
+                (HOST_SESSION_FIELD, "local_h"),
+            ])],
+            "",
+        )
+        .unwrap();
+        let sessions = tmp.path().join(".claude/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("new.json"),
+            json!({
+                "name":"new", "pid":std::process::id(), "kind":"interactive",
+                "entrypoint":"claude-desktop", "messagingSocketPath":tmp.path().join("new.sock"),
+                "sessionId":"C",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let records = tmp
+            .path()
+            .join("Library/Application Support/Claude/claude-code-sessions/account/org");
+        std::fs::create_dir_all(&records).unwrap();
+        std::fs::write(
+            records.join("local_h.json"),
+            json!({
+                "cliSessionId":"C", "priorCliSessionIds":["A"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let (arrived, ready) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let wait = Mutex::new(wait);
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let captured = outcomes.clone();
+        let _guard = testhook::install(testhook::Hook {
+            cs_list_sessions: Some(Arc::new(|| vec![live("C")])),
+            desktop_record: Some(Arc::new(|_| Some(rec("C", &["A"])))),
+            commit_succession: Some(Arc::new(move |team, name, old, host, new, created| {
+                arrived.send(()).unwrap();
+                wait.lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                let outcome =
+                    crate::registry::commit_succession(team, name, old, host, new, created)?;
+                captured.lock().unwrap().push(outcome);
+                Ok(outcome)
+            })),
+            notify_debug_emit: Some(Arc::new(crate::notify_debug::emit)),
+            ..testhook::Hook::default()
+        });
+        let ws = workspace.clone();
+        let tick = std::thread::spawn(move || reconcile_successions(ws.to_str().unwrap(), "honey"));
+        ready
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(crate::identity::default_team().as_deref(), Some("honey"));
+        assert_eq!(crate::identity::default_agent().as_deref(), Some("orch"));
+        release.send(()).unwrap();
+        tick.join().unwrap();
+        assert_eq!(*outcomes.lock().unwrap(), vec!["taken"]);
+        assert_eq!(
+            crate::registry::load("honey").unwrap()["members"][0]["sessionId"],
+            "C"
+        );
+        let log =
+            std::fs::read_to_string(crate::notify_debug::log_path(workspace.to_str().unwrap()))
+                .unwrap();
+        let events: Vec<Value> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let success: Vec<_> = events
+            .iter()
+            .filter(|event| event["event"] == EVENT_SUCCEEDED)
+            .collect();
+        assert_eq!(success.len(), 1);
+        assert_eq!(success[0]["via"], "cli");
     }
 }

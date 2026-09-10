@@ -286,8 +286,105 @@ pub(crate) fn session_member_binding() -> Map<String, Value> {
 }
 
 fn claude_session_member() -> Option<(String, String)> {
-    let session = crate::adapters::claude_sessions::self_session()?;
-    crate::registry::member_for_session(&session.session_id, None)
+    let socket = crate::adapters::claude_sessions::own_socket();
+    if socket.is_empty() {
+        return None;
+    }
+    let session = crate::adapters::claude_sessions::session_registrations()
+        .into_iter()
+        .find(|session| session.socket_path == socket)?;
+    crate::registry::member_for_session(&session.session_id, None).or_else(|| {
+        succeed_desktop_member(&session)
+            // The hived may have completed succession while the fallback observed it.
+            .or_else(|| crate::registry::member_for_session(&session.session_id, None))
+    })
+}
+
+/// Recover a desktop binding after its CLI session changed while the hived slept.
+/// The host marker selects a candidate; the shared planner checks the move.
+fn succeed_desktop_member(
+    session: &crate::adapters::claude_sessions::ClaudeSession,
+) -> Option<(String, String)> {
+    use crate::adapters::{claude_desktop, claude_sessions};
+    use crate::succession::{created_at_key, plan_successions, rows_of, Plan, EVENT_SUCCEEDED};
+
+    let host = claude_desktop::enrol_host_session_id(session)?;
+    let entries = crate::registry::list_entries();
+    let rows: Vec<_> = entries.iter().flat_map(rows_of).collect();
+    if !rows.iter().any(|row| row.host_session_id == host) {
+        return None;
+    }
+    let live = claude_sessions::session_registrations();
+    let plans = plan_successions(&rows, claude_desktop::desktop_record, &live, |sid| {
+        crate::registry::member_for_session(sid, None).is_some()
+    });
+    for plan in plans {
+        let Plan::Move {
+            team,
+            name,
+            from,
+            host: planned_host,
+            to,
+        } = plan
+        else {
+            continue;
+        };
+        if planned_host != host || to != session.session_id {
+            continue;
+        }
+        let entry = entries
+            .iter()
+            .find(|entry| map_str(entry, "team") == team)?;
+        let created = created_at_key(entry);
+        // An incomplete legacy entry cannot authorize an identity write.
+        created
+            .parse::<f64>()
+            .ok()
+            .filter(|at| at.is_finite() && *at > 0.0)?;
+        let outcome =
+            crate::registry::commit_succession(&team, &name, &from, &host, &to, &created).ok()?;
+        if outcome == "written" {
+            let workspace = map_str(entry, "workspace");
+            let workspace = if workspace.is_empty() {
+                crate::registry::team_dir(&team)?
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                crate::paths::expanduser(&workspace)
+            };
+            crate::notify_debug::emit(
+                &workspace,
+                EVENT_SUCCEEDED,
+                &[
+                    ("team", Value::from(team.as_str())),
+                    ("member", Value::from(name.as_str())),
+                    ("from", Value::from(from.as_str())),
+                    ("to", Value::from(to.as_str())),
+                    ("hostSessionId", Value::from(host.as_str())),
+                    ("reason", Value::from(outcome)),
+                    ("via", Value::from("cli")),
+                ],
+            );
+        }
+        // A concurrent hived can win the same CAS. Use its completed move,
+        // but never a different instance or a binding another writer chose.
+        let current = crate::registry::load(&team)?;
+        if current.get("createdAt") != entry.get("createdAt") {
+            return None;
+        }
+        return current
+            .get("members")?
+            .as_array()?
+            .iter()
+            .any(|row| {
+                row["name"] == name
+                    && row["cli"] == "claude"
+                    && row["sessionId"] == to
+                    && row["hostSessionId"] == host
+            })
+            .then_some((team, name));
+    }
+    None
 }
 
 /// The pane's own tags, or — with no pane identity — the session row.
@@ -718,6 +815,175 @@ mod tests {
         // A session on no roster resolves nothing.
         env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/ghost.sock");
         assert_eq!(default_team(), None);
+    }
+
+    fn desktop_fixture(tmp: &std::path::Path) -> (EnvGuard, std::path::PathBuf) {
+        let mut env = isolated(tmp);
+        env.set("HOME", tmp);
+        env.set("CLAUDE_HOME", tmp.join(".claude"));
+        env.set("CLAUDE_CODE_MESSAGING_SOCKET", tmp.join("new.sock"));
+        env.set("CLAUDE_CODE_HOST_SESSION_ID", "local_conversation");
+        let workspace = tmp.join("workspace");
+        crate::registry::record_team(
+            "wasp",
+            workspace.to_str().unwrap(),
+            "1.0",
+            &[
+                serde_json::json!({"name":"orch", "cli":"claude", "sessionId":"old",
+                "hostSessionId":"local_conversation", "custom":"preserved"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ],
+            "",
+        )
+        .unwrap();
+        crate::registry::update_entry("wasp", |entry| {
+            entry["members"][0]["custom"] = Value::from("preserved");
+            true
+        })
+        .unwrap();
+        let sessions = tmp.join(".claude/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("new.json"),
+            serde_json::json!({
+                "name":"new", "pid":std::process::id(), "kind":"interactive",
+                "entrypoint":"claude-desktop", "messagingSocketPath":tmp.join("new.sock"),
+                "sessionId":"new",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let records =
+            tmp.join("Library/Application Support/Claude/claude-code-sessions/account/org");
+        std::fs::create_dir_all(&records).unwrap();
+        std::fs::write(
+            records.join("local_conversation.json"),
+            serde_json::json!({
+                "cliSessionId":"new", "priorCliSessionIds":["old"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+        set_run_override(|_, _, _| panic!("desktop identity must not call tmux"));
+        (env, workspace)
+    }
+
+    #[test]
+    fn test_desktop_succession_recovers_identity_without_hived_or_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_env, workspace) = desktop_fixture(tmp.path());
+        assert!(crate::context::load_current_context().is_empty());
+        assert!(!crate::hived::socket_path(workspace.to_str().unwrap()).exists());
+        assert_eq!(default_team().as_deref(), Some("wasp"));
+        assert_eq!(default_agent().as_deref(), Some("orch"));
+        let entry = crate::registry::load("wasp").unwrap();
+        assert_eq!(entry["members"][0]["sessionId"], "new");
+        assert_eq!(entry["members"][0]["custom"], "preserved");
+        assert_eq!(entry["createdAt"], "1.0");
+        assert!(!crate::hived::socket_path(workspace.to_str().unwrap()).exists());
+        let log =
+            std::fs::read_to_string(crate::notify_debug::log_path(workspace.to_str().unwrap()))
+                .unwrap();
+        let events: Vec<Value> = log
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event"], crate::succession::EVENT_SUCCEEDED);
+        assert_eq!(events[0]["via"], "cli");
+        assert_eq!(events[0]["from"], "old");
+        assert_eq!(events[0]["to"], "new");
+    }
+
+    #[test]
+    fn test_desktop_succession_refuses_an_old_session_still_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_env, workspace) = desktop_fixture(tmp.path());
+        std::fs::write(tmp.path().join(".claude/sessions/old.json"), serde_json::json!({
+            "name":"old", "pid":std::process::id(), "messagingSocketPath":tmp.path().join("old.sock"),
+            "sessionId":"old",
+        }).to_string()).unwrap();
+        assert_eq!(default_team(), None);
+        assert_eq!(default_agent(), None);
+        assert_eq!(
+            crate::registry::load("wasp").unwrap()["members"][0]["sessionId"],
+            "old"
+        );
+        assert!(!crate::notify_debug::log_path(workspace.to_str().unwrap()).exists());
+    }
+
+    #[test]
+    fn test_desktop_succession_requires_the_host_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut env, workspace) = desktop_fixture(tmp.path());
+        env.remove("CLAUDE_CODE_HOST_SESSION_ID");
+        assert_eq!(default_team(), None);
+        assert_eq!(default_agent(), None);
+        assert_eq!(
+            crate::registry::load("wasp").unwrap()["members"][0]["sessionId"],
+            "old"
+        );
+        assert!(!crate::notify_debug::log_path(workspace.to_str().unwrap()).exists());
+    }
+
+    #[test]
+    fn test_desktop_succession_does_not_take_another_teams_binding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_env, workspace) = desktop_fixture(tmp.path());
+        crate::registry::record_team(
+            "other",
+            "",
+            "2.0",
+            &[
+                serde_json::json!({"name":"keeper", "cli":"claude", "sessionId":"new"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ],
+            "",
+        )
+        .unwrap();
+        let session = crate::adapters::claude_sessions::self_session().unwrap();
+        assert_eq!(succeed_desktop_member(&session), None);
+        assert_eq!(
+            crate::registry::load("wasp").unwrap()["members"][0]["sessionId"],
+            "old"
+        );
+        // An already registered session retains its identity; the host fallback
+        // is not a stronger rung that can override that binding.
+        assert_eq!(default_team().as_deref(), Some("other"));
+        assert_eq!(default_agent().as_deref(), Some("keeper"));
+        assert!(!crate::notify_debug::log_path(workspace.to_str().unwrap()).exists());
+    }
+
+    #[test]
+    fn test_desktop_succession_refuses_converging_roster_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (_env, _) = desktop_fixture(tmp.path());
+        crate::registry::record_team(
+            "other",
+            "",
+            "2.0",
+            &[
+                serde_json::json!({"name":"orch", "cli":"claude", "sessionId":"old",
+                "hostSessionId":"local_conversation"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            ],
+            "",
+        )
+        .unwrap();
+        assert_eq!(default_team(), None);
+        assert_eq!(default_agent(), None);
+        for team in ["wasp", "other"] {
+            assert_eq!(
+                crate::registry::load(team).unwrap()["members"][0]["sessionId"],
+                "old"
+            );
+        }
     }
 
     #[test]
