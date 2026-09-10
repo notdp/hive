@@ -579,7 +579,8 @@ pub(crate) fn fake_hived_runtime() -> &'static Mutex<Option<Map<String, Value>>>
 }
 
 /// The runtime the team's hived reports, when there is a hived: Ok(None)
-/// with no socket, Err when the socket is there and nobody answers.
+/// with no socket — or a socket file nobody listens on, a hived that died
+/// without cleaning up — and Err when one listens and does not answer.
 fn hived_runtime(workspace: &str, team: &str) -> Result<Option<Map<String, Value>>, String> {
     #[cfg(test)]
     if let Some(runtime) = fake_hived_runtime().lock().ok().and_then(|r| r.clone()) {
@@ -588,9 +589,13 @@ fn hived_runtime(workspace: &str, team: &str) -> Result<Option<Map<String, Value
     if !crate::hived::socket_path(workspace).exists() {
         return Ok(None);
     }
-    crate::hived::request_team_runtime(workspace, team)
-        .map(Some)
-        .ok_or_else(|| "hived holds the socket but does not answer".to_string())
+    match crate::hived::request_team_runtime_answer(workspace, team) {
+        Ok(runtime) => Ok(Some(runtime)),
+        Err(crate::hived::RequestFailure::NotSent(_)) => Ok(None),
+        Err(crate::hived::RequestFailure::AnswerLost(reason)) => {
+            Err(format!("hived listens but did not answer ({reason})"))
+        }
+    }
 }
 
 fn runtime_members(runtime: &Map<String, Value>) -> Vec<(String, &Map<String, Value>)> {
@@ -1369,6 +1374,21 @@ mod tests {
         assert!(crate::registry::load("honey").is_some());
         drop(asleep);
         drop(tmp);
+    }
+
+    #[test]
+    fn test_a_dead_hiveds_socket_file_is_not_evidence_of_anything() {
+        let (_tmp, _env, _ledger) = home();
+        let dir = team("honey", &[member_row("sage", "grok", "sid-sage")]);
+        // the hived was killed -9: its socket path is still there, a file
+        // nobody listens on
+        let socket = crate::hived::socket_path(dir.to_str().unwrap());
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        fs::write(&socket, "").unwrap();
+
+        let report = run_at(Mode::Manual, T0).unwrap();
+
+        assert_eq!(state_of(&report, "honey"), "cooling", "{:?}", report.teams);
     }
 
     #[test]

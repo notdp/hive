@@ -224,6 +224,18 @@ pub fn request_team_runtime(workspace: &str, team: &str) -> Option<Map<String, V
     request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 
+/// `request_team_runtime` telling its two failures apart: `NotSent` (no
+/// hived listens — a socket file nobody answers on is a dead hived's
+/// leftover) from `AnswerLost` (one does, and did not answer).
+pub(crate) fn request_team_runtime_answer(
+    workspace: &str,
+    team: &str,
+) -> Result<Map<String, Value>, RequestFailure> {
+    let mut payload = action_payload("team-runtime");
+    payload.insert("team".to_string(), Value::from(team));
+    request_hived_answer(workspace, &payload, SOCKET_READY_TIMEOUT)
+}
+
 /// Ask the hived whether a member has a turn open (`turn-open`): the
 /// answer's `open` is a bool, or null when the hived holds no such state
 /// for the member.
