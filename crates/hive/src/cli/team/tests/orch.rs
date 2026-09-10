@@ -280,9 +280,9 @@ fn test_create_orch_rolls_back_before_registry_commit() {
         state.tags.get("@hive-cli").map(String::as_str),
         Some("claude")
     );
-    assert!(state.tags.get("@hive-team").is_none());
-    assert!(state.tags.get("@hive-agent").is_none());
-    assert!(state.tags.get("@hive-role").is_none());
+    assert!(!state.tags.contains_key("@hive-team"));
+    assert!(!state.tags.contains_key("@hive-agent"));
+    assert!(!state.tags.contains_key("@hive-role"));
     assert!(!env._tmp.path().join(".hive/contexts/pane-0.json").exists());
     assert!(crate::registry::load("honey").is_none());
     assert_eq!(
