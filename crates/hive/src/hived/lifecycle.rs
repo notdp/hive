@@ -123,7 +123,30 @@ pub fn ensure_hived(
             HivedIdentity::Restart => {}
         }
         if response.is_some() {
-            stop_hived(workspace);
+            // The retiring owner takes the same lock for cleanup. Do not
+            // hold it while waiting for its admission/operation drain.
+            unsafe {
+                libc::flock(lock_fd, libc::LOCK_UN);
+            }
+            let stopped = stop_hived_generation(
+                workspace,
+                response.as_ref().and_then(|r| r.get("hived")).cloned(),
+            );
+            unsafe {
+                libc::flock(lock_fd, libc::LOCK_EX);
+            }
+            let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
+            if hived_identity_matches(response.as_ref(), team) {
+                return Ok(None);
+            }
+            if !stopped || response.is_some() {
+                bail!("hived is draining; retry after accepted operations finish");
+            }
+        }
+        if std::os::unix::net::UnixStream::connect(socket_path(workspace)).is_ok() {
+            bail!(
+                "hived socket still accepts connections; refusing to replace an unresponsive owner"
+            );
         }
         hooked_cleanup_socket(workspace);
         let pid = start_hived(workspace, team, tmux_window, tmux_window_id);
@@ -263,6 +286,7 @@ fn hooked_make_busy_monitor(
 
 pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_id: &str) {
     SHUTDOWN.store(false, Ordering::SeqCst);
+    reopen_admission();
     let hived_started_at = now_iso();
     let mut idle_notify: HashMap<String, IdleRecord> = HashMap::new();
     let mut notify_debug_state = NotifyDebugState::default();
@@ -384,10 +408,8 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         }
 
         let stale_hash = hooked_stale_disk_build_hash(&mut code_reexec_state, now);
-        // Never exec out from under an in-flight request thread: its
-        // transport work would die mid-flight with the message already on
-        // the bus. The stale hash is still stale 5s later.
-        if let Some(stale_hash) = stale_hash.filter(|_| !requests_in_flight()) {
+        flush_operations(workspace);
+        if let Some(stale_hash) = stale_hash {
             let emit_reexec = || {
                 hooked_notify_debug_emit(
                     workspace,
@@ -470,6 +492,9 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             &hived_started_at,
             IDLE_NOTIFY_TICK_SECONDS,
         ) {
+            while !drain_ready(workspace) {
+                thread::sleep(Duration::from_millis(20));
+            }
             break;
         }
 
@@ -491,8 +516,24 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         monitor.stop();
     }
     set_output_busy_monitor(None);
+    close_admission();
+    if !SHUTDOWN.load(Ordering::SeqCst) && Path::new(workspace).is_dir() {
+        interrupt_operations(
+            workspace,
+            "hived ownership or team removed; execution interrupted outside graceful drain",
+        );
+    }
     server.close();
-    cleanup_socket_if_owner(workspace, &owner_token);
+    // ensure releases this lock before requesting shutdown; competing
+    // starters cannot bind between our owner check and unlink.
+    loop {
+        if let Some(fd) = hooked_try_acquire_reexec_lock(workspace) {
+            cleanup_socket_if_owner(workspace, &owner_token);
+            hooked_release_reexec_lock_fd(Some(fd));
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn now_epoch_seconds() -> i64 {
@@ -502,14 +543,29 @@ fn now_epoch_seconds() -> i64 {
         .unwrap_or_default()
 }
 
-pub fn stop_hived(workspace: &str) {
-    let _ = request_hived(workspace, &action_payload("shutdown"), SOCKET_READY_TIMEOUT);
+pub(super) fn drain_ready(workspace: &str) -> bool {
+    close_admission() && flush_operations(workspace)
+}
+
+pub fn stop_hived(workspace: &str) -> bool {
+    stop_hived_generation(workspace, None)
+}
+
+fn stop_hived_generation(workspace: &str, expected: Option<Value>) -> bool {
+    let mut request = action_payload("shutdown");
+    if let Some(expected) = expected {
+        request.insert("expectedHived".into(), expected);
+    }
+    let response = request_hived(workspace, &request, SOCKET_READY_TIMEOUT);
+    if response.as_ref().and_then(|r| r.get("generationChanged")) == Some(&Value::Bool(true)) {
+        return true;
+    }
     let deadline = monotonic() + SOCKET_READY_TIMEOUT;
     while monotonic() < deadline {
         if !socket_path(workspace).exists() {
-            return;
+            return true;
         }
         thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
     }
-    hooked_cleanup_socket(workspace);
+    false
 }

@@ -316,8 +316,11 @@ runner refuses a claude member before anything is spawned.
   member's session, whose request id and client generation are kept until
   its response. A Grok result lookup requires the original generation;
   a replacement client cannot supply a result for the old handle. The hived
-  holds that engine handle under the dispatch id (`hived/state.rs::node_turns`)
-  for as long as it runs. The run record (below) is written `pending`
+  holds the engine handle in memory and writes its operation record under
+  `run/operations/`, keyed by team incarnation and dispatch id. The record is
+  prepared before the bus write or engine submission; the handle and native
+  terminal result are then saved with atomic rename (without fsync). Completed
+  results remain readable by `node-result` after hived restarts. The run record (below) is written `pending`
   before any of that, so a runner that dies between the delivery and its
   own bookkeeping leaves a pending record behind, never a gap a same-name
   run could walk through.
@@ -338,13 +341,22 @@ runner refuses a claude member before anything is spawned.
   the answer (`grok_leader::PromptResult`). In both engines the result is
   the member's last message of the turn; a member that stops to ask has
   ended its turn with that question.
+- **Retirement.** Shutdown, identity replacement and reexec close the same
+  admission gate and wait for accepted request leases and outstanding native
+  results to be persisted. Ordinary Codex/Grok sends also retain tracked
+  handles until their terminal results are saved. Claude sends record the
+  transport acceptance only: its inbox/job is external to the hived and no
+  native execution result is available. Unresolved live handles or failed
+  journal writes defer voluntary retirement. Explicit member/team removal is
+  recorded as interruption; an abrupt daemon exit leaves an ambiguous record.
 - **The read-back.** The runner polls the hived's `node-result` for the
   dispatch id at 1s: `running` while the turn is open; `ended` with
   `status` (the engine's word), `text` and `error` once it is; `unknown`
-  with a `reason` when this hived holds nothing for the id — restarted
-  since the dispatch, the engine handed back no turn id (`untracked` in
-  the dispatch answer), or the adapter client that started the turn was
-  replaced. `unknown` is never a verdict on the turn: with the member's
+  with a `reason` when no operation is recorded for the id. A journaled
+  operation whose outcome cannot be recovered returns `ambiguous`, including
+  a restart before its terminal result was saved, a missing turn id, or loss
+  of the original adapter client. The runner immediately retains an `unknown`
+  record for `ambiguous`; it does not classify that as `no_result` or resend. `unknown` is never a verdict on the turn: with the member's
   turn open or unanswered the runner keeps waiting (the turn may still end
   in front of a client that never saw it start), and only 5 consecutive
   unknowns with the turn closed (`turn-open` `false`) end the run

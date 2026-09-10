@@ -129,9 +129,9 @@ pub struct MemberInfo {
 }
 
 /// The hived's `node-result` answer: the engine's own word on the turn
-/// the dispatch became. `Unknown` is the hived holding nothing for the
-/// dispatch (restarted since, the engine handed back no id, the adapter
-/// client replaced) — not a verdict on the turn.
+/// the dispatch became. `Unknown` has no operation record; `Ambiguous`
+/// has evidence of possible execution but no recoverable result. Neither
+/// authorizes an automatic resubmission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeResult {
     Running,
@@ -141,11 +141,12 @@ pub enum NodeResult {
         error: Option<String>,
     },
     Unknown(String),
+    Ambiguous(String),
 }
 
 impl NodeResult {
     /// The `node-result` payload as the enum; None for an error envelope
-    /// or a shape that is none of the three states.
+    /// or an unrecognized state.
     pub fn from_answer(answer: &Map<String, Value>) -> Option<NodeResult> {
         if answer.get("ok") != Some(&Value::Bool(true)) {
             return None;
@@ -168,6 +169,7 @@ impl NodeResult {
                     .map(str::to_string),
             }),
             Some("unknown") => Some(NodeResult::Unknown(text("reason"))),
+            Some("ambiguous") => Some(NodeResult::Ambiguous(text("reason"))),
             _ => None,
         }
     }
@@ -778,6 +780,7 @@ fn await_result(env: &dyn WorkflowEnv, name: &str, dispatch_id: &str) -> Verdict
                 text,
                 error,
             }) => return Verdict::ended(&status, text, error),
+            Some(NodeResult::Ambiguous(reason)) => return Verdict::reason(STATUS_UNKNOWN, reason),
             Some(NodeResult::Running) => {
                 unknown_closed = 0;
                 unanswered = 0;
@@ -2695,6 +2698,7 @@ mod tests {
             resolve_live_agent: Some(Arc::new(move |team_name, agent| {
                 let team = crate::team::Team {
                     name: team_name.to_string(),
+                    created_at: 1700000000.0,
                     workspace: ws_hook.clone(),
                     tmux_session: "dev".to_string(),
                     tmux_window: "dev:1".to_string(),
@@ -2848,7 +2852,7 @@ mod tests {
         assert!(matches!(result, Dispatched::AnswerLost(reason) if reason.contains("timed out")));
         assert_eq!(uncertain_calls.load(Ordering::SeqCst), 1);
         assert!(
-            matches!(env.node_result("nd-abcdef012345"), Some(NodeResult::Unknown(reason)) if reason.contains("may have taken"))
+            matches!(env.node_result("nd-abcdef012345"), Some(NodeResult::Ambiguous(reason)) if reason.contains("unresolved"))
         );
 
         let shutdown = Map::from_iter([("action".to_string(), Value::from("shutdown"))]);

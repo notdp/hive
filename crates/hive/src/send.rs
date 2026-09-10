@@ -91,13 +91,15 @@ pub(crate) fn request_node_dispatch(
 
 fn hived_send_result(
     workspace: &str,
-    payload: Option<Map<String, Value>>,
+    payload: Result<Map<String, Value>, RequestFailure>,
     command_name: &str,
 ) -> Result<Map<String, Value>> {
-    // An ordinary send has nothing to keep pending on a lost answer: both
-    // failure kinds are one refusal to the caller.
-    let answer = payload.ok_or_else(|| RequestFailure::NotSent(String::new()));
-    hived_answer(workspace, answer, command_name).map_err(|e| anyhow::anyhow!("{e}"))
+    hived_answer(workspace, payload, command_name).map_err(|e| match e {
+        DispatchFailure::Unknown(reason) => {
+            anyhow::anyhow!("ambiguous delivery: {reason}; do not resend automatically")
+        }
+        DispatchFailure::Refused(reason) => anyhow::anyhow!(reason),
+    })
 }
 
 /// The hived's answer as a result: `ok:false` and an unsent request are
@@ -422,11 +424,16 @@ mod tests {
             hived_answer(&ws, Ok(ok), "node dispatch"),
             Ok(Map::from_iter([("seq".to_string(), Value::from(3))]))
         );
-        // An ordinary send folds both kinds into one error string.
-        let err = hived_send_result(&ws, None, "send").unwrap_err();
+        // Ordinary sends preserve ambiguity in the surfaced error.
+        let err = hived_send_result(&ws, Err(RequestFailure::NotSent(String::new())), "send")
+            .unwrap_err();
         assert_eq!(err.to_string(), "hived unavailable");
-        let err = hived_send_result(&ws, Some(refused("gate closed")), "send").unwrap_err();
+        let err = hived_send_result(&ws, Ok(refused("gate closed")), "send").unwrap_err();
         assert_eq!(err.to_string(), "gate closed");
+        let err = hived_send_result(&ws, Err(RequestFailure::AnswerLost("EOF".into())), "send")
+            .unwrap_err();
+        assert!(err.to_string().contains("ambiguous delivery"));
+        assert!(err.to_string().contains("do not resend automatically"));
     }
 
     #[test]
