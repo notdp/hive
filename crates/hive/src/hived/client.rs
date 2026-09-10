@@ -166,14 +166,14 @@ pub(crate) fn hived_identity_matches(response: Option<&Map<String, Value>>, team
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn request_send(
+pub(crate) fn request_send(
     workspace: &str,
     team: &str,
     sender_agent: &str,
     target_agent: &str,
     body: &str,
     artifact: &str,
-) -> Option<Map<String, Value>> {
+) -> Result<Map<String, Value>, RequestFailure> {
     let timeout = send_request_timeout();
     let mut payload = action_payload("send");
     payload.insert("team".to_string(), Value::from(team));
@@ -181,7 +181,7 @@ pub fn request_send(
     payload.insert("targetAgent".to_string(), Value::from(target_agent));
     payload.insert("body".to_string(), Value::from(body));
     payload.insert("artifact".to_string(), Value::from(artifact));
-    request_hived(workspace, &payload, timeout)
+    request_hived_answer(workspace, &payload, timeout)
 }
 
 /// A `hive workflow run` dispatch: the same transport as a send, no sender.

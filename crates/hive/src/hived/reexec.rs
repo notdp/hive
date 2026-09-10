@@ -185,7 +185,17 @@ pub(crate) fn reexec_hived(
     busy_monitor: Option<&Arc<dyn OutputMonitor>>,
     on_reexec: Option<&dyn Fn()>,
 ) -> Option<Box<dyn HivedServerApi>> {
-    let lock_fd = hooked_try_acquire_reexec_lock(workspace)?;
+    if !drain_ready(workspace) {
+        reopen_admission();
+        return None;
+    }
+    if SHUTDOWN.load(Ordering::SeqCst) {
+        return None;
+    }
+    let Some(lock_fd) = hooked_try_acquire_reexec_lock(workspace) else {
+        reopen_admission();
+        return None;
+    };
 
     let previous_lock_env = std::env::var(HIVED_REEXEC_LOCK_ENV).ok();
     std::env::set_var(HIVED_REEXEC_LOCK_ENV, lock_fd.to_string());
@@ -200,15 +210,17 @@ pub(crate) fn reexec_hived(
     }
     let argv = hived_reexec_argv(workspace, team, tmux_window, tmux_window_id);
     let outcome = hooked_execv(&argv);
-    // Only reached when execv came back (live: it failed; under test: the
-    // hook reports Replaced) — undo the env and drop the lock either way.
+    // Only reached when execv came back. Restore the env now; a failed
+    // exec keeps the lock through rebind and admission reopening.
     match previous_lock_env {
         None => std::env::remove_var(HIVED_REEXEC_LOCK_ENV),
         Some(previous) => std::env::set_var(HIVED_REEXEC_LOCK_ENV, previous),
     }
-    hooked_release_reexec_lock_fd(Some(lock_fd));
     match outcome {
-        ExecOutcome::Replaced => return None,
+        ExecOutcome::Replaced => {
+            hooked_release_reexec_lock_fd(Some(lock_fd));
+            return None;
+        }
         ExecOutcome::Failed(exc) => {
             eprintln!(
                 "hived: reexec failed ({exc}); staying on build {}",
@@ -223,6 +235,7 @@ pub(crate) fn reexec_hived(
     let replacement = match hooked_open_server_socket(workspace) {
         Ok(replacement) => replacement,
         Err(_) => {
+            hooked_release_reexec_lock_fd(Some(lock_fd));
             SHUTDOWN.store(true, Ordering::SeqCst);
             return None;
         }
@@ -231,5 +244,7 @@ pub(crate) fn reexec_hived(
         monitor.start();
         set_output_busy_monitor(Some(Arc::clone(monitor)));
     }
+    reopen_admission();
+    hooked_release_reexec_lock_fd(Some(lock_fd));
     Some(replacement)
 }

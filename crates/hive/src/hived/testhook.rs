@@ -42,6 +42,7 @@ pub struct FakeAdapter {
 
 #[derive(Default)]
 pub struct Hook {
+    pub after_accept: Option<F0<()>>,
     // adapters / gate
     pub adapters_get: Option<S1<Option<AdapterHandle>>>,
     pub check_input_gate: Option<P1<GateResult>>,

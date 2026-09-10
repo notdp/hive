@@ -187,7 +187,10 @@ pub(crate) fn handle_request(
             if dispatch_id.is_empty() {
                 return (err_response("node-result needs a dispatchId"), true);
             }
-            (node_result_payload(&dispatch_id), true)
+            (
+                durable_node_result(workspace, &team_in_request(), &dispatch_id),
+                true,
+            )
         }
         "turn-open" => {
             let response = turn_open_payload(
@@ -213,6 +216,32 @@ pub(crate) fn handle_request(
             (response, true)
         }
         "shutdown" => {
+            if let Some(expected) = request.get("expectedHived") {
+                if expected != &Value::Object(hived.clone()) {
+                    let mut response = Map::new();
+                    response.insert("ok".into(), Value::Bool(false));
+                    response.insert("generationChanged".into(), Value::Bool(true));
+                    return (response, true);
+                }
+            }
+            close_admission();
+            let force = FORCE_SHUTDOWN.load(Ordering::SeqCst)
+                || request
+                    .get("force")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            let pending = pending_operations(workspace);
+            if !force && pending > 0 {
+                reopen_admission();
+                return (
+                    serde_json::json!({"ok":false,"draining":true,"pendingOperations":pending})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    true,
+                );
+            }
+            FORCE_SHUTDOWN.store(force, Ordering::SeqCst);
             let mut response = Map::new();
             response.insert("ok".to_string(), Value::Bool(true));
             (response, false)
@@ -229,8 +258,8 @@ fn serve_connection(
     tmux_window_id: &str,
     hived_started_at: &str,
     read_timeout: f64,
+    _lease: RequestLease,
 ) {
-    INFLIGHT_REQUESTS.fetch_add(1, Ordering::SeqCst);
     let _ = conn.set_read_timeout(Some(Duration::from_secs_f64(read_timeout.max(0.001))));
     let mut raw: Vec<u8> = Vec::new();
     let mut buf = [0u8; 65536];
@@ -259,12 +288,12 @@ fn serve_connection(
     let mut body = serde_json::to_string(&Value::Object(response)).unwrap_or_default();
     body.push('\n');
     let _ = (&conn).write_all(body.as_bytes());
+    let _ = conn.shutdown(std::net::Shutdown::Write);
     // Answer first, then retire: the reply must be on the wire before the
     // loop tears the socket down.
     if !keep_running {
         SHUTDOWN.store(true, Ordering::SeqCst);
     }
-    INFLIGHT_REQUESTS.fetch_sub(1, Ordering::SeqCst);
 }
 
 /// Accept for up to ``timeout`` seconds, handling each request off-loop.
@@ -290,9 +319,21 @@ pub(crate) fn serve_requests(
         if remaining <= 0.0 {
             break;
         }
+        let lease = {
+            let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+            if state.closed {
+                break;
+            }
+            state.leases += 1;
+            RequestLease
+        };
         let Some(conn) = server.accept_timeout(remaining) else {
             break;
         };
+        #[cfg(test)]
+        if let Some(f) = hookget(|h| h.after_accept.clone()).flatten() {
+            f();
+        }
         let workspace = workspace.to_string();
         let team = team.to_string();
         let tmux_window = tmux_window.to_string();
@@ -309,8 +350,32 @@ pub(crate) fn serve_requests(
                     &tmux_window_id,
                     &hived_started_at,
                     timeout,
+                    lease,
                 );
             });
     }
     !SHUTDOWN.load(Ordering::SeqCst)
+}
+
+/// The coordinator owns this synchronous rejection while admission is shut.
+/// No handler or engine operation is started, and the reply is sent before
+/// the coordinator can proceed to teardown.
+pub(super) fn reject_draining_request(server: &dyn HivedServerApi) {
+    let Some(mut conn) = server.accept_timeout(0.1) else {
+        return;
+    };
+    let timeout = Some(Duration::from_millis(100));
+    let _ = conn.set_read_timeout(timeout);
+    let _ = conn.set_write_timeout(timeout);
+    let mut buf = [0u8; 65536];
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < deadline {
+        match conn.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    let reply = b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining; request not admitted; retry later\"}\n";
+    let _ = conn.write_all(reply);
+    let _ = conn.shutdown(std::net::Shutdown::Write);
 }

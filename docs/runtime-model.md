@@ -321,8 +321,11 @@ runner refuses a claude member before anything is spawned.
   member's session, whose request id and client generation are kept until
   its response. A Grok result lookup requires the original generation;
   a replacement client cannot supply a result for the old handle. The hived
-  holds that engine handle under the dispatch id (`hived/state.rs::node_turns`)
-  for as long as it runs. The run record (below) is written `pending`
+  holds the engine handle in memory and writes its operation record under
+  `run/operations/<incarnation>/<dispatchId>.json`. The record is
+  prepared before the bus write or engine submission; the handle and native
+  terminal result are then saved with atomic rename (without fsync). Completed
+  results remain readable by `node-result` after hived restarts. The run record (below) is written `pending`
   before any of that, so a runner that dies between the delivery and its
   own bookkeeping leaves a pending record behind, never a gap a same-name
   run could walk through.
@@ -343,13 +346,28 @@ runner refuses a claude member before anything is spawned.
   the answer (`grok_leader::PromptResult`). In both engines the result is
   the member's last message of the turn; a member that stops to ask has
   ended its turn with that question.
+- **Retirement.** A graceful shutdown with pending node operations returns
+  `draining: true` and leaves the hived serving and ticking. An identity
+  upgrade that receives this answer uses the old generation until its normal
+  reexec gate can retire it. A shutdown accepted before a concurrent node
+  dispatch becomes visible also resumes service when that dispatch is seen.
+  Only accepted request leases are waited on, for at most five seconds;
+  graceful timeout resumes service. Explicit deletion uses `force: true`,
+  records unresolved nodes as interrupted/ambiguous and exits after the bounded
+  request wait. During that short wait, new requests receive `notAdmitted`.
+  Ordinary sends stay in memory and do not delay retirement; their terminal
+  entries are removed. Persisted node terminal entries are also removed from
+  memory, with subsequent reads served by the journal. Failed node writes
+  retain the in-memory result and emit a diagnostic. Incarnation lookup for
+  `node-result` reads the registry directly, without tmux or `Team::load`.
 - **The read-back.** The runner polls the hived's `node-result` for the
   dispatch id at 1s: `running` while the turn is open; `ended` with
   `status` (the engine's word), `text` and `error` once it is; `unknown`
-  with a `reason` when this hived holds nothing for the id — restarted
-  since the dispatch, the engine handed back no turn id (`untracked` in
-  the dispatch answer), or the adapter client that started the turn was
-  replaced. `unknown` is never a verdict on the turn: with the member's
+  with a `reason` when no operation is recorded for the id. A journaled
+  operation whose outcome cannot be recovered returns `ambiguous`, including
+  a restart before its terminal result was saved, a missing turn id, or loss
+  of the original adapter client. The runner immediately retains an `unknown`
+  record for `ambiguous`; it does not classify that as `no_result` or resend. `unknown` is never a verdict on the turn: with the member's
   turn open or unanswered the runner keeps waiting (the turn may still end
   in front of a client that never saw it start), and only 5 consecutive
   unknowns with the turn closed (`turn-open` `false`) end the run
