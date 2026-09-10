@@ -67,7 +67,8 @@ Consequences across modules:
   when tmux is unreachable, or both the original window and the registry's
   cached window are gone. An accepted request, a pending node result or an
   owned Grok client whose idle state cannot be established blocks sleep.
-  Grok needs completed-turn evidence and no outstanding RPC; observing the
+  Grok needs a completed load/replay, no open turn and no outstanding RPC;
+  a completed replay with zero turn events is idle. Observing the
   pool does not connect or spawn a client. Claude background jobs belong to
   their supervisor and do not keep the desk awake. Ordinary Codex sends do
   not own a node-result obligation.
