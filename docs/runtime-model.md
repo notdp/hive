@@ -1047,10 +1047,17 @@ leader. The alias also lets member teardown reach that leader.
   `turn_completed` closes) is the session's state at load time — so a
   hived restarted onto an idle member answers `turn-open` `false` at once
   instead of `null` until the member's next turn.
-- **Permission requests.** The leader broadcasts a shared request to its
-  subscribers and accepts the first answer. Hive observes it as waiting for
-  the human at the TUI and sends no answer: even `cancelled` would resolve
-  the shared request and cut the turn short. A tool update clears the wait
+- **Permission requests.** A member hive spawns has no one at its TUI to
+  approve a tool, so its session runs grok's always-approve — minted with
+  `_meta.yoloMode: true` (`GrokStdioClient::new_session`), reloaded with the
+  same by hive's own client, and its pane TUI launched with
+  `--always-approve` so the TUI's `session/load` carries it too (a load can
+  only turn the mode on, never off) — the policy codex members already run
+  under. A human's own `hgrok`, in a pane or at a terminal, keeps grok's
+  prompts. When a prompt does appear, the leader broadcasts the shared
+  request to its subscribers and accepts the first answer. Hive observes it
+  as waiting for the human at the TUI and sends no answer: even `cancelled`
+  would resolve the shared request and cut the turn short. A tool update clears the wait
   after the human decides; turn completion also clears it. With no one
   answering (including a headless node), the request and turn remain pending
   while the engine lives. The leader replays the pending modal to a TUI that

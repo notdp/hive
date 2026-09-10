@@ -950,22 +950,46 @@ fn exec_grok_managed(args: &[String]) -> ! {
         grok_raw(args);
     }
     let (session_id, pass_flag) = grok_launch_session(args);
-    let mut argv: Vec<String> = vec![
-        "--leader".to_string(),
-        "--leader-socket".to_string(),
-        grok_leader::pane_socket_path(&pane)
-            .to_string_lossy()
-            .into_owned(),
-    ];
-    if pass_flag {
-        argv.push("--session-id".to_string());
-        argv.push(session_id.clone().unwrap_or_default());
-    }
+    let key = grok_leader::resolve_pane_key(&pane);
+    let argv = grok_pane_argv(
+        &grok_leader::socket_path_for_key(&key).to_string_lossy(),
+        session_id.as_deref(),
+        pass_flag,
+        grok_leader::member_from_key(&key).is_some(),
+        args,
+    );
     if let Some(session_id) = session_id.as_deref().filter(|value| !value.is_empty()) {
         let _ = grok_leader::write_pane_session(&pane, session_id, &getcwd());
     }
-    argv.extend(args.iter().cloned());
     execvp("grok", &argv);
+}
+
+/// The pane TUI's argv: the leader socket, the minted session when the
+/// launch names one, and — for a member pane — grok's `--always-approve`,
+/// so the TUI's own `session/load` carries the mode the session was minted
+/// with (`GrokStdioClient::always_approve`) and no prompt waits on a human
+/// who is not there. The user's own flags follow.
+fn grok_pane_argv(
+    socket: &str,
+    session_id: Option<&str>,
+    pass_flag: bool,
+    member: bool,
+    args: &[String],
+) -> Vec<String> {
+    let mut argv: Vec<String> = vec![
+        "--leader".to_string(),
+        "--leader-socket".to_string(),
+        socket.to_string(),
+    ];
+    if pass_flag {
+        argv.push("--session-id".to_string());
+        argv.push(session_id.unwrap_or_default().to_string());
+    }
+    if member {
+        argv.push("--always-approve".to_string());
+    }
+    argv.extend(args.iter().cloned());
+    argv
 }
 
 /// `hgrok` at a terminal outside tmux: a leader on a launch key serving
@@ -1375,6 +1399,28 @@ mod tests {
         assert_eq!(
             grok_launch_session(&args(&["--resume", "old-sid"])),
             (Some("old-sid".to_string()), false)
+        );
+    }
+
+    #[test]
+    fn test_grok_pane_argv_runs_a_member_always_approve_and_a_human_pane_not() {
+        let user = args(&["-m", "grok-4"]);
+        assert_eq!(
+            grok_pane_argv("/s/m-honey.sage.sock", Some("sid-1"), true, true, &user),
+            vec![
+                "--leader",
+                "--leader-socket",
+                "/s/m-honey.sage.sock",
+                "--session-id",
+                "sid-1",
+                "--always-approve",
+                "-m",
+                "grok-4",
+            ]
+        );
+        assert_eq!(
+            grok_pane_argv("/s/p19.sock", None, false, false, &user),
+            vec!["--leader", "--leader-socket", "/s/p19.sock", "-m", "grok-4"]
         );
     }
 

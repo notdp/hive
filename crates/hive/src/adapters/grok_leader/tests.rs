@@ -2656,6 +2656,41 @@ fn set_listening_daemon_spawn() -> Arc<Mutex<usize>> {
 }
 
 #[test]
+fn test_a_members_session_is_minted_and_reloaded_always_approve_a_humans_is_not() {
+    let _bed = setup();
+    // a member key: the mint and the reload both carry `_meta.yoloMode`
+    let proc = FakeProc::new(Some(minting_responder()));
+    let handout = proc.clone();
+    set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+    let client = Arc::new(GrokStdioClient::new("m-honey.sage").unwrap());
+    assert!(client.new_session(SID, CWD));
+    let minted = settle_sent(&proc, |msg| msg["method"] == "session/new");
+    assert_eq!(minted["params"]["_meta"]["yoloMode"], json!(true));
+    assert_eq!(minted["params"]["_meta"]["sessionId"], json!(SID));
+    teardown(&client, &proc);
+    write_session_key("m-honey.sage", SID, CWD).unwrap();
+    let (client, proc) = {
+        let proc = FakeProc::new(Some(responder(None, Vec::new())));
+        let handout = proc.clone();
+        set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+        (
+            Arc::new(GrokStdioClient::new("m-honey.sage").unwrap()),
+            proc,
+        )
+    };
+    assert!(client.handshake());
+    let reloaded = settle_sent(&proc, |msg| msg["method"] == "session/load");
+    assert_eq!(reloaded["params"]["_meta"]["yoloMode"], json!(true));
+    teardown(&client, &proc);
+
+    // a human's own pane: grok's prompts stay
+    let (client, proc) = loaded(None, vec![]);
+    let request = settle_sent(&proc, |msg| msg["method"] == "session/load");
+    assert!(request["params"].get("_meta").is_none(), "{request}");
+    teardown(&client, &proc);
+}
+
+#[test]
 fn test_new_session_accepts_a_reply_after_the_load_budget_without_retrying() {
     let _bed = setup();
     let (client, proc) = make(

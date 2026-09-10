@@ -109,7 +109,11 @@ behavior is documented in the modules themselves.
   engine handle the hived holds under the dispatch id (`nd-<12 hex>`, also
   in the task artifact path and the first body line); the engine's own
   turn-end signal (codex `turn/completed` on the client that started the
-  turn, grok the `session/prompt` response) is the result's boundary, the
+  turn, grok the `session/prompt` response) is the result's boundary — a
+  grok member hive spawned runs always-approve (`_meta.yoloMode` at mint
+  and load, `--always-approve` on its pane TUI; a human's own `hgrok`
+  keeps its prompts), because a headless member has nobody to answer a
+  tool prompt and hive never answers one for a human — the
   member's last message of the turn its text, and the runner reads both
   back through the hived's `node-result`. Nothing reads the engine's
   transcript. A claude node is Claude Code's own subagent, not hive's: a

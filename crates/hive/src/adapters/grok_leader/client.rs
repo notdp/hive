@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use super::keys::{read_session_key, socket_path_for_key, SessionRecord};
+use super::keys::{member_from_key, read_session_key, socket_path_for_key, SessionRecord};
 use super::{
     ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS, NEW_SESSION_TIMEOUT,
 };
@@ -702,6 +702,18 @@ impl GrokStdioClient {
 
     // ---- protocol ----
 
+    /// Whether the key's session runs without a tool approver.
+    ///
+    /// A member hive spawns has nobody at its TUI to answer grok's permission
+    /// prompt — the orch sends it work, no one approves for it — so its
+    /// session is minted and reloaded with grok's always-approve
+    /// (`_meta.yoloMode`, which a later `session/load` can only turn on,
+    /// never off), the policy codex members already run under. A human's
+    /// own launch (a pane key, a launch key) keeps grok's prompts.
+    fn always_approve(&self) -> bool {
+        member_from_key(&self.key).is_some()
+    }
+
     /// `initialize` then `session/load` of the key's minted session.
     ///
     /// Both values come from the key's session file — cwd is recorded at
@@ -724,16 +736,15 @@ impl GrokStdioClient {
         if initialized.get("result").is_none() {
             return false;
         }
-        let loaded = self.call(
-            "session/load",
-            json!({
-                "sessionId": session_id,
-                "cwd": cwd,
-                "mcpServers": [],
-            }),
-            LOAD_TIMEOUT,
-            Some(&session_id),
-        );
+        let mut params = json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": [],
+        });
+        if self.always_approve() {
+            params["_meta"] = json!({"yoloMode": true});
+        }
+        let loaded = self.call("session/load", params, LOAD_TIMEOUT, Some(&session_id));
         loaded.get("result").is_some()
     }
 
@@ -758,12 +769,16 @@ impl GrokStdioClient {
         if initialized.get("result").is_none() {
             return false;
         }
+        let mut meta = json!({"sessionId": session_id});
+        if self.always_approve() {
+            meta["yoloMode"] = json!(true);
+        }
         let created = self.call(
             "session/new",
             json!({
                 "cwd": cwd,
                 "mcpServers": [],
-                "_meta": {"sessionId": session_id},
+                "_meta": meta,
             }),
             NEW_SESSION_TIMEOUT,
             Some(session_id),
