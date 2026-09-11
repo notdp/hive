@@ -131,8 +131,8 @@ Examples:
   named after the team; inside: in your session), and a member without a
   pane gets one riding its engine's own viewer (claude attach loop / codex
   thread resume / grok session resume; a joined interactive Claude session
-  gets a read-only `hive view` mirror; `hive mirror` parks or restores
-  it). Outside tmux this finishes by exec'ing `tmux attach`.
+  gets a read-only `hive view` mirror, collapsed until `hive mirror on`).
+  Outside tmux this finishes by exec'ing `tmux attach`.
 
 Options:
   -h, --help  Show this message and exit.
@@ -219,8 +219,8 @@ Commands:
   NAME is optional everywhere (pool-picked by default). Outside tmux: a
   tmux session named after the team (created detached when missing) holds
   its window; a Claude session running the command becomes the orch,
-  mirrored read-only in the first pane (`hive mirror`, the status bar's
-  orch chip or `prefix+m` park and restore it; the team session gets
+  with a read-only mirror pane collapsed by default (`hive mirror on`, the
+  status bar's orch chip or `prefix+m` open and park it; the team session gets
   hive's two-line status bar). Inside tmux on an agent pane: that pane moves
   into the team session and becomes the orch, with the same status bar.
   If it was the window's only pane, a shell stays in its place. The attached
@@ -555,7 +555,9 @@ Options:
   Show or hide the team's read-only orch mirror pane.
 
   The mirror is the `hive view` pane of a session member (the desktop app's
-  Claude session that created or joined the team). `off` moves it
+  Claude session that created or joined the team). It starts collapsed:
+  the desktop already shows that session, so a new window records
+  `@hive-mirror off` and draws the pane only on `on`. `off` moves it
   with break-pane into a hidden window of the team session (tagged
   `@hive-hidden`), the viewer keeps running, and the window records
   `@hive-mirror off` so `hive attach` and spawn leave it out when they heal
@@ -566,7 +568,9 @@ Options:
   tmux server died withholds the mirror the same way. No
   argument toggles. The status bar's orch chip (▴ closed, ▾ open) and
   prefix+m run the same verb on the current window; --window names the
-  window when the caller has no pane (a tmux run-shell job). prefix+m is
+  window when the caller has no pane (a tmux run-shell job), and a team
+  member's session without a pane (the desktop app) acts on its own
+  team's window. prefix+m is
   bound server-wide when a team session is built, gated on a team window:
   elsewhere it runs whatever the key ran before (tmux's `select-pane -m`,
   or your own binding), remembered in the server option `@hive-prefix-m`.

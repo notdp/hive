@@ -360,7 +360,7 @@ fn test_create_inside_tmux_from_a_shell_pane_defaults_to_the_team_dir() {
 }
 
 #[test]
-fn test_create_outside_tmux_seats_a_claude_session_creator_as_orch_on_a_mirror_pane() {
+fn test_create_outside_tmux_seats_a_claude_session_creator_as_orch_with_its_mirror_collapsed() {
     let mut env = display_env_outside();
     env.env.set("HIVE_BIN", "/x/hive");
     let _claude = claude_session_me(&mut env);
@@ -377,25 +377,31 @@ fn test_create_outside_tmux_seats_a_claude_session_creator_as_orch_on_a_mirror_p
     orch.insert("sessionId".to_string(), Value::from("s-me"));
     orch.insert("cwd".to_string(), Value::from(getcwd()));
     assert_eq!(entry["members"], Value::Array(vec![Value::Object(orch)]));
-    // The first pane is the creator's read-only mirror: tagged as orch,
-    // running `hive view` on the session — never a resume, which would mint
-    // a forked job. No second pane.
-    assert!(has_row(
+    // The creator's read-only mirror starts collapsed: the desktop already
+    // shows the session. The first pane stays a bare shell — no orch tags,
+    // no `hive view`, no second pane — and the window records `off`, which
+    // is what makes the orch chip appear (closed).
+    assert!(!has_row(
         &argv,
         &["set-option", "-p", "-t", "%1", "@hive-agent", "orch"]
     ));
-    assert!(has_row(
+    assert!(!has_row(
         &argv,
         &["set-option", "-p", "-t", "%1", "@hive-role", "mirror"]
     ));
-    assert!(argv.borrow().iter().any(|a| a[0] == "send-keys"
-        && a.contains(&"-l".to_string())
-        && a.iter().any(|arg| arg.contains("hive view s-me"))));
+    assert!(argv
+        .borrow()
+        .iter()
+        .all(|a| !(a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view")))));
     assert_eq!(count(&argv, "split-window"), 0);
-    // The mirror on screen is what makes the orch chip appear.
     assert!(has_row(
         &argv,
-        &["set-window-option", "-t", "honey:1", "@hive-mirror", "on"]
+        &["set-window-option", "-t", "honey:1", "@hive-mirror", "off"]
+    ));
+    // The bare pane is marked as hive's placeholder for the next member.
+    assert!(has_row(
+        &argv,
+        &["set-option", "-p", "-t", "%1", "@hive-placeholder", "honey"]
     ));
     assert_status_bar_installed(&argv);
 }
@@ -445,7 +451,7 @@ fn joined_session_row(team: &str) -> Map<String, Value> {
 }
 
 #[test]
-fn test_join_outside_tmux_adds_the_sessions_mirror_pane_to_the_team_window() {
+fn test_join_outside_tmux_records_the_sessions_mirror_collapsed_in_the_team_window() {
     let mut env = display_env_outside();
     let _claude = claude_session_me(&mut env);
     crate::registry::record_team(
@@ -469,6 +475,43 @@ fn test_join_outside_tmux_adds_the_sessions_mirror_pane_to_the_team_window() {
     let joined = joined_session_row("honey");
     assert_eq!(joined["cli"], Value::from("claude"));
     assert_ne!(joined["name"], Value::from("orch"));
+    // The session joins the roster; its mirror is withheld — no pane, no
+    // viewer — and the window records `off` so the chip can open it.
+    assert_eq!(count(&argv, "new-window"), 0);
+    assert_eq!(count(&argv, "split-window"), 0);
+    assert!(argv
+        .borrow()
+        .iter()
+        .all(|a| !(a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view")))));
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "honey:1", "@hive-mirror", "off"]
+    ));
+}
+
+#[test]
+fn test_join_outside_tmux_adds_the_sessions_mirror_pane_when_the_window_records_on() {
+    let mut env = display_env_outside();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "grok", "sid-orch")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_sessions(
+        "honey:1	@7	honey			
+",
+        &["%1	[orch]	grok	agent	orch	honey	grok	"],
+        &[("honey:1", "hive-mirror", "on")],
+        &["honey"],
+    );
+
+    join_as_ccd("honey", "", true, "");
+
+    joined_session_row("honey");
     // One pane split into the existing window, running the session's
     // read-only mirror — never a resume, which would fork a bg job — and
     // tagged as the window's mirror.
@@ -481,10 +524,6 @@ fn test_join_outside_tmux_adds_the_sessions_mirror_pane_to_the_team_window() {
         &argv,
         &["set-option", "-p", "-t", "%2", "@hive-role", "mirror"]
     ));
-    assert!(argv
-        .borrow()
-        .iter()
-        .any(|a| a[0] == "set-window-option" && a[3] == "@hive-mirror" && a[4] == "on"));
 }
 
 #[test]
@@ -522,12 +561,17 @@ fn test_join_outside_tmux_rebuilds_a_missing_team_window_first() {
             &crate::paths::getcwd(),
         ]
     ));
-    // orch rides the first pane; the joined session gets the split.
-    assert_eq!(count(&argv, "split-window"), 1);
+    // orch rides the first pane; the joined session's mirror is withheld
+    // by default — no split, no viewer — and the window records `off`.
+    assert_eq!(count(&argv, "split-window"), 0);
     assert!(argv
         .borrow()
         .iter()
-        .any(|a| a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view s-me"))));
+        .all(|a| !(a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view")))));
+    assert!(argv
+        .borrow()
+        .iter()
+        .any(|a| a[0] == "set-window-option" && a[3] == "@hive-mirror" && a[4] == "off"));
 }
 
 mod orch;

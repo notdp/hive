@@ -382,18 +382,15 @@ fn create_detached_team(
         }
     };
     match orch_member.as_ref() {
-        Some(orch) => {
-            // The desktop creator's read-only mirror is the first pane (a fresh
-            // window records no `off`, so `pane_role` is `mirror`); an
-            // orch that will send needs the hived up, as in
+        Some(_) => {
+            // The desktop creator's read-only mirror starts collapsed: the
+            // desktop already shows the session, so the window records
+            // `off` (the orch chip appears closed) and the first pane stays
+            // a bare shell for the first spawn or `hive mirror on` to take
+            // over. An orch that will send needs the hived up, as in
             // `create_orch_team`.
-            ok_or_fail(crate::team_display::bind_member_viewer(
-                &first_pane,
-                orch,
-                name,
-                &ws_str,
-                "mirror",
-            ));
+            tmux::set_window_option(&window, "@hive-mirror", "off");
+            crate::team_display::tag_placeholder_pane(&first_pane, name);
             start_team_hived_or_warn(&mut t, &ws_str);
         }
         None => {

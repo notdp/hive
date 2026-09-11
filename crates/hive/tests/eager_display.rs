@@ -708,11 +708,34 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
         vec![("orch".to_string(), "claude".to_string(), "s-me".to_string())]
     );
     let (_, window_id) = rig.team_windows().into_iter().next().expect("team window");
+    // The mirror starts collapsed: the window's one pane is a bare shell,
+    // the choice recorded `off`, the chip closed.
     let panes = rig.panes(&window_id);
     assert_eq!(panes.len(), 1, "{panes:?}");
+    assert_eq!((panes[0].1.as_str(), panes[0].2.as_str()), ("", ""));
+    assert_eq!(rig.window_option(&window_id, "hive-mirror"), "off");
+    let line = rig.status_line(&window_id, 0);
+    assert!(line.contains(" ▴ orch "), "{line}");
+    // `on` from no pane at all (the status click's run-shell) takes the
+    // bare pane over: the same pane id is now the mirror.
+    let target = rig.tmux_ok(&[
+        "display-message",
+        "-p",
+        "-t",
+        &window_id,
+        "#{session_name}:#{window_index}",
+    ]);
+    let stdout = rig.hive_ok(&["mirror", "on", "--window", &target], None);
+    assert_eq!(stdout, format!("mirror on ({})\n", rig.team));
+    let opened = rig.panes(&window_id);
+    assert_eq!(opened.len(), 1, "{opened:?}");
     assert_eq!(
-        (panes[0].1.as_str(), panes[0].2.as_str()),
-        ("mirror", "orch")
+        (
+            opened[0].0.as_str(),
+            opened[0].1.as_str(),
+            opened[0].2.as_str()
+        ),
+        (panes[0].0.as_str(), "mirror", "orch")
     );
     let mirror = panes[0].0.clone();
     assert_eq!(rig.window_option(&window_id, "hive-mirror"), "on");
@@ -1124,6 +1147,53 @@ fn test_unmanaged_engine_cannot_create_a_shell_team_outside_tmux() {
 }
 
 #[test]
+fn test_the_first_member_takes_over_the_placeholder_a_collapsed_mirror_leaves() {
+    let rig = Rig::new("placeholder");
+    let ws = rig.ws();
+    rig.hive_as_claude_ok(
+        &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
+        None,
+    );
+    let (_, window) = rig.team_windows().into_iter().next().unwrap();
+    // The collapsed mirror leaves one bare pane, marked as hive's own.
+    let before = rig.panes(&window);
+    assert_eq!(before.len(), 1, "{before:?}");
+    assert_eq!((before[0].1.as_str(), before[0].2.as_str()), ("", ""));
+    let placeholder = |pane: &str| {
+        rig.tmux_ok(&[
+            "show-options",
+            "-p",
+            "-q",
+            "-v",
+            "-t",
+            pane,
+            "@hive-placeholder",
+        ])
+    };
+    assert_eq!(placeholder(&before[0].0), rig.team);
+
+    // The heal draws the first roster member into that pane — same id, no
+    // split — and the mark comes off with the takeover.
+    rig.stub_cli("grok", "exit 0\n");
+    rig.add_members(&[("sage", "grok", "sid-sage")]);
+    let socket = rig.socket_path();
+    rig.hive_ok(&["attach", &rig.team], Some((&socket, &before[0].0)));
+    let after = rig.panes(&window);
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(
+        (
+            after[0].0.as_str(),
+            after[0].1.as_str(),
+            after[0].2.as_str()
+        ),
+        (before[0].0.as_str(), "agent", "sage")
+    );
+    assert_eq!(placeholder(&after[0].0), "");
+    assert_eq!(rig.window_option(&window, "hive-mirror"), "off");
+    rig.delete();
+}
+
+#[test]
 fn test_attach_rebuilds_in_the_team_session_and_keeps_the_mirror_parked() {
     let rig = Rig::new("parked-heal");
     let ws = rig.ws();
@@ -1132,6 +1202,15 @@ fn test_attach_rebuilds_in_the_team_session_and_keeps_the_mirror_parked() {
         None,
     );
     let (_, window) = rig.team_windows().into_iter().next().unwrap();
+    // The mirror starts collapsed; open it so there is a pane to park.
+    let target = rig.tmux_ok(&[
+        "display-message",
+        "-p",
+        "-t",
+        &window,
+        "#{session_name}:#{window_index}",
+    ]);
+    rig.hive_ok(&["mirror", "on", "--window", &target], None);
     let mirror = rig.panes(&window)[0].0.clone();
     let pid = rig.pane_pid(&mirror);
     let plain = rig.tmux_ok(&[
@@ -1194,6 +1273,15 @@ fn test_attach_restores_the_dragged_arrangement_of_a_rebuilt_window() {
     );
     rig.tmux_ok(&["set-option", "-g", "remain-on-exit", "on"]);
     let (_, window) = rig.team_windows().into_iter().next().unwrap();
+    // The orch's mirror starts collapsed; this test wants it on screen.
+    let target = rig.tmux_ok(&[
+        "display-message",
+        "-p",
+        "-t",
+        &window,
+        "#{session_name}:#{window_index}",
+    ]);
+    rig.hive_ok(&["mirror", "on", "--window", &target], None);
     let socket = rig.socket_path();
     let mirror = rig.panes(&window)[0].0.clone();
     rig.add_members(&[("sage", "grok", "sid-sage"), ("scout", "grok", "sid-scout")]);

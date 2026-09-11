@@ -217,7 +217,8 @@ pub fn clear_pane_option(pane_id: &str, key: &str) {
 // view probe and the status tick write them), not identity — but release
 // must clear them with the rest, or a reused pane keeps rendering a border
 // suffix or a status chip nobody owns any more.
-const PANE_TAG_KEYS: [&str; 9] = [
+const PANE_TAG_KEYS: [&str; 10] = [
+    "hive-placeholder",
     "hive-role",
     "hive-agent",
     "hive-team",
