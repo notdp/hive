@@ -223,6 +223,26 @@ pub(super) fn hooked_install_wake_hooks(team: &str) {
     crate::tmux::install_wake_hooks(team)
 }
 
+/// The window exists and carries this team's tag. Under test a dedicated
+/// hook answers; without one the window-alive hook stands in, so the
+/// display tests keep their meaning.
+pub(super) fn hooked_team_window_alive(tmux_window_id: &str, team: &str) -> bool {
+    #[cfg(test)]
+    {
+        hookget(|h| h.team_window_alive.clone())
+            .flatten()
+            .map_or_else(
+                || hooked_is_tmux_window_alive(tmux_window_id),
+                |f| f(tmux_window_id, team),
+            )
+    }
+    #[cfg(not(test))]
+    {
+        is_tmux_window_alive_impl(tmux_window_id)
+            && crate::tmux::get_window_option(tmux_window_id, "hive-team").as_deref() == Some(team)
+    }
+}
+
 pub(super) fn hooked_is_tmux_window_alive(tmux_window_id: &str) -> bool {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.is_tmux_window_alive.clone()).flatten() {

@@ -6683,6 +6683,41 @@ fn test_hived_sleeps_when_no_terminal_watches_its_window() {
     assert_eq!(asleep_reason("{}"), None);
 }
 
+/// A tmux server restart hands out window ids from `@0` again: a hived
+/// from before the restart must not read another team's `@0` as its own
+/// display.
+#[test]
+fn test_hived_sleeps_when_its_window_id_now_belongs_to_another_team() {
+    let env = sleep_probe_env();
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    crate::registry::set_display("probe", "@1").unwrap();
+    testhook::update(|h| {
+        h.list_panes_all_status = Some(Arc::new(|| (Some(Vec::new()), "ok")));
+        // The id exists on the server…
+        h.is_tmux_window_alive = Some(Arc::new(|_| true));
+        // …but the window is not this team's any more.
+        h.team_window_alive = Some(Arc::new(|window, team| {
+            assert_eq!(window, "@1");
+            assert_eq!(team, "probe");
+            false
+        }));
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.wait_tick = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(*n <= 2, "a hived on a recycled window id failed to sleep");
+            true
+        }));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    let events = display_events(&env, "hived.sleep");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["reason"], "window-gone");
+}
+
 #[test]
 fn test_a_starting_hived_installs_the_wake_hooks_on_its_team_session() {
     let env = unwatched_probe_env(Some(1));
