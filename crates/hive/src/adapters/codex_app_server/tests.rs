@@ -902,24 +902,33 @@ fn test_resume_returns_false_on_error() {
 }
 
 #[test]
-fn test_attach_resumes_each_loaded_thread() {
+fn test_unsubscribe_tells_the_daemon_and_forgets_the_thread() {
     let client = bare_client();
-    let calls = recording_override(&client, |method| {
-        if method == "thread/loaded/list" {
-            json!({"result": {"data": ["t1", "t2"]}})
-        } else {
-            json!({"result": {}})
-        }
-    });
-    client.attach();
-    let seen: Vec<String> = calls
-        .lock()
-        .unwrap()
+    let calls = recording_override(&client, |_method| json!({"result": {}}));
+    // One resume per cooldown while the runtime stays missing…
+    assert!(client.runtime_or_backfill("t1").is_none());
+    assert!(client.runtime_or_backfill("t1").is_none());
+    let resumes = |calls: &Vec<(String, Value)>| {
+        calls
+            .iter()
+            .filter(|(method, _)| method == "thread/resume")
+            .count()
+    };
+    assert_eq!(resumes(&calls.lock().unwrap()), 1);
+
+    // …until the thread is released: the daemon hears it, and the next read
+    // resumes afresh instead of waiting out the old cooldown.
+    assert!(client.unsubscribe("t1"));
+    assert!(client.runtime_or_backfill("t1").is_none());
+    let calls = calls.lock().unwrap();
+    let released: Vec<&Value> = calls
         .iter()
-        .filter(|(method, _)| method == "thread/resume")
-        .map(|(_, params)| params["threadId"].as_str().unwrap().to_string())
+        .filter(|(method, _)| method == "thread/unsubscribe")
+        .map(|(_, params)| params)
         .collect();
-    assert_eq!(seen, vec!["t1", "t2"]);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0]["threadId"], "t1");
+    assert_eq!(resumes(&calls), 2);
 }
 
 #[test]

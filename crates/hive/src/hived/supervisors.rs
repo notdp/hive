@@ -157,6 +157,13 @@ pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
         if !reap_stale_record(hooked_cas_pane_thread_socket(&pane).as_deref(), own) {
             continue;
         }
+        // Reading the member's runtime subscribed this hived to its thread;
+        // with the pane gone nothing of hive's needs that, and releasing it
+        // is what lets the daemon's idle unload reclaim the thread and the
+        // tool hosts it spawned.
+        if let Some(thread_id) = hooked_cas_thread_id_for_pane(&pane) {
+            hooked_cas_unsubscribe_thread(&thread_id);
+        }
         hooked_cas_clear_pane_thread(&pane);
         codex_reattach_at()
             .lock()

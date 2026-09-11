@@ -1020,6 +1020,18 @@ reverse-engineering it from the transcript.
   receives only status events, since turn and item events go to the turn's
   owner, so status is the sole busy source; a client that connected late
   backfills once on resume.
+- **A subscription is held only for a thread hive reads, and released with
+  its pane.** `thread/resume` subscribes the client, and the daemon unloads
+  a thread — with the MCP servers and tool hosts it spawned — only after it
+  has had no subscriber and no active turn for its idle delay
+  (`unload_thread_without_subscribers`, `thread/closed`; thirty minutes in
+  the app-server source, present in codex 0.153.4). Hive therefore resumes
+  a thread the first time it reads its runtime and never the daemon's whole
+  loaded list: a client that resumed everything on connect kept every other
+  team's and every finished member's thread loaded for as long as any hived
+  was up. The hived's supervisor `thread/unsubscribe`s a member's thread
+  when it clears the dead pane's record; a retiring hived or an exiting CLI
+  closes its connection, which releases the rest.
 - **Active phases are deliberately not subdivided.** The native path trades
   transcript-tail granularity for an authoritative busy edge.
 - An unmanaged codex (embedded, or a picker launch whose chosen thread hive
