@@ -337,7 +337,17 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         ],
     );
     let inherited_reexec_lock_fd = take_reexec_lock_fd_from_env();
-    let mut server = match hooked_open_server_socket(workspace) {
+    let start_serving = |server| {
+        RequestServer::start(
+            server,
+            workspace,
+            team,
+            tmux_window,
+            tmux_window_id,
+            &hived_started_at,
+        )
+    };
+    let mut server = match hooked_open_server_socket(workspace).and_then(start_serving) {
         Ok(server) => server,
         Err(err) => {
             // stderr is the hived.stderr log; the notify line is what
@@ -456,15 +466,21 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             ) {
                 // exec failed: keep serving the old build on the rebound
                 // socket instead of dying with the socket torn down.
-                server = replacement;
+                match start_serving(replacement) {
+                    Ok(replacement) => server = replacement,
+                    Err(err) => {
+                        eprintln!("hived: cannot restart accept worker: {err}");
+                        SHUTDOWN.store(true, Ordering::SeqCst);
+                    }
+                }
             }
         }
 
         // One display snapshot per tick: while the tmux server answers, it
         // is what every display-dependent tick reads (pane liveness,
         // windows, CLIs, tokens are lookups into it); while it does not,
-        // those ticks are skipped and the probe backs off. The socket below
-        // keeps its 1s accept loop either way.
+        // those ticks are skipped and the probe backs off. The accept worker
+        // serves independently of this sampling and maintenance.
         let snap = if display.due(now) {
             let snap = TickSnapshot::collect();
             if let Some(transition) = display.record(snap.status, now) {
@@ -505,15 +521,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             tick_members
         });
 
-        if !hooked_serve_requests(
-            server.as_ref(),
-            workspace,
-            team,
-            tmux_window,
-            tmux_window_id,
-            &hived_started_at,
-            IDLE_NOTIFY_TICK_SECONDS,
-        ) {
+        if !hooked_wait_tick(IDLE_NOTIFY_TICK_SECONDS) {
             if finish_shutdown(workspace, server.as_ref(), Duration::from_secs(5)) {
                 break;
             }

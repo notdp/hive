@@ -6,7 +6,9 @@
 // --------------------------------------------------------------------------
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Map, Value};
@@ -997,29 +999,13 @@ pub(super) fn hooked_stale_disk_build_hash(state: &mut ReexecState, now: f64) ->
     stale_disk_build_hash_for_reexec(state, now)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn hooked_serve_requests(
-    server: &dyn HivedServerApi,
-    workspace: &str,
-    team: &str,
-    tmux_window: &str,
-    tmux_window_id: &str,
-    hived_started_at: &str,
-    timeout: f64,
-) -> bool {
+pub(super) fn hooked_wait_tick(timeout: f64) -> bool {
     #[cfg(test)]
-    if let Some(f) = hookget(|h| h.serve_requests.clone()).flatten() {
+    if let Some(f) = hookget(|h| h.wait_tick.clone()).flatten() {
         return f();
     }
-    serve_requests(
-        server,
-        workspace,
-        team,
-        tmux_window,
-        tmux_window_id,
-        hived_started_at,
-        timeout,
-    )
+    std::thread::sleep(Duration::from_secs_f64(timeout));
+    !SHUTDOWN.load(Ordering::SeqCst)
 }
 
 pub(super) fn hooked_open_server_socket(workspace: &str) -> Result<Box<dyn HivedServerApi>> {

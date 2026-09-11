@@ -3005,6 +3005,10 @@ struct RecServer {
 }
 
 impl HivedServerApi for RecServer {
+    fn wait_readable(&self, timeout: f64) -> bool {
+        thread::sleep(Duration::from_secs_f64(timeout));
+        false
+    }
     fn close(&self) {
         self.calls.lock().unwrap().push("server.close".to_string());
     }
@@ -4458,7 +4462,7 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
         release_reexec_lock_fd: Some(Arc::new(|_fd| {})),
         is_tmux_window_alive: Some(Arc::new(|_id| true)),
         stale_disk_build_hash: Some(Arc::new(|| None)),
-        serve_requests: Some(Arc::new(move || {
+        wait_tick: Some(Arc::new(move || {
             serve_sink.lock().unwrap().push("serve".to_string());
             true
         })),
@@ -6065,7 +6069,7 @@ fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
         release_reexec_lock_fd: Some(Arc::new(|_fd| {})),
         is_tmux_window_alive: Some(Arc::new(|_id| true)),
         stale_disk_build_hash: Some(Arc::new(|| None)),
-        serve_requests: Some(Arc::new(move || {
+        wait_tick: Some(Arc::new(move || {
             let mut served = serves_sink.lock().unwrap();
             *served += 1;
             *served < 4
@@ -6128,7 +6132,7 @@ fn test_hived_loop_skips_display_ticks_and_backs_off_while_tmux_is_unreachable()
     assert_eq!(
         *env.serves.lock().unwrap(),
         4,
-        "requests are served every tick"
+        "the coordinator advances every tick"
     );
     assert_eq!(
         *env.bindings.lock().unwrap(),
@@ -6484,7 +6488,7 @@ fn test_shutdown_refused_while_operations_pending_keeps_serving() {
     let workspace = env.workspace.clone();
     let serves = Arc::clone(&env.serves);
     testhook::update(|h| {
-        h.serve_requests = Some(Arc::new(move || {
+        h.wait_tick = Some(Arc::new(move || {
             let mut count = serves.lock().unwrap();
             *count += 1;
             assert!(!admission().lock().unwrap().closed);
@@ -6633,7 +6637,7 @@ fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
         h.monotonic = Some(Arc::new(move || {
             *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
         }));
-        h.serve_requests = Some(Arc::new(move || {
+        h.wait_tick = Some(Arc::new(move || {
             let mut n = serves.lock().unwrap();
             *n += 1;
             assert!(*n <= 2, "idle hived failed to sleep");
@@ -6762,6 +6766,9 @@ fn test_sleep_drain_new_connection_cancels_retirement() {
     use std::os::unix::net::UnixStream;
     struct Queued(Mutex<Option<UnixStream>>);
     impl HivedServerApi for Queued {
+        fn wait_readable(&self, _: f64) -> bool {
+            self.0.lock().unwrap().is_some()
+        }
         fn close(&self) {
             panic!("must continue serving");
         }
@@ -6815,7 +6822,7 @@ fn test_send_wakes_a_sleeping_hived_and_delivers_once() {
         h.monotonic = Some(Arc::new(move || {
             *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
         }));
-        h.serve_requests = Some(Arc::new(move || {
+        h.wait_tick = Some(Arc::new(move || {
             let mut n = serves.lock().unwrap();
             *n += 1;
             assert!(*n <= 2);
@@ -6893,6 +6900,9 @@ fn test_send_wakes_a_sleeping_hived_and_delivers_once() {
 fn test_sleep_drain_new_node_cancels_without_interrupting_it() {
     struct LateNode(String);
     impl HivedServerApi for LateNode {
+        fn wait_readable(&self, _: f64) -> bool {
+            false
+        }
         fn close(&self) {
             panic!("new node keeps the desk awake");
         }
@@ -6912,4 +6922,115 @@ fn test_sleep_drain_new_node_cancels_without_interrupting_it() {
     assert_eq!(record["state"], "prepared");
     assert!(record.get("result").is_none());
     assert!(display_events(&env, "hived.sleep").is_empty());
+}
+
+#[test]
+fn test_hived_answers_ping_and_shutdown_while_display_sampling_is_blocked() {
+    assert_hived_answers_while_sampling(false);
+}
+
+#[test]
+fn test_hived_reexec_failure_restarts_accept_worker_before_sampling() {
+    assert_hived_answers_while_sampling(true);
+}
+
+fn assert_hived_answers_while_sampling(reexec: bool) {
+    let env = loop_probe_env("ok");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = Mutex::new(release_rx);
+    testhook::update(|h| {
+        h.open_server_socket = Some(Arc::new(|workspace| {
+            Ok(Box::new(open_server_socket(workspace)?) as Box<dyn HivedServerApi>)
+        }));
+        h.list_panes_all_status = Some(Arc::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+            (None, "no-server")
+        }));
+        h.wait_tick = Some(Arc::new(|| !SHUTDOWN.load(Ordering::SeqCst)));
+        if reexec {
+            h.stale_disk_build_hash = Some(Arc::new(|| Some("new-build".into())));
+            h.try_acquire_reexec_lock = Some(Arc::new(|_| Some(42)));
+            h.execv = Some(Arc::new(|_| {
+                assert!(admission().lock().unwrap().closed);
+                assert!(!requests_in_flight());
+                ExecOutcome::Failed(std::io::Error::from_raw_os_error(8))
+            }));
+        }
+    });
+    thread::scope(|scope| {
+        let serving = scope.spawn(|| hived_loop(&env.workspace, "probe", "probe:1", "@1"));
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let ping = request_hived(&env.workspace, &action_payload("ping"), 0.5);
+        let shutdown = request_hived(&env.workspace, &action_payload("shutdown"), 0.5);
+        // Release even if either RPC failed, so the failure is reported without
+        // leaving the coordinator blocked in a test barrier.
+        SHUTDOWN.store(true, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        serving.join().unwrap();
+        assert_eq!(
+            ping.expect("ping must answer before sampling is released")["ok"],
+            true
+        );
+        assert_eq!(
+            shutdown.expect("shutdown must answer before sampling is released")["ok"],
+            true
+        );
+    });
+    assert!(!requests_in_flight());
+}
+
+#[test]
+fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
+    use std::io::{Read, Write};
+    struct Observed {
+        server: ServerSocket,
+        entered: std::sync::mpsc::Sender<()>,
+    }
+    impl HivedServerApi for Observed {
+        fn close(&self) {
+            self.server.close();
+        }
+        fn wait_readable(&self, timeout: f64) -> bool {
+            let _ = self.entered.send(());
+            self.server.wait_readable(timeout)
+        }
+        fn accept_timeout(&self, timeout: f64) -> Option<UnixStream> {
+            self.server.accept_timeout(timeout)
+        }
+    }
+    let _guard = testhook::install(Hook::default());
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let raw = Observed {
+        server: open_server_socket(workspace).unwrap(),
+        entered: entered_tx,
+    };
+    let server = RequestServer::start(Box::new(raw), workspace, "t", "", "", "start").unwrap();
+    entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        close_admission(),
+        "an idle poll must not count as a request"
+    );
+    let mut client = UnixStream::connect(socket_path(workspace)).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    client.write_all(b"{\"action\":\"send\"}").unwrap();
+    client.shutdown(std::net::Shutdown::Write).unwrap();
+    assert!(reject_draining_request(server.as_ref()));
+    let mut reply = String::new();
+    client.read_to_string(&mut reply).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&reply).unwrap()["notAdmitted"],
+        true
+    );
+    assert!(!requests_in_flight());
+    server.close();
 }

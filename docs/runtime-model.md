@@ -420,7 +420,12 @@ longer calls `Team::load` per tick. While the server does not answer
 (`no-server` or `unknown` alike), the ticks are skipped and the probe backs
 off, doubling from one tick up to `DISPLAY_PROBE_MAX_BACKOFF_SECONDS`, with
 `display.unreachable` / `display.recovered` logged once per flip. The
-request socket keeps its one-second accept loop throughout, and the
+request socket has its own accept worker, independent of display sampling
+and maintenance. Listener readiness waits hold no request lease; nonblocking
+accept and lease reservation share the admission lock. Closing admission leaves
+queued connections for the coordinator to reject synchronously. Closing the
+socket joins its accept worker before unlink/reexec; a failed exec starts a
+new worker on the rebound listener. The
 control-mode monitor's reattach backs off the same way (`tmux/control_mode.rs`),
 so a dead tmux server costs a hived one probe per 30s instead of a fork
 storm per second. The monitor records every control client it spawns in

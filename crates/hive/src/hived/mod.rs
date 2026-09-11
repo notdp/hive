@@ -59,15 +59,13 @@ pub const HIVED_SLEEP_AFTER_SECONDS: f64 = 600.0;
 // The display (tmux server) is probed every tick while it answers — that
 // listing is the pane snapshot the status and view ticks read — and on a
 // doubling schedule capped here while it does not. A dead server must not
-// cost a fork storm per second; the socket keeps its 1s accept loop either
-// way, so requests never wait on tmux.
+// cost a fork storm per second; a separate worker accepts socket requests
+// while the coordinator samples the display.
 pub const DISPLAY_PROBE_MAX_BACKOFF_SECONDS: f64 = 30.0;
 const HIVED_REEXEC_LOCK_ENV: &str = "HIVE_HIVED_REEXEC_LOCK_FD";
 pub const SOCKET_READY_TIMEOUT: f64 = 2.0;
-// Identity checks must wait strictly longer than the worst tick phase:
-// the main loop cannot accept requests during that phase. Five seconds
-// gives headroom over observed idle ticks up to 616ms and spawn bursts;
-// revisit this budget if tick latency grows. Startup polling stays short.
+// Identity checks allow scheduling and reexec recovery headroom. Display
+// sampling runs separately from accept; startup polling stays short.
 pub(crate) const IDENTITY_PING_TIMEOUT: f64 = 5.0;
 pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
 // The CLI's socket budget must be strictly longer than the work it asks the
