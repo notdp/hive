@@ -200,6 +200,19 @@ pub(super) fn hooked_tmux_socket_path() -> Option<String> {
     crate::tmux::own_socket_path()
 }
 
+/// Terminals attached to the team window's session; under test, watched
+/// unless a test says otherwise, so the display tests keep their meaning.
+pub(super) fn hooked_watching_clients(session: &str) -> Option<usize> {
+    #[cfg(test)]
+    {
+        hookget(|h| h.watching_clients.clone())
+            .flatten()
+            .map_or(Some(1), |f| f(session))
+    }
+    #[cfg(not(test))]
+    crate::tmux::watching_clients(session)
+}
+
 pub(super) fn hooked_is_tmux_window_alive(tmux_window_id: &str) -> bool {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.is_tmux_window_alive.clone()).flatten() {

@@ -68,6 +68,45 @@ pub fn display_value(target: &str, fmt: &str) -> Option<String> {
 ///
 /// Never errors: a missing tmux binary, timeout, nonzero exit, or mismatched
 /// id all mean "not alive" to callers making reap decisions.
+/// How many clients attached to *session* are terminals — control-mode
+/// clients (hive's own monitor) excluded. None when tmux does not answer
+/// or the session is gone: an unknown viewer count is not "nobody".
+pub fn watching_clients(session: &str) -> Option<usize> {
+    if session.is_empty() {
+        return None;
+    }
+    let r = run(
+        &[
+            "list-clients",
+            "-t",
+            session,
+            "-F",
+            "#{client_control_mode}",
+        ],
+        false,
+        5,
+    )
+    .ok()?;
+    (r.returncode == 0).then(|| count_watching(&r.stdout))
+}
+
+/// One `list-clients` line per client, `1` for control mode.
+pub(crate) fn count_watching(listing: &str) -> usize {
+    listing.lines().filter(|line| line.trim() == "0").count()
+}
+
+#[cfg(test)]
+mod watching_tests {
+    use super::count_watching;
+
+    #[test]
+    fn test_count_watching_counts_terminals_not_control_clients() {
+        assert_eq!(count_watching(""), 0);
+        assert_eq!(count_watching("1\n"), 0);
+        assert_eq!(count_watching("0\n1\n0\n"), 2);
+    }
+}
+
 pub fn window_exists(window_id: &str) -> bool {
     if window_id.is_empty() {
         return false;

@@ -6639,6 +6639,88 @@ fn sleep_server() -> RecServer {
     }
 }
 
+/// A team window the display probe sees, on a session nobody watches
+/// unless the test says so.
+fn unwatched_probe_env(watching: Option<usize>) -> LoopProbeEnv {
+    let env = loop_probe_env("ok");
+    crate::registry::record_team("probe", &env.workspace, "123", &[], "").unwrap();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.watching_clients = Some(Arc::new(move |session| {
+            assert_eq!(session, "probe");
+            watching
+        }));
+    });
+    env
+}
+
+#[test]
+fn test_hived_sleeps_when_no_terminal_watches_its_window() {
+    let env = unwatched_probe_env(Some(0));
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    testhook::update(|h| {
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.wait_tick = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(*n <= 2, "an unwatched hived failed to sleep");
+            true
+        }));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    let events = display_events(&env, "hived.sleep");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["reason"], "unwatched");
+    assert!(SHUTDOWN.load(Ordering::SeqCst));
+    assert!(crate::registry::load("probe").is_some());
+    // The marker `hive wake` reads: this desk left for want of a viewer.
+    let marker = fs::read_to_string(asleep_marker_path(&env.workspace)).unwrap();
+    assert_eq!(asleep_reason(&marker).as_deref(), Some("unwatched"));
+    assert_eq!(asleep_reason("not json"), None);
+    assert_eq!(asleep_reason("{}"), None);
+}
+
+#[test]
+fn test_a_starting_hived_clears_the_asleep_marker() {
+    let env = unwatched_probe_env(Some(1));
+    let marker = asleep_marker_path(&env.workspace);
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, "{\"reason\":\"unwatched\"}\n").unwrap();
+    testhook::update(|h| {
+        h.wait_tick = Some(Arc::new(|| false));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert!(!marker.exists());
+}
+
+#[test]
+fn test_hived_stays_up_while_a_terminal_watches_or_the_count_is_unknown() {
+    for watching in [Some(1), None] {
+        let env = unwatched_probe_env(watching);
+        let serves = Arc::clone(&env.serves);
+        let clock = Arc::clone(&serves);
+        testhook::update(|h| {
+            h.monotonic = Some(Arc::new(move || {
+                *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+            }));
+            h.wait_tick = Some(Arc::new(move || {
+                let mut n = serves.lock().unwrap();
+                *n += 1;
+                *n < 4
+            }));
+        });
+        hived_loop(&env.workspace, "probe", "probe:1", "@1");
+        assert_eq!(*env.serves.lock().unwrap(), 4, "{watching:?}");
+        assert!(
+            display_events(&env, "hived.sleep").is_empty(),
+            "{watching:?}"
+        );
+    }
+}
+
 #[test]
 fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
     let env = sleep_probe_env();

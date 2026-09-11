@@ -312,7 +312,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     let mut claude_view_state = ClaudeTickState::default();
     let mut status_state = StatusTickState::default();
     let mut display = DisplayProbe::new();
-    let mut sleep = SleepState::default();
+    let mut sleep = SleepState::for_window(tmux_window);
     // `monotonic()` starts near zero, so a 0.0 seed would skip the first
     // periodic checks; negative infinity makes every one run on the first tick.
     let mut last_window_check = f64::NEG_INFINITY;
@@ -326,6 +326,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     );
+    sleep::clear_asleep_marker(workspace);
     hooked_notify_debug_emit(
         workspace,
         "hived.start",

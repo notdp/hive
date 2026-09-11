@@ -7,10 +7,56 @@ use serde_json::Value;
 
 use super::*;
 
+/// Where a retired desk says why it left: `{"reason": …, "at": …}` under
+/// the workspace's run dir, removed by the next generation's start. The
+/// `unwatched` reason is what `hive wake` acts on — the session hooks bring
+/// back only a desk that retired for want of a viewer, never start one a
+/// team has not asked for.
+pub fn asleep_marker_path(workspace: &str) -> std::path::PathBuf {
+    crate::devlog::run_dir(std::path::Path::new(workspace)).join("desk.asleep")
+}
+
+/// The reason recorded in a marker's text, if it is one.
+pub fn asleep_reason(marker: &str) -> Option<String> {
+    serde_json::from_str::<Value>(marker)
+        .ok()?
+        .get("reason")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn write_asleep_marker(workspace: &str, reason: &str) {
+    let path = asleep_marker_path(workspace);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let body = serde_json::json!({"reason": reason, "at": crate::gc::epoch_now()});
+    let _ = std::fs::write(path, format!("{body}\n"));
+}
+
+pub(super) fn clear_asleep_marker(workspace: &str) {
+    let _ = std::fs::remove_file(asleep_marker_path(workspace));
+}
+
 #[derive(Default)]
 pub(super) struct SleepState {
     since: Option<f64>,
     usage: u64,
+    /// The session the team window sits in (from its `session:index`
+    /// target): whose terminals count as viewers.
+    session: String,
+}
+
+impl SleepState {
+    pub(super) fn for_window(tmux_window: &str) -> Self {
+        SleepState {
+            session: tmux_window
+                .split_once(':')
+                .map_or("", |(session, _)| session)
+                .to_string(),
+            ..Default::default()
+        }
+    }
 }
 
 fn idle_owned_grok_keys(team: &str) -> Option<Vec<String>> {
@@ -55,11 +101,10 @@ impl SleepState {
             let state = admission().lock().unwrap_or_else(|e| e.into_inner());
             (state.leases > state.readers, state.usage)
         };
-        let reason = absent_display(team, window, snap);
+        let absent = absent_display(team, window, snap);
         let used = self.usage != usage;
         self.usage = usage;
-        if reason.is_none()
-            || working
+        if working
             || used
             || pending_operations(workspace) != 0
             || idle_owned_grok_keys(team).is_none()
@@ -67,6 +112,22 @@ impl SleepState {
             self.since = None;
             return false;
         }
+        // A window no terminal is attached to is a picture nobody sees:
+        // the status bar and colours this desk keeps up have no viewer.
+        // hive's own control-mode monitor is not one; a count tmux will
+        // not give is not "nobody". Asked only once the cheaper gates
+        // pass, so a busy desk never pays for it.
+        let reason = match absent {
+            Some(reason) => Some(reason),
+            None => match hooked_watching_clients(&self.session) {
+                Some(0) => Some("unwatched"),
+                _ => None,
+            },
+        };
+        let Some(reason) = reason else {
+            self.since = None;
+            return false;
+        };
         let since = *self.since.get_or_insert(now);
         if now - since < HIVED_SLEEP_AFTER_SECONDS || requests_in_flight() {
             // A read holds a lease through its reply, but does not renew the desk.
@@ -76,6 +137,7 @@ impl SleepState {
         if !self.finish(workspace, team, server, usage) {
             return false;
         }
+        write_asleep_marker(workspace, reason);
         SHUTDOWN.store(true, Ordering::SeqCst);
         hooked_notify_debug_emit(
             workspace,
@@ -83,7 +145,7 @@ impl SleepState {
             &[
                 ("team", Value::from(team)),
                 ("idleSeconds", Value::from(now - since)),
-                ("reason", Value::from(reason.unwrap())),
+                ("reason", Value::from(reason)),
             ],
         );
         true

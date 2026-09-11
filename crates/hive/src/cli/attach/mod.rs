@@ -108,6 +108,33 @@ pub(crate) fn mirror_cmd(mode: &str, window: &str) {
     }
 }
 
+/// `hive wake --window TARGET`: the session hooks' way of bringing a desk
+/// that retired unwatched back when a terminal arrives. It starts a hived
+/// only where the last one left an `unwatched` marker — never for a window
+/// that is not a team's, a team whose desk is up, or one that retired for
+/// another reason or never ran — and exits quietly either way.
+pub(crate) fn wake_cmd(window: &str) {
+    let Some(team) = tmux::get_window_option(window, "hive-team").filter(|t| !t.is_empty()) else {
+        return;
+    };
+    let Ok(mut t) = crate::team::load_team(&team, "") else {
+        return;
+    };
+    let workspace = crate::team::resolve_workspace(Some(&t), false).unwrap_or_default();
+    if workspace.is_empty() || !retired_unwatched(&workspace) {
+        return;
+    }
+    start_team_hived_or_warn(&mut t, &workspace);
+}
+
+fn retired_unwatched(workspace: &str) -> bool {
+    std::fs::read_to_string(crate::hived::asleep_marker_path(workspace))
+        .ok()
+        .and_then(|marker| crate::hived::asleep_reason(&marker))
+        .as_deref()
+        == Some("unwatched")
+}
+
 /// The team window of the caller's own membership when it has no pane: the
 /// desktop session whose mirror the verb shows or hides.
 fn bound_team_window() -> Option<String> {

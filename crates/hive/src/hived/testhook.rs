@@ -63,6 +63,7 @@ pub struct Hook {
     pub list_panes_all_status: Option<F0<(Option<Vec<crate::tmux::PaneInfo>>, &'static str)>>,
     pub tmux_socket_path: Option<F0<Option<String>>>,
     pub is_tmux_window_alive: Option<S1<bool>>,
+    pub watching_clients: Option<S1<Option<usize>>>,
     // agent_cli
     pub detect_cli_process_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
     pub detect_profile_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
