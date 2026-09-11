@@ -2,8 +2,9 @@
 //! `pub fn main()`, the root gates every subcommand passes (tmux, codex
 //! native), the help interception, and the dispatch into one module per
 //! domain — `team`, `member`, `attach`, `fork`, `workflow`, `launch`, `setup`,
-//! `update`, `uninstall`, `worktree`. The handlers print and exit; the logic they call lives in
-//! the crate (`team`, `naming`, `send`, `identity`, `team_display`).
+//! `update`, `uninstall`, `worktree`, `gc`, `ps`. The handlers print and
+//! exit; the logic they call lives in the crate (`team`, `naming`, `send`,
+//! `identity`, `team_display`).
 
 mod attach;
 mod fork;

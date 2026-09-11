@@ -11,8 +11,9 @@ use serde_json::{Map, Value};
 
 use super::*;
 
-/// Why a request got no answer. `NotSent`: it never reached the hived —
-/// no socket, the connect or the write failed — so nothing was served.
+/// Why a request got no answer. `NoListener` and `NotSent`: it never
+/// reached the hived — no socket or nobody on it, the connect or the write
+/// failed — so nothing was served.
 /// `AnswerLost`: the request went out whole and the answer did not come
 /// back (read failed or timed out, empty, unparsable), so the hived may
 /// have served it. A caller with a side effect on the line (a node
@@ -231,7 +232,7 @@ pub fn request_team_runtime(workspace: &str, team: &str) -> Option<Map<String, V
     request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 
-/// `request_team_runtime` telling its two failures apart: `NotSent` (no
+/// `request_team_runtime` telling its two failures apart: `NoListener` (no
 /// hived listens — a socket file nobody answers on is a dead hived's
 /// leftover) from `AnswerLost` (one does, and did not answer).
 pub(crate) fn request_team_runtime_answer(

@@ -520,7 +520,7 @@ fn render_thinking(
     }
 }
 
-/// The scrollback's left margin; the full-screen block viewer has none.
+/// The scrollback's left margin; the block viewer has none.
 const SCROLLBACK_INDENT: &str = "   ";
 
 fn indented(indent: &str, spans: Vec<Span<'static>>) -> Line<'static> {

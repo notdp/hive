@@ -293,7 +293,7 @@ fn target_alive(pid: libc::pid_t, target: libc::pid_t) -> bool {
 /// Stop the live daemon; clear its socket, pidfile and auth baseline only
 /// once it is gone. Caller holds the daemon lock.
 ///
-/// SIGTERM goes to the daemon's process group: `spawn_daemon` made it a
+/// SIGTERM goes to the daemon's process group: `ensure_daemon` made it a
 /// session leader, and the npm launcher is a node wrapper whose native
 /// child sits in the same group (the wrapper forwards SIGTERM itself; the
 /// group is the belt to that brace). Exit is the process's, not the

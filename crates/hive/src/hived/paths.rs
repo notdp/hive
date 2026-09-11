@@ -27,8 +27,9 @@ pub(crate) fn hived_metadata(started_at: &str) -> Map<String, Value> {
     meta
 }
 
-/// Registry `createdAt` is compared as a string, so the hived formats its
-/// float exactly like the CLI writer did (whole seconds keep a `.0`).
+/// Registry `createdAt` names the instance: the hived formats its float
+/// through the CLI writer's own `team::created_at_key`, and the registry
+/// compares the two as numbers.
 pub(super) use crate::team::created_at_key;
 
 pub(super) fn map_get_str(map: &Map<String, Value>, key: &str) -> String {

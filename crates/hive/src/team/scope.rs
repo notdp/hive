@@ -146,7 +146,7 @@ pub(crate) fn start_team_hived_or_warn(t: &mut Team, workspace: &str) {
     }
 }
 
-/// Seam used by send.rs and node.rs (team not mutated).
+/// Seam used by send.rs and workflow.rs (team not mutated).
 pub(crate) fn ensure_team_hived(t: &Team, workspace: &Path) -> Result<()> {
     let mut clone = t.clone();
     start_team_hived(&mut clone, &workspace.to_string_lossy()).map(|_| ())

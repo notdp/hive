@@ -54,7 +54,7 @@ Team:
   delete  Delete a team and clean up.
   gc      Archive cold teams, purge expired archives, keep or restore.
   join    Join a team.
-  layout  Apply a tmux layout preset to the current team window.
+  layout  Plan the team window's layout, or apply a tmux preset over it.
   mirror  Show or hide the team's read-only orch mirror pane.
 
 Human Helpers:
@@ -106,7 +106,7 @@ Examples:
   hive spawn explore --task /tmp/task.md       # spawn a member and dispatch its task atomically
   hive team                                    # members + runtime state (busy / inputState)
 
-  # Messaging (root thread: body is a short summary, details go in --artifact)
+  # Messaging (body is a short summary, details go in --artifact)
   hive send dodo "review this diff" --artifact /tmp/diff.md
   hive send dodo "see report" --artifact - <<'EOF'
   # Findings
@@ -684,10 +684,9 @@ Options:
   the last thing you say in that turn, read off your engine — nothing to
   send back.
 
-  New-thread sends must keep `body` to a short summary and put details in
-  `--artifact`; the body is rejected if longer than 500 chars, has 3+ lines,
-  contains fenced code, or starts markdown heading/list lines. A send that
-  continues a thread is exempt.
+  Keep `body` to a short summary and put details in `--artifact`; a body
+  longer than 500 chars, with 3+ lines, fenced code, or markdown heading/list
+  lines draws a warning on stderr (the send still goes).
 
   Delivery is binary and fire-and-forget: the native transport (claude
   daemon / codex daemon) either accepted the message — its runtime owns

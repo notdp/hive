@@ -1,7 +1,7 @@
 //! Real-tmux e2e for eager display: `hive create` outside tmux builds a
 //! detached session named after the team, `hive attach` rebuilds a missing
-//! window (in the caller's session inside tmux, in a fresh team session
-//! outside), `hive delete` closes what hive built and leaves what a human's
+//! window in the team's own session (whether the caller is inside tmux or
+//! not), `hive delete` closes what hive built and leaves what a human's
 //! session lent. Every test runs the built binary against a private tmux
 //! server (its own `TMUX_TMPDIR`) and a temp `HIVE_HOME`, so neither the
 //! user's server nor their registry ever sees a session or a team.

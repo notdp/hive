@@ -457,7 +457,7 @@ pub(crate) fn has_row(argv: &Argv, row: &[&str]) -> bool {
 /// Healthy identity for the hived hook's ping, so `start_team_hived`
 /// believes a hived is up and starts none. Every other request still goes
 /// to the real workspace socket: unanswered when nothing listens there,
-/// answered by `fake_hived` when a test binds it.
+/// answered by a `FakeHived` when a test binds one.
 pub(crate) fn hived_answering_ping(team: &str) -> crate::hived::testhook::Guard {
     let team = team.to_string();
     let request_ping = std::sync::Arc::new(move |_ws: &str, _timeout: f64| {

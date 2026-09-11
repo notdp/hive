@@ -60,7 +60,7 @@ pub struct ViewTheme {
     pub bg_visual: Color,
     /// Thinking accent gutter (grok accent_thinking, magenta family).
     pub accent_thinking: Color,
-    /// Successful run accent gutter.
+    /// Bullet of a run or tool that came back clean.
     pub accent_success: Color,
     /// Palette fuzzy-match character highlight.
     pub fuzzy_accent: Color,

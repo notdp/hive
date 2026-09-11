@@ -1169,8 +1169,8 @@ impl WorkflowEnv for RealEnv {
     }
 
     /// One question to the hived (`turn-open`), which asks the member's
-    /// engine directly: codex `thread/read`, the claude bg engine record,
-    /// the grok leader's push-fed state.
+    /// engine directly: codex `thread/read`, the grok leader's push-fed
+    /// state.
     fn turn_open(&self, name: &str) -> Option<bool> {
         let ctx = self.context().ok()?;
         hived_turn_open(crate::hived::request_turn_open(

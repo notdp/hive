@@ -24,7 +24,10 @@
 //! identity — a recycled name is a new instance), `display` (the tmux window
 //! id currently rendering the team; a cache, never authority), and `members`
 //! rows of `name` / `cli` / `model` / `sessionId` (the engine identity: claude
-//! jobId, codex threadId, grok session id) / `cwd`.
+//! jobId, codex threadId, grok session id) / `cwd`. A Claude session
+//! member's row also carries `hostSessionId` (`HOST_SESSION_FIELD`), and
+//! the collector keeps its cold clock, keep flag and closing intent under
+//! `gc` (`gc.rs`).
 
 use std::fs;
 use std::io::Write as _;
@@ -395,8 +398,9 @@ enum Open {
 
 /// The write lane's shared prelude: lock the store, then load *team*'s
 /// entry. Refuses with `rejected` (unsafe name), `missing` (no entry: the
-/// team was deleted), or `stale` (*created_at*, when given, does not match
-/// the stored instance: a recycled name's successor is never edited into).
+/// team was deleted), `stale` (*created_at*, when given, does not match
+/// the stored instance: a recycled name's successor is never edited into),
+/// or `closing` (the collector is archiving the team: `gc::is_closing`).
 fn open_instance(team: &str, created_at: &str) -> Result<Open> {
     let path = match entry_path(team) {
         Some(p) => p,
@@ -429,8 +433,8 @@ fn member_rows(entry: &Map<String, Value>) -> Vec<Value> {
 /// Add or replace one member row in the team's roster (CLI write lane).
 ///
 /// Returns `written` or one of `open_instance`'s refusals
-/// (`rejected`/`missing`/`stale`). No refusal is a cue to seed an entry —
-/// only `record_team` creates one.
+/// (`rejected`/`missing`/`stale`/`closing`). No refusal is a cue to seed an
+/// entry — only `record_team` creates one.
 pub fn record_member(
     team: &str,
     member: &Map<String, Value>,

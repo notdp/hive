@@ -88,10 +88,11 @@ behavior is documented in the modules themselves.
   identity by itself. The who-am-I ladder still matches an existing session
   id first, and synchronous succession needs neither tmux nor a hived.
 - `cli/` is one module per domain of verbs (`team`, `member`, `attach`,
-  `fork`, `workflow`, `launch`, `setup`, `update`, `worktree`) that parse, print and
-  exit; the logic they call lives in the crate and is what `run_node`
-  reaches for too: `team/` (`scope` for which team a verb acts
-  on, `roster` for membership writes, `delete`), `naming.rs` (the name
+  `fork`, `workflow`, `launch`, `setup`, `update`, `uninstall`, `worktree`,
+  `gc`, `ps`) that parse, print and exit; the logic they call lives in the
+  crate and is what the workflow runner reaches for too: `team/` (`scope`
+  for which team a verb acts on, `roster` for membership writes,
+  `delete`), `naming.rs` (the name
   pools and the uniqueness claim), `send.rs` (send addressing and the
   hived send seam), `team_display.rs` (the eager window on top of the
   registry), `identity.rs`. Nothing outside `cli/` imports from it, and
