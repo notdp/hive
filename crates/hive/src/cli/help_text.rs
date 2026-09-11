@@ -645,6 +645,24 @@ Commands:
   set    Label the current team window with its PR number.
 "#
         }
+        ["wake"] => {
+            r#"Usage: hive wake --window TARGET
+
+  Bring the team window's hived back.
+
+  Run by the two hooks the team session carries (`client-attached`,
+  `client-session-changed`) with the session's current window as TARGET:
+  a desk that retired because no terminal was attached to its window
+  (`hived.sleep unwatched`) is started again the moment someone looks, so
+  the status bar and the pane colours are live without a hive verb being
+  typed. A window that is not a team window, or a team whose hived is
+  already up, is left alone; prints nothing and exits 0 either way.
+
+Options:
+  --window TARGET  The window the client arrived at (`session:index`)
+  -h, --help       Show this message and exit.
+"#
+        }
         ["resume-hint"] => {
             r#"Usage: hive resume-hint [OPTIONS] {claude|codex|grok}
 

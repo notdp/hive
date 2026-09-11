@@ -45,6 +45,7 @@ pub(crate) use runtime::*;
 pub use seams::*;
 pub use server::*;
 use sleep::*;
+pub use sleep::{asleep_marker_path, asleep_reason};
 pub(crate) use snapshot::*;
 pub use state::*;
 pub use status::*;

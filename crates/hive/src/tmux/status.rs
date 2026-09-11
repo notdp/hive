@@ -290,7 +290,35 @@ fn install_status_rows(session_id: &str) -> Vec<Vec<String>> {
     let mut rows = team_status_argv(session_id, crate::view_theme::active_theme_kind());
     rows.push(status_click_binding(&hive, &status_click_fallback()));
     rows.push(mirror_key_binding(&hive, &prefix_m_fallback()));
+    rows.extend(wake_hook_argv(session_id, &hive));
     rows
+}
+
+/// The two session hooks that fire when a terminal arrives at the team
+/// session — a fresh attach, or a client switching over from another
+/// session — each running `hive wake` on the session's current window.
+/// A desk that retired because nobody was watching (`hived.sleep
+/// unwatched`) comes back the moment someone looks, so the bar and the
+/// colours are live again without a hive verb being typed.
+pub(crate) const WAKE_HOOKS: [&str; 2] = ["client-attached", "client-session-changed"];
+
+pub(crate) fn wake_run_shell(hive: &str) -> String {
+    format!("run-shell -b \"{hive} wake --window '#{{q:session_name}}:#{{window_index}}' >/dev/null 2>&1 || true\"")
+}
+
+pub(crate) fn wake_hook_argv(session_id: &str, hive: &str) -> Vec<Vec<String>> {
+    WAKE_HOOKS
+        .iter()
+        .map(|hook| {
+            vec![
+                "set-hook".to_string(),
+                "-t".to_string(),
+                session_id.to_string(),
+                hook.to_string(),
+                wake_run_shell(hive),
+            ]
+        })
+        .collect()
 }
 
 pub fn install_team_status(session_id: &str) {

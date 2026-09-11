@@ -716,7 +716,22 @@ fn test_install_team_status_runs_options_then_bindings() {
     ));
     expected.push(status_click_binding("/x/hive", STOCK_STATUS_CLICK));
     expected.push(mirror_key_binding("/x/hive", "select-pane -m"));
+    // …then the two session hooks that wake a desk when a terminal arrives.
+    expected.extend(wake_hook_argv("$3", "/x/hive"));
     assert_eq!(argvs(&calls), expected);
+}
+
+#[test]
+fn test_wake_hooks_run_hive_wake_on_the_sessions_current_window() {
+    let rows = wake_hook_argv("$3", "/x/hive");
+    let run = "run-shell -b \"/x/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
+    assert_eq!(
+        rows,
+        vec![
+            v(&["set-hook", "-t", "$3", "client-attached", run]),
+            v(&["set-hook", "-t", "$3", "client-session-changed", run]),
+        ]
+    );
 }
 
 /// The bar reads options only — no `#(` shell-out — and every `@hive-`
