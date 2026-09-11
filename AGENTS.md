@@ -326,8 +326,9 @@ carry:
 - `run/cvim/` is written by the embedded cvim bash toolkit
   (`assets/cvim/bin/cvim-command`), not by Rust, with `latest` naming the
   newest run. Grepping the crate's Rust source for the writer finds nothing.
-- Log verbosity defaults to `normal`, which drops the three highest-frequency
-  hived events (`DEV_ONLY_EVENTS` in `devlog.rs`); every other notify event is
+- Log verbosity defaults to `dev` for binary paths containing `target/debug`
+  or `target/release`, and `normal` otherwise; `normal` drops the three
+  highest-frequency hived events (`DEV_ONLY_EVENTS` in `devlog.rs`); every other notify event is
   recorded either way, and the gate is notify-only. An event missing from
   `notify.jsonl` is not evidence that it never fired. Use
   `HIVE_LOG_VERBOSITY=dev` only as a temporary debugging escape hatch.
