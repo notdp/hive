@@ -307,8 +307,9 @@ const COMPOSER_H: u16 = 3;
 /// the palette is typing into it), content inset 2 cols, `❯ ` prefix —
 /// accent_user when focused, gray_dim idle (grok PromptStyle::accent_color).
 /// Permanently read-only: the slash palette is the only thing that ever
-/// types here; idle it shows just the prompt arrow, hints stay on the row
-/// below the box (grok keeps its shortcuts bar under the composer).
+/// types here; idle it shows the prompt arrow and a dim `read-only`, hints
+/// stay on the row below the box (grok keeps its shortcuts bar under the
+/// composer).
 fn draw_composer(frame: &mut Frame, app: &App, rect: Rect) {
     let t = app.theme;
     if rect.width < 4 || rect.height < COMPOSER_H {

@@ -38,7 +38,6 @@ fn headless(cli: &str, session_id: Option<&str>) -> Agent {
     }
 }
 
-/// Python `_mock_claude_bg_up`.
 fn mock_claude_bg_up(job_id: &str, session_id: &str) {
     let engine = fake_engine(4321, job_id, session_id);
     hook(|h| {
@@ -48,7 +47,6 @@ fn mock_claude_bg_up(job_id: &str, session_id: &str) {
     });
 }
 
-/// Python `_mock_daemon_up`.
 fn mock_daemon_up() {
     hook(|h| h.codex_spawn_daemon = true);
 }
@@ -63,12 +61,12 @@ fn mock_grok_leader_up() {
     });
 }
 
-/// Python `_pin_cli_probe`: "" pins "no live CLI process".
+/// "" pins "no live CLI process".
 fn pin_cli_probe(name: &str) {
     hook(|h| h.cli_probe = Some(name.to_string()));
 }
 
-/// Python `_pin_job`: pane record -> engine entry.
+/// Pane record -> engine entry.
 fn pin_job(job_id: &str, engine: EngineSession) {
     hook(|h| {
         h.job_id_for_pane = Some(job_id.to_string());
@@ -76,7 +74,6 @@ fn pin_job(job_id: &str, engine: EngineSession) {
     });
 }
 
-/// Python `_stale_claude_record`.
 fn stale_claude_record() {
     pin_job("beef4321", fake_engine(4321, "beef4321", "sess-registry"));
     hook(|h| h.sessions_send = Some(claude_sessions::ACCEPTED_UDS_WRITE));
@@ -1964,7 +1961,7 @@ fn test_spawn_skill_ref_is_bare_for_grok_and_qualified_for_claude() {
     assert!(hook(|h| h.spawns.last().unwrap().prompt.clone()).starts_with("/hive:hive"));
 }
 
-// --- headless members (tests/unit/test_agent_headless.py) ----------------
+// --- headless members ----------------------------------------------------
 
 #[test]
 fn test_headless_codex_send_routes_by_thread() {
@@ -2138,9 +2135,8 @@ fn test_headless_claude_kill_never_stops_an_interactive_session() {
     assert!(hook(|h| h.stopped.clone()).is_empty());
 }
 
-// --- the hive paths that ride the key pipe (test_claude_key_pipe.py) -----
+// --- the hive paths that ride the key pipe -------------------------------
 
-/// Python `_member_pane`.
 fn member_pane(job_id: Option<&str>) {
     hook(|h| {
         h.resolve_profile_name = Some("claude".to_string());

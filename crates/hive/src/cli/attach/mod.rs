@@ -98,9 +98,9 @@ pub(crate) fn attach_cmd(team_name: &str) {
 
 /// `hive mirror [on|off] [--window TARGET]`: show or hide the team's
 /// read-only orch mirror pane. Display state only — `off` parks the pane
-/// with break-pane in a hidden window of the team session (the viewer keeps
-/// running), `on` joins it back; the choice lands on the window as
-/// `@hive-mirror` so heal and backfill keep it.
+/// with break-pane in a hidden window (of the team session when there is
+/// one; the viewer keeps running), `on` joins it back; the choice lands on
+/// the window as `@hive-mirror` so heal and backfill keep it.
 pub(crate) fn mirror_cmd(mode: &str, window: &str) {
     match mirror(mode, window) {
         Ok(line) => println!("{line}"),

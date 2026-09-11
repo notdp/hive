@@ -6,11 +6,11 @@
 //! `COLD_AFTER_SECONDS` it is archived — its directory moved whole to
 //! `$HIVE_HOME/trash/<archive-id>/payload/` beside a `manifest.json` — and
 //! an archive that is not kept is purged `TRASH_AFTER_SECONDS` later.
-//! `hive delete` is the same archive without the wait (`--delete-workspace`
-//! purges at once, `--keep-workspace` archives with no purge date). The
-//! name is free the moment the entry leaves the registry: the trash
-//! reserves nothing, and `hive gc restore` brings an archive back as a new
-//! team instance under its old name or another.
+//! `hive delete` is the same archive without the wait (`--keep-workspace`
+//! archives with no purge date; `--delete-workspace` removes the directory
+//! outright, no archive). The name is free the moment the entry leaves the
+//! registry: the trash reserves nothing, and `hive gc restore` brings an
+//! archive back as a new team instance under its old name or another.
 //!
 //! The collector archives only what it has positively seen idle, and only
 //! what it has closed first: an expired team gets a *close intent* on its

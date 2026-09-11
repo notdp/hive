@@ -98,8 +98,8 @@ pub fn hived_build_hash() -> &'static str {
 /// Hashing the multi-megabyte test binary costs seconds per test process
 /// (nextest runs one per test) and no test depends on the real digest: the
 /// running build's identity is a constant under test, and
-/// `hooked_compute_build_hash` still supplies whatever "disk" hash a reexec
-/// test wants to contrast it with.
+/// the `compute_build_hash` hook (`hooked_disk_build_hash`) still supplies
+/// whatever "disk" hash a reexec test wants to contrast it with.
 #[cfg(test)]
 pub fn hived_build_hash() -> &'static str {
     "test-build"

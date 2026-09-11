@@ -1,5 +1,5 @@
-//! Member verbs: `spawn`, `send`, `kill`, `interrupt`, `thread`, `capture`,
-//! `inject`, `compact`, `view`.
+//! Member verbs: `spawn`, `send`, `kill`, `interrupt`, `capture`, `inject`,
+//! `compact`, `view`.
 
 use std::collections::HashSet;
 use std::path::Path;

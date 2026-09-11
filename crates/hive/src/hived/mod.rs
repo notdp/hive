@@ -2,8 +2,10 @@
 //!
 //! Delivery has exactly one state: the native transport (claude inbox /
 //! codex daemon / grok leader) either accepted the message or refused it.
-//! There is no tracked in-between and no confirmation oracle — acceptance
-//! means the target's own runtime owns it from there.
+//! There is no confirmation oracle — acceptance means the target's own
+//! runtime owns it from there; what a codex/grok delivery leaves behind is
+//! the engine's turn handle in the dispatch journal (`operations.rs`), read
+//! at the engine's own turn end for `node-result`.
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -72,7 +74,7 @@ pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
 // hived to perform: worst-case native transport submission (claude inbox
 // connect+write / codex daemon RPC / grok leader prompt+ack) plus slack for
 // scheduling and payload plumbing. A send blocks on nothing else: it
-// returns the moment the transport accepts, and nothing tracks it after.
+// returns the moment the transport accepts.
 pub const REQUEST_SLACK: f64 = 5.0;
 pub const HIVED_API_VERSION: i64 = 5;
 pub const BUSY_OUTPUT_THRESHOLD_SECONDS: f64 = 3.0;

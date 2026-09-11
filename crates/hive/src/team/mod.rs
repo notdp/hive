@@ -3,8 +3,8 @@
 //! `Team` itself (load, create, spawn, retire) lives here; `scope` resolves
 //! which team a verb acts on and its workspace/hived, `roster` writes
 //! membership (register, spawn onto the roster, the registry row), and
-//! `delete` is the delete body. The cli and the flow engine reach them as
-//! `team::*`.
+//! `delete` is the delete body. The cli and the workflow runner reach them
+//! as `team::*`.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -295,9 +295,9 @@ pub fn ensure_codex_daemon(cwd: &str) -> anyhow::Result<()> {
     hooked_ensure_dir_trusted(cwd)
 }
 
-/// Mint a codex member's thread on the shared daemon (thread/start +
-/// name/set flush) under *label* (`<team>.<member>`); returns the thread
-/// id, which is the member's session id.
+/// Mint a codex member's thread on the shared daemon (thread/start, then
+/// the name/set + section/move flush) under *label* (`<team>.<member>`);
+/// returns the thread id, which is the member's session id.
 pub fn mint_codex_thread(cwd: &str, label: &str, model: &str) -> anyhow::Result<String> {
     ensure_codex_daemon(cwd)?;
     match hooked_start_member_thread(cwd, label, model) {

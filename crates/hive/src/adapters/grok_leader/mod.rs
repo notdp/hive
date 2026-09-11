@@ -28,11 +28,11 @@
 //! client loads exactly that session and folds only its notifications.
 //!
 //! `session/load` replays the session's past `session/update` notifications
-//! before it answers, so everything received before the load response is dropped —
-//! a replayed turn must never mark the pane busy. Delivery acks on the leader
-//! echoing the prompt back (queue entry or `user_message_chunk`): the
-//! `session/prompt` response itself only lands when the whole turn ends, which
-//! can be minutes.
+//! before it answers, so everything received before the load response feeds
+//! only `turn_open` — a replayed turn must never mark the pane busy. Delivery
+//! acks on the leader echoing the prompt back (queue entry or
+//! `user_message_chunk`): the `session/prompt` response itself only lands when
+//! the whole turn ends, which can be minutes.
 
 use std::env;
 use std::path::PathBuf;

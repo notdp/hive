@@ -47,11 +47,12 @@ pub(crate) fn check_send_gate_impl(target: &Agent) -> Result<()> {
 }
 
 /// Who a send is from. A member (or guest) send carries its sender on the
-/// ledger row and in the envelope and goes out as a plain send; a `hive
-/// workflow run` dispatch has no sender at all — its row's `from_agent` is
-/// empty, its envelope has no `from` — and goes out as a tracked turn whose
-/// engine handle is kept under the dispatch id for `node-result`. The mode
-/// is explicit: an empty member name is never a node.
+/// ledger row and in the envelope, and goes out as a plain send to a claude
+/// target (a codex or grok target takes it as a tracked turn as well); a
+/// `hive workflow run` dispatch has no sender at all — its row's
+/// `from_agent` is empty, its envelope has no `from` — and goes out as a
+/// tracked turn whose engine handle is kept under the dispatch id for
+/// `node-result`. The mode is explicit: an empty member name is never a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendOrigin<'a> {
     Member(&'a str),

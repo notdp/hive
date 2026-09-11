@@ -290,7 +290,7 @@ pub fn format_worked_duration(secs: f64) -> String {
 /// rendering (colors, wrapping, ellipsis) happens in the consumer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DisplayBlock {
-    /// Full-width band: `❯` prefix, right-aligned timestamp on the first line.
+    /// Full-width band, right-aligned timestamp on the first line.
     User(UserBlock),
     /// `◈ Read 1 file, Searched 1 pattern` — consecutive read-only tools.
     ToolGroup(ToolGroupBlock),
