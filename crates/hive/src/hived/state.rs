@@ -86,8 +86,8 @@ pub(super) fn codex_reattach_at() -> &'static Mutex<HashMap<String, f64>> {
 pub(super) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(super) static FORCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 /// Admission and the outstanding count share one lock. The accept loop
-/// reserves a lease before waiting for a connection, then transfers it to
-/// the handler. Closing the gate also accounts for an accept already waiting.
+/// accepts without blocking and reserves the handler lease under this lock.
+/// Waiting for listener readiness holds no lease and cannot postpone sleep.
 #[derive(Default)]
 pub(super) struct Admission {
     pub closed: bool,

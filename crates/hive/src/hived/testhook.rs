@@ -170,7 +170,7 @@ pub struct Hook {
     pub execv: Option<V1<ExecOutcome>>,
     pub compute_build_hash: Option<F0<String>>,
     pub stale_disk_build_hash: Option<F0<Option<String>>>,
-    pub serve_requests: Option<F0<bool>>,
+    pub wait_tick: Option<F0<bool>>,
     #[allow(clippy::type_complexity)]
     pub open_server_socket:
         Option<Arc<dyn Fn(&str) -> anyhow::Result<Box<dyn HivedServerApi>> + Send + Sync>>,
