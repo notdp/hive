@@ -4,6 +4,28 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.21.0
+
+### Features
+
+- Team, task, hived and window each get their own lifetime. A team's hived sleeps after ten minutes with no window, no request in flight and no obligation, and the next verb wakes it; `hive ps` inventories hiveds, control clients, engine daemons and claude jobs read-only; requests are accepted on their own worker so a `ping` or `send` never waits on display sampling; node dispatches are journaled under `run/operations/` so a result survives a hived restart and an ambiguous one is reported rather than re-sent; the binary check behind the automatic re-exec hashes only when the file's fingerprint changes (#202)
+- Teams end in the trash: `hive delete` archives the team directory whole into `$HIVE_HOME/trash/<id>/` (`--keep-workspace` with no purge date, `--delete-workspace` removes it outright), the collector archives a team cold for 30 days at the tail of a mutating verb, an archive is purged 30 days after it was quarantined or last written into, `hive gc run|keep|restore` drive it, and the name is free the moment the entry leaves the store. Archiving is a closed transaction: a close intent the registry refuses work into, a graceful hived stop, a second look, then the archive under the store lock (#202)
+- The window's drag and the `hive mirror` choice are remembered per team instance in `state/hive-arrangement/window.json` and restored when the window is rebuilt; `hive layout auto` forgets the drag (#202)
+- A grok member hive spawns runs always-approve (`--always-approve` on its pane TUI, `_meta.yoloMode` at mint and load); a human's own `hgrok` keeps grok's prompts. Hive's observer client no longer answers a shared permission request `cancelled` (#202)
+- The desktop session's mirror starts collapsed — the desktop already shows that session — and the window records `@hive-mirror off` so the orch chip appears closed; `hive mirror on`, the chip or prefix+m draw it. The bare pane a withheld mirror leaves goes to the first member that needs one instead of a split beside an empty shell, and a desktop session runs `hive mirror` on its own team's window without a pane or a tmux client (#213)
+- `hive setup` ends with a short launcher hint (#199)
+
+### Fixes
+
+- The tmux server hive starts itself is started from `$HIVE_HOME`, not the caller's directory, so a deleted worktree cannot leave a server whose every `-c` is skipped (#201)
+- Hive panes are spawned through a shell-level `cd`, so a dead tmux cwd cannot swallow the spawn (#200)
+- A dev build under a shared cargo `target-dir` logs at `dev` verbosity like any source checkout: the rule is now the `target/debug` or `target/release` path segment, not a `Cargo.toml` beside `target/` (#202)
+- The hive skill lets a closing message go unanswered (#197)
+
+### Internal
+
+- `uv.lock` dropped, caches ignored, the hived restart note and the zh/ja launcher docs aligned (#198)
+
 ## 0.20.1
 
 ### Fixes
