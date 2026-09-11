@@ -327,6 +327,10 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             .unwrap_or_default()
     );
     sleep::clear_asleep_marker(workspace);
+    // The session hooks that wake an unwatched desk ride the hived's start,
+    // not only the session's build: a session an older binary built gets
+    // them at the first start after an upgrade.
+    hooked_install_wake_hooks(team);
     hooked_notify_debug_emit(
         workspace,
         "hived.start",

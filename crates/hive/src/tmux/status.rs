@@ -328,6 +328,25 @@ pub fn install_team_status(session_id: &str) {
     }
 }
 
+/// The wake hooks alone, on the team session *team* named itself: what a
+/// hived (re)installs at start, so a session built by an older binary —
+/// or one whose hooks were unset by hand — wakes its desk too. Idempotent;
+/// a session that is not hive's own (a team built in the human's session)
+/// is left alone, its client is the human's already.
+pub fn install_wake_hooks(team: &str) {
+    if !crate::team_display::owns_team_session(team) {
+        return;
+    }
+    let Some(session_id) = crate::tmux::display_value(&format!("{team}:"), "#{session_id}") else {
+        return;
+    };
+    let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
+    for row in wake_hook_argv(&session_id, &hive) {
+        let args: Vec<&str> = row.iter().map(String::as_str).collect();
+        let _ = run(&args, false, 5);
+    }
+}
+
 pub(crate) fn install_team_status_checked(session_id: &str) -> anyhow::Result<()> {
     for row in install_status_rows(session_id) {
         let args: Vec<&str> = row.iter().map(String::as_str).collect();

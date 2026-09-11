@@ -213,6 +213,16 @@ pub(super) fn hooked_watching_clients(session: &str) -> Option<usize> {
     crate::tmux::watching_clients(session)
 }
 
+/// The desk's own team session gets the wake hooks at every start.
+pub(super) fn hooked_install_wake_hooks(team: &str) {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.install_wake_hooks.clone()).flatten() {
+        f(team);
+    }
+    #[cfg(not(test))]
+    crate::tmux::install_wake_hooks(team)
+}
+
 pub(super) fn hooked_is_tmux_window_alive(tmux_window_id: &str) -> bool {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.is_tmux_window_alive.clone()).flatten() {

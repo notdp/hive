@@ -79,7 +79,9 @@ Consequences across modules:
   nobody. A retiring desk leaves `run/desk.asleep` with its
   reason; the next generation's start removes it. The team session carries
   `client-attached` and `client-session-changed` hooks that run `hive wake
-  --window` on its current window, and `wake` starts a desk only where that
+  --window` on its current window (installed with the session's status bar
+  and again by every hived start on a session hive built, so a session from
+  an older binary gets them at the first start after an upgrade), and `wake` starts a desk only where that
   marker says `unwatched` — so a plain `tmux attach` brings back a desk that
   left for want of a viewer before the human notices a stale bar, and a
   hook firing on any other window, or on a team whose desk never ran or

@@ -64,6 +64,7 @@ pub struct Hook {
     pub tmux_socket_path: Option<F0<Option<String>>>,
     pub is_tmux_window_alive: Option<S1<bool>>,
     pub watching_clients: Option<S1<Option<usize>>>,
+    pub install_wake_hooks: Option<S1<()>>,
     // agent_cli
     pub detect_cli_process_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
     pub detect_profile_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,

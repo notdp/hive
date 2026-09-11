@@ -6684,6 +6684,21 @@ fn test_hived_sleeps_when_no_terminal_watches_its_window() {
 }
 
 #[test]
+fn test_a_starting_hived_installs_the_wake_hooks_on_its_team_session() {
+    let env = unwatched_probe_env(Some(1));
+    let installed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&installed);
+    testhook::update(|h| {
+        h.install_wake_hooks = Some(Arc::new(move |team| {
+            sink.lock().unwrap().push(team.to_string())
+        }));
+        h.wait_tick = Some(Arc::new(|| false));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert_eq!(*installed.lock().unwrap(), vec!["probe".to_string()]);
+}
+
+#[test]
 fn test_a_starting_hived_clears_the_asleep_marker() {
     let env = unwatched_probe_env(Some(1));
     let marker = asleep_marker_path(&env.workspace);
