@@ -169,8 +169,8 @@ pub fn default_verbosity() -> &'static str {
 }
 
 /// Verbosity for the binary at *source*: the env override wins, otherwise a
-/// binary running from a cargo `target/` dir beside a `Cargo.toml` is a dev
-/// checkout and everything else is an install.
+/// path containing `target/debug` or `target/release` defaults to dev.
+/// Custom profile directories and all other paths default to normal.
 fn verbosity_for_source(source: &Path) -> &'static str {
     let env_value = env::var(VERBOSITY_ENV)
         .unwrap_or_default()
@@ -184,8 +184,8 @@ fn verbosity_for_source(source: &Path) -> &'static str {
     let dev_checkout = source.ancestors().any(|parent| {
         matches!(
             parent.file_name().and_then(|name| name.to_str()),
-            Some("target")
-        ) && parent.join("../Cargo.toml").exists()
+            Some("debug" | "release")
+        ) && parent.parent().and_then(Path::file_name) == Some("target".as_ref())
     });
     if dev_checkout {
         "dev"
@@ -284,18 +284,29 @@ mod tests {
     fn test_default_verbosity_is_normal_from_installed_binary() {
         let _env = EnvGuard::cleared(&["HIVE_LOG_VERBOSITY"]);
 
-        let source = Path::new("/usr/local/bin/hive");
-        assert_eq!(verbosity_for_source(source), "normal");
+        let tmp = tempfile::tempdir().unwrap();
+        for source in [
+            tmp.path().join("bin/hive"),
+            tmp.path().join(".cargo/bin/hive"),
+            PathBuf::from("/usr/local/bin/hive"),
+            tmp.path().join("target/foo/hive"),
+            tmp.path().join("target/nested/debug/hive"),
+        ] {
+            assert_eq!(verbosity_for_source(&source), "normal", "{source:?}");
+        }
     }
 
     #[test]
     fn test_default_verbosity_is_dev_from_source_checkout() {
         let _env = EnvGuard::cleared(&["HIVE_LOG_VERBOSITY"]);
 
-        assert_eq!(
-            verbosity_for_source(&env::current_exe().expect("test binary path")),
-            "dev"
-        );
+        let tmp = tempfile::tempdir().unwrap();
+        for source in [
+            tmp.path().join("proj/target/debug/hive"),
+            tmp.path().join("shared/target/release/deps/hive-abc"),
+        ] {
+            assert_eq!(verbosity_for_source(&source), "dev", "{source:?}");
+        }
     }
 
     #[test]
