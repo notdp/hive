@@ -61,10 +61,9 @@ const CALL_TIMEOUT: f64 = 10.0;
 const DAEMON_START_TIMEOUT: f64 = 8.0;
 const CONNECT_COOLDOWN: f64 = 5.0;
 
-/// Worst-case local submission budget for one send_to_pane call: a cold client
-/// (initialize + session/load) plus the ack wait. The hived derives its request
-/// budgets from this so a valid slow acceptance can never outlive its caller.
-pub const SUBMIT_TIMEOUT: f64 = HANDSHAKE_TIMEOUT + ACK_TIMEOUT;
+/// Local submission budget: a parked leader start, client handshake and ack.
+/// The hived derives its request timeout from this budget.
+pub const SUBMIT_TIMEOUT: f64 = DAEMON_START_TIMEOUT + HANDSHAKE_TIMEOUT + ACK_TIMEOUT;
 
 /// Accepted-transport classification for durable delivery observations: the
 /// leader took the prompt into the session queue. Not proof the turn ran.

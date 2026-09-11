@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use super::keys::{read_session_key, socket_path_for_key, SessionRecord};
+use super::keys::{member_from_key, read_session_key, socket_path_for_key, SessionRecord};
 use super::{
     ACK_TIMEOUT, CALL_TIMEOUT, INIT_TIMEOUT, LOAD_TIMEOUT, MESSAGE_CHUNKS, NEW_SESSION_TIMEOUT,
 };
@@ -320,20 +320,15 @@ fn fail_pending(inner: &ClientInner) {
     }
 }
 
-/// Answer a permission prompt with `cancelled`.
-///
-/// The decision belongs to the human at the TUI, which gets its own copy of
-/// the request; hive must still answer its copy or the turn stalls, and
-/// cancelling is the only answer that neither approves nor rejects for them.
-fn on_request(inner: &ClientInner, rid: &Value, method: &str, params: &Value) {
+/// Observe the shared permission modal without answering for the human.
+/// Grok broadcasts it to every subscriber and takes the first answer;
+/// even a `cancelled` reply from this observer would decide the request.
+/// With no human answering, the turn stays pending until a decision or
+/// explicit cancellation; a later TUI attach receives the pending modal.
+fn on_request(inner: &ClientInner, method: &str, params: &Value) {
     if method != "session/request_permission" {
         return;
     }
-    inner.write(&json!({
-        "jsonrpc": "2.0",
-        "id": rid,
-        "result": {"outcome": {"outcome": "cancelled"}},
-    }));
     let mut state = inner.state.lock().unwrap();
     if params.get("sessionId").and_then(Value::as_str) != state.runtime.session_id.as_deref() {
         return;
@@ -594,7 +589,7 @@ fn reader_loop(inner: Arc<ClientInner>, stdout: Box<dyn Read + Send>) {
         let rid = msg.get("id").filter(|rid| !rid.is_null()).cloned();
         let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
         match (method, rid) {
-            (Some(method), Some(rid)) => on_request(&inner, &rid, &method, &params),
+            (Some(method), Some(_)) => on_request(&inner, &method, &params),
             (Some(method), None) => on_notification(&inner, &method, &params),
             _ => {
                 // Pop atomically: a `call()` that timed out concurrently may have
@@ -707,6 +702,18 @@ impl GrokStdioClient {
 
     // ---- protocol ----
 
+    /// Whether the key's session runs without a tool approver.
+    ///
+    /// A member hive spawns has nobody at its TUI to answer grok's permission
+    /// prompt — the orch sends it work, no one approves for it — so its
+    /// session is minted and reloaded with grok's always-approve
+    /// (`_meta.yoloMode`, which a later `session/load` can only turn on,
+    /// never off), the policy codex members already run under. A human's
+    /// own launch (a pane key, a launch key) keeps grok's prompts.
+    fn always_approve(&self) -> bool {
+        member_from_key(&self.key).is_some()
+    }
+
     /// `initialize` then `session/load` of the key's minted session.
     ///
     /// Both values come from the key's session file — cwd is recorded at
@@ -729,16 +736,15 @@ impl GrokStdioClient {
         if initialized.get("result").is_none() {
             return false;
         }
-        let loaded = self.call(
-            "session/load",
-            json!({
-                "sessionId": session_id,
-                "cwd": cwd,
-                "mcpServers": [],
-            }),
-            LOAD_TIMEOUT,
-            Some(&session_id),
-        );
+        let mut params = json!({
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": [],
+        });
+        if self.always_approve() {
+            params["_meta"] = json!({"yoloMode": true});
+        }
+        let loaded = self.call("session/load", params, LOAD_TIMEOUT, Some(&session_id));
         loaded.get("result").is_some()
     }
 
@@ -763,12 +769,16 @@ impl GrokStdioClient {
         if initialized.get("result").is_none() {
             return false;
         }
+        let mut meta = json!({"sessionId": session_id});
+        if self.always_approve() {
+            meta["yoloMode"] = json!(true);
+        }
         let created = self.call(
             "session/new",
             json!({
                 "cwd": cwd,
                 "mcpServers": [],
-                "_meta": {"sessionId": session_id},
+                "_meta": meta,
             }),
             NEW_SESSION_TIMEOUT,
             Some(session_id),
@@ -875,6 +885,16 @@ impl GrokStdioClient {
         } else {
             "unavailable"
         }
+    }
+
+    /// After a complete replay, no turn evidence means the session is unused.
+    /// Before load completes it remains unknown, even with no pending turn.
+    pub(super) fn idle_for_sleep(&self) -> bool {
+        let idle = {
+            let state = self.inner.state.lock().unwrap();
+            state.loaded && state.loading.is_none() && state.runtime.turn_open != Some(true)
+        };
+        self.is_alive() && idle && self.inner.pending.lock().unwrap().is_empty()
     }
 
     /// Turn evidence, replay included: `Some(false)` for a session whose

@@ -1163,3 +1163,69 @@ fn test_pane_creation_rejects_unavailable_cwd_before_tmux() {
         }
     }
 }
+
+#[test]
+fn test_parse_panes_snapshot_reads_the_pane_info_and_its_extra_columns() {
+    let (panes, extras) = parse_panes_snapshot(
+        "%1\tt\tclaude\tagent\trex\tteam-a\tclaude\tg\tdev:1\t0\t/dev/ttys003\t501\t/tmp/a\n\
+         %2\t\tzsh\t\t\t\t\t\tdev:2\t1\t\t\t\n",
+    );
+    assert_eq!(panes.len(), 2);
+    assert_eq!(
+        panes[0],
+        PaneInfo {
+            pane_id: "%1".into(),
+            title: "t".into(),
+            command: "claude".into(),
+            role: "agent".into(),
+            agent: "rex".into(),
+            team: "team-a".into(),
+            cli: "claude".into(),
+            group: "g".into(),
+        }
+    );
+    assert_eq!(
+        extras["%1"],
+        PaneExtra {
+            window: "dev:1".into(),
+            dead: false,
+            tty: "/dev/ttys003".into(),
+            pid: Some(501),
+            cwd: "/tmp/a".into(),
+        }
+    );
+    assert_eq!(
+        extras["%2"],
+        PaneExtra {
+            window: "dev:2".into(),
+            dead: true,
+            tty: String::new(),
+            pid: None,
+            cwd: String::new(),
+        }
+    );
+}
+
+#[test]
+fn test_parse_all_tty_processes_groups_by_tty_and_drops_ttyless_rows() {
+    let by_tty = parse_all_tty_processes(
+        "  501 ttys003 /usr/local/bin/claude claude --resume abc\n  502 ttys003 -zsh -zsh\n  700 ??   /sbin/launchd /sbin/launchd\n bad line\n",
+    );
+    assert_eq!(by_tty.len(), 1);
+    let rows = &by_tty["ttys003"];
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].pid, "501");
+    assert_eq!(rows[0].command, "/usr/local/bin/claude");
+    assert_eq!(rows[0].argv, "claude --resume abc");
+    assert_eq!(rows[1].argv, "-zsh");
+    assert_eq!(tty_key("/dev/ttys003"), "ttys003");
+    assert_eq!(tty_key("ttys003"), "ttys003");
+}
+
+#[test]
+fn test_parse_window_option_all_keeps_only_windows_with_a_value() {
+    let map = parse_window_option_all("dev:1\ttok-1\ndev:2\t\nlane:0\ttok-2\n");
+    assert_eq!(map.len(), 2);
+    assert_eq!(map["dev:1"], "tok-1");
+    assert_eq!(map["lane:0"], "tok-2");
+}

@@ -7,9 +7,11 @@
 
 mod attach;
 mod fork;
+mod gc;
 pub mod help_text;
 mod launch;
 mod member;
+mod ps;
 mod setup;
 mod team;
 mod uninstall;
@@ -39,6 +41,7 @@ const UNROSTERED_ENGINE_MESSAGE: &str = "this engine's session names nobody on a
 // `workflow run --team` rides the same doctrine: it exists for callers
 // without a pane identity (a workflow proxy subagent, a desktop session).
 const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
+    "gc",
     "plugin",
     "config",
     "shell-init",
@@ -48,6 +51,7 @@ const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
     "resume-hint",
     "worktree",
     "ls",
+    "ps",
     "ccd",
     "create",
     "join",
@@ -63,10 +67,12 @@ const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
 ];
 
 const CODEX_NATIVE_REQUIRED_BYPASS_COMMANDS: &[&str] = &[
+    "gc",
     "claude",
     "codex",
     "config",
     "doctor",
+    "ps",
     "grok",
     "inject",
     "plugin",
@@ -216,13 +222,61 @@ pub(crate) fn build_cli() -> Command {
                     Arg::new("delete_workspace")
                         .long("delete-workspace")
                         .action(ArgAction::SetTrue)
-                        .help("Also delete the workspace directory"),
+                        .help("Purge the workspace at once instead of archiving it"),
+                )
+                .arg(
+                    Arg::new("keep_workspace")
+                        .long("keep-workspace")
+                        .action(ArgAction::SetTrue)
+                        .help("Archive with no purge date"),
                 )
                 .arg(
                     Arg::new("down")
                         .long("down")
                         .action(ArgAction::SetTrue)
                         .help("Retire every member first and kill the team's tmux session"),
+                ),
+        )
+        .subcommand(
+            Command::new("gc")
+                .about("Archive cold teams, purge expired archives, keep or restore.")
+                .subcommand(
+                    Command::new("run")
+                        .about("Collect now: clock cold teams, archive the expired, purge the trash.")
+                        .arg(
+                            Arg::new("dry_run")
+                                .long("dry-run")
+                                .action(ArgAction::SetTrue)
+                                .help("Report what would happen; write nothing"),
+                        )
+                        .arg(
+                            Arg::new("json")
+                                .long("json")
+                                .action(ArgAction::SetTrue)
+                                .help("Machine-readable report"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("keep")
+                        .about("Exempt a team from the cold clock, or an archive from purging.")
+                        .arg(Arg::new("target").required(true))
+                        .arg(
+                            Arg::new("off")
+                                .long("off")
+                                .action(ArgAction::SetTrue)
+                                .help("Lift the exemption"),
+                        ),
+                )
+                .subcommand(
+                    Command::new("restore")
+                        .about("Bring an archive back as a new team instance.")
+                        .arg(Arg::new("archive_id").required(true))
+                        .arg(
+                            Arg::new("as_name")
+                                .long("as")
+                                .default_value("")
+                                .help("Restore under another name"),
+                        ),
                 ),
         )
         .subcommand(
@@ -414,6 +468,9 @@ pub(crate) fn build_cli() -> Command {
                 .about("Jump to a team's tmux window, rebuilding it first when it is gone.")
                 .arg(Arg::new("team_name").required(true)),
         )
+        .subcommand(Command::new("ps")
+            .about("List Hive processes and recorded resources without changing them.")
+            .arg(Arg::new("json").long("json").action(ArgAction::SetTrue)))
         .subcommand(json_default_options(
             Command::new("ls")
                 .about("List hive teams from the registry, with their display state."),
@@ -614,6 +671,7 @@ pub(crate) fn build_cli() -> Command {
 // ---------------------------------------------------------------------------
 
 const KNOWN_COMMANDS: &[&str] = &[
+    "gc",
     "fork",
     "join",
     "create",
@@ -632,6 +690,7 @@ const KNOWN_COMMANDS: &[&str] = &[
     "ls",
     "send",
     "doctor",
+    "ps",
     "capture",
     "interrupt",
     "kill",
@@ -658,6 +717,7 @@ const KNOWN_COMMANDS: &[&str] = &[
 const HELP_GROUPS: &[(&[&str], &[&str])] = &[
     (&["ccd"], &["ls"]),
     (&["config"], &["get", "set", "unset"]),
+    (&["gc"], &["keep", "restore", "run"]),
     (&["workflow"], &["run"]),
     (&["plugin"], &["setup", "sync"]),
     (&["pr"], &["clear", "set"]),
@@ -912,6 +972,9 @@ fn main_with_argv(argv: Vec<String>) {
         Err(err) => err.exit(),
     };
     dispatch(&matches);
+    // A handler that returned succeeded: the team it used is in use, and
+    // once a day the collector gets its turn.
+    crate::gc::after_verb(&invoked);
 }
 
 fn dispatch(matches: &ArgMatches) {
@@ -940,8 +1003,17 @@ fn dispatch(matches: &ArgMatches) {
             arg_str(m, "name"),
             arg_str(m, "workspace"),
             m.get_flag("delete_workspace"),
+            m.get_flag("keep_workspace"),
             m.get_flag("down"),
         ),
+        Some(("gc", m)) => match m.subcommand() {
+            Some(("run", m)) => gc::run_cmd(m.get_flag("dry_run"), m.get_flag("json")),
+            Some(("keep", m)) => gc::keep_cmd(arg_str(m, "target"), m.get_flag("off")),
+            Some(("restore", m)) => {
+                gc::restore_cmd(arg_str(m, "archive_id"), arg_str(m, "as_name"))
+            }
+            _ => unreachable!("subcommand required"),
+        },
         Some(("spawn", m)) => {
             // Click declares --task as `type=click.Path(exists=True,
             // dir_okay=False)` — validated at parse time, before the handler.
@@ -1005,6 +1077,7 @@ fn dispatch(matches: &ArgMatches) {
         },
         Some(("view", m)) => member::view_cmd(arg_str(m, "session_id")),
         Some(("attach", m)) => attach::attach_cmd(arg_str(m, "team_name")),
+        Some(("ps", m)) => ps::run(m.get_flag("json")),
         Some(("ls", m)) => team::ls_cmd(m.get_flag("plain")),
         Some(("send", m)) => member::send(
             arg_str(m, "to_agent"),

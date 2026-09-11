@@ -436,6 +436,14 @@ impl Team {
     /// windows claim the same team name.
     pub fn load(name: &str, prefer_pane: &str) -> Result<Team> {
         let snap = crate::registry::load(name);
+        if let Some(entry) = snap.as_ref() {
+            // The collector is archiving the team: nothing is admitted into
+            // it — a verb that would use it is refused, not raced.
+            if crate::gc::is_closing(entry, crate::gc::epoch_now()) {
+                bail!("team '{name}' is being archived; retry in a moment");
+            }
+            crate::gc::note_team_use(name);
+        }
         let hint = if !prefer_pane.is_empty() {
             prefer_pane.to_string()
         } else {
@@ -780,6 +788,7 @@ impl Team {
             .collect();
         match crate::registry::reserve_member(&self.name, &claim, &self.created_at_key()) {
             Ok("exists") => bail!("Agent '{name}' already exists in team '{}'", self.name),
+            Ok("closing") => bail!("team '{}' is being archived; retry in a moment", self.name),
             Ok(verdict) => Ok(verdict == "reserved"),
             Err(_) => Ok(false),
         }

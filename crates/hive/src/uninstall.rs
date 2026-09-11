@@ -44,7 +44,7 @@ pub(crate) fn run(target: &Path, force: bool, purge: bool) -> Result<bool> {
     for name in names {
         success &= report(
             &format!("team {name}"),
-            crate::team::delete_team(name, "", false, true),
+            crate::team::delete_team(name, "", false, false, true),
         );
     }
     success &= remove_plugins();

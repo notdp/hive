@@ -256,8 +256,8 @@ fn member_row(member: &Map<String, Value>) -> Map<String, Value> {
 }
 
 /// Move a Claude session member from the session it was enrolled under to
-/// the one its desktop conversation now runs (`hived/succession`): the
-/// hived's one roster write that changes an identity key, so it is a
+/// the one its desktop conversation now runs (`succession`): the hived's
+/// periodic reconcile and the CLI identity fallback share this
 /// compare-and-set under the store lock. Writes only when *name* on
 /// *team* (the instance *created_at* names) still carries *expected_old*
 /// under *expected_host* — the pair the observation was made against — and
@@ -287,6 +287,11 @@ pub fn commit_succession(
     };
     if !created_at_matches(entry.get("createdAt"), created_at) {
         return Ok("missing");
+    }
+    // A team the collector is closing admits no succession either: the
+    // same gate as `open_instance`, inside the same lock.
+    if crate::gc::is_closing(&entry, crate::gc::epoch_now()) {
+        return Ok("closing");
     }
     if member_for_session(new, None).is_some() {
         return Ok("taken");
@@ -404,6 +409,11 @@ fn open_instance(team: &str, created_at: &str) -> Result<Open> {
     };
     if !created_at.is_empty() && !created_at_matches(entry.get("createdAt"), created_at) {
         return Ok(Open::Refused("stale"));
+    }
+    // The collector is closing the team: no work is admitted into it
+    // (`gc::is_closing`; a stale intent gates nothing).
+    if crate::gc::is_closing(&entry, crate::gc::epoch_now()) {
+        return Ok(Open::Refused("closing"));
     }
     Ok(Open::Ready(Opened { path, entry, _lock }))
 }
@@ -632,6 +642,47 @@ pub fn backfill(
     }
     write_atomic(&path, &updated)?;
     Ok("written")
+}
+
+/// Edit one entry under the store lock: *edit* sees the entry as stored
+/// and, returning true, has the result written whole. Ok(false) when
+/// there is no such team or *edit* declined.
+pub(crate) fn update_entry(
+    team: &str,
+    edit: impl FnOnce(&mut Map<String, Value>) -> bool,
+) -> Result<bool> {
+    let Some(path) = entry_path(team) else {
+        return Ok(false);
+    };
+    let _lock = locked()?;
+    let Some(mut entry) = load(team) else {
+        return Ok(false);
+    };
+    if !edit(&mut entry) {
+        return Ok(false);
+    }
+    write_atomic(&path, &entry)?;
+    Ok(true)
+}
+
+/// A valid entry read from *path* wherever it sits (a trash payload's
+/// `team.json`, a directory a restore published).
+pub(crate) fn load_at(path: &Path) -> Option<Map<String, Value>> {
+    let text = fs::read_to_string(path).ok()?;
+    let entry: Value = serde_json::from_str(&text).ok()?;
+    if !valid(&entry) {
+        return None;
+    }
+    match entry {
+        Value::Object(o) => Some(o),
+        _ => None,
+    }
+}
+
+/// Write an entry the caller has already placed under the store lock
+/// (`gc::restore_archive` publishes a moved-back team directory this way).
+pub(crate) fn write_entry_file(path: &Path, entry: &Map<String, Value>) -> Result<()> {
+    write_atomic(path, entry)
 }
 
 fn write_atomic(path: &Path, entry: &Map<String, Value>) -> Result<()> {

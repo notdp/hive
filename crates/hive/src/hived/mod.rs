@@ -12,12 +12,15 @@ mod busy;
 mod client;
 mod idle_notify;
 mod lifecycle;
+mod operations;
 mod paths;
 mod payloads;
 mod reexec;
 mod runtime;
 mod seams;
 mod server;
+mod sleep;
+mod snapshot;
 mod state;
 mod status;
 mod succession;
@@ -32,12 +35,15 @@ pub(crate) use busy::*;
 pub use client::*;
 pub use idle_notify::*;
 pub use lifecycle::*;
+use operations::*;
 pub use paths::*;
 pub(crate) use payloads::*;
 pub use reexec::*;
 pub(crate) use runtime::*;
 pub use seams::*;
 pub use server::*;
+use sleep::*;
+pub(crate) use snapshot::*;
 pub use state::*;
 pub use status::*;
 pub use supervisors::*;
@@ -49,12 +55,17 @@ pub const IDLE_NOTIFY_MISSING_PRUNE_TICKS: i64 = 5;
 pub const NOTIFY_DEBUG_HEARTBEAT_SECONDS: f64 = 30.0;
 pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
+pub const HIVED_SLEEP_AFTER_SECONDS: f64 = 600.0;
+// The display (tmux server) is probed every tick while it answers — that
+// listing is the pane snapshot the status and view ticks read — and on a
+// doubling schedule capped here while it does not. A dead server must not
+// cost a fork storm per second; a separate worker accepts socket requests
+// while the coordinator samples the display.
+pub const DISPLAY_PROBE_MAX_BACKOFF_SECONDS: f64 = 30.0;
 const HIVED_REEXEC_LOCK_ENV: &str = "HIVE_HIVED_REEXEC_LOCK_FD";
 pub const SOCKET_READY_TIMEOUT: f64 = 2.0;
-// Identity checks must wait strictly longer than the worst tick phase:
-// the main loop cannot accept requests during that phase. Five seconds
-// gives headroom over observed idle ticks up to 616ms and spawn bursts;
-// revisit this budget if tick latency grows. Startup polling stays short.
+// Identity checks allow scheduling and reexec recovery headroom. Display
+// sampling runs separately from accept; startup polling stays short.
 pub(crate) const IDENTITY_PING_TIMEOUT: f64 = 5.0;
 pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
 // The CLI's socket budget must be strictly longer than the work it asks the
@@ -85,6 +96,10 @@ const SEND_GATE_WAIVED_REASONS: [&str; 1] = ["registry:dialog open"];
 // A stamp that must read as "long ago" seeds NEG_INFINITY, not 0.0: zero is
 // only moments before the first tick on this clock.
 fn monotonic() -> f64 {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.monotonic.clone()).flatten() {
+        return f();
+    }
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
 }

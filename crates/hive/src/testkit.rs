@@ -40,8 +40,11 @@ pub(crate) fn display_env() -> DisplayEnv {
     let tmp = tempfile::tempdir().unwrap();
     env.set("HIVE_HOME", tmp.path().join(".hive"));
     // Claude's pane→job records (`Team::load` reads them for claude member
-    // panes) come from a throwaway tree, never the developer's own.
+    // panes) come from a throwaway tree, never the developer's own — and so
+    // do the codex daemon socket and the grok leader sockets a probe looks for.
     env.set("CLAUDE_HOME", tmp.path().join(".claude"));
+    env.set("CODEX_HOME", tmp.path().join(".codex"));
+    env.set("GROK_HOME", tmp.path().join(".grok"));
     env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
     // Inside tmux: the jump must never reach exec_attach, which would
     // replace the test process with `tmux attach`.
@@ -57,6 +60,8 @@ pub(crate) fn display_env_outside() -> DisplayEnv {
     env.set("HIVE_HOME", tmp.path().join(".hive"));
     env.set("CLAUDE_HOME", tmp.path().join(".claude"));
     env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
+    env.set("CODEX_HOME", tmp.path().join(".codex"));
+    env.set("GROK_HOME", tmp.path().join(".grok"));
     DisplayEnv { _tmp: tmp, env }
 }
 

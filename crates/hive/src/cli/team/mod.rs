@@ -1033,11 +1033,18 @@ fn hived_down_report(ws: &str, error: &str) -> Map<String, Value> {
 
 /// Delete a team and clean up; `--down` retires every member first and
 /// kills the team's tmux session after.
-pub(crate) fn delete(name: &str, workspace: &str, delete_workspace: bool, down: bool) {
+pub(crate) fn delete(
+    name: &str,
+    workspace: &str,
+    delete_workspace: bool,
+    keep_workspace: bool,
+    down: bool,
+) {
     ok_or_fail(crate::team::delete_team(
         name,
         workspace,
         delete_workspace,
+        keep_workspace,
         down,
     ));
 }

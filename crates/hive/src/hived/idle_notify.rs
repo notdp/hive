@@ -88,8 +88,11 @@ struct TickCtx<'a> {
     active_window: String,
     token_key: &'a str,
     busy_monitor: Option<&'a dyn OutputMonitor>,
+    snap: &'a TickSnapshot,
 }
 
+/// One idle-notify tick over *snap*, the tick's display snapshot: pane
+/// liveness, windows and notify tokens are lookups into it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn idle_notify_tick(
     team_name: &str,
@@ -100,6 +103,7 @@ pub(crate) fn idle_notify_tick(
     workspace: &str,
     debug_state: Option<&mut NotifyDebugState>,
     members: Option<&[(String, Map<String, Value>)]>,
+    snap: &TickSnapshot,
 ) {
     let mut local_debug = NotifyDebugState::default();
     let debug_state = match debug_state {
@@ -113,10 +117,11 @@ pub(crate) fn idle_notify_tick(
         workspace,
         now,
         active_window: hooked_get_most_recent_client_window(session_name).unwrap_or_default(),
-        token_key: crate::notify_ui::NOTIFY_TOKEN_OPTION.trim_start_matches('@'),
+        token_key: notify_token_key(),
         busy_monitor,
+        snap,
     };
-    let windows = collect_windows(team_name, members);
+    let windows = collect_windows(team_name, members, snap);
     emit_topology_changes(&ctx, debug_state, &windows);
     clear_active_window_token(&ctx, &windows);
 
@@ -178,14 +183,15 @@ pub(crate) fn idle_notify_tick(
 fn collect_windows(
     team_name: &str,
     members: Option<&[(String, Map<String, Value>)]>,
+    snap: &TickSnapshot,
 ) -> BTreeMap<String, Vec<String>> {
     let agent_panes: Vec<String> = match members {
-        Some(members) => agent_panes_from_bindings(members),
-        None => hooked_idle_notify_agent_panes(team_name),
+        Some(members) => agent_panes_from_bindings(members, snap),
+        None => hooked_idle_notify_agent_panes(team_name, snap),
     };
     let mut windows: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for pane_id in &agent_panes {
-        let window_target = hooked_get_pane_window_target(pane_id).unwrap_or_default();
+        let window_target = snap.window_of(pane_id).unwrap_or_default();
         if window_target.is_empty() {
             continue;
         }
@@ -271,7 +277,10 @@ fn clear_active_window_token(ctx: &TickCtx, windows: &BTreeMap<String, Vec<Strin
     let Some(window_panes) = windows.get(&ctx.active_window) else {
         return;
     };
-    let token = hooked_get_window_option(&ctx.active_window, ctx.token_key).unwrap_or_default();
+    let token = ctx
+        .snap
+        .window_token(&ctx.active_window)
+        .unwrap_or_default();
     if token.is_empty() {
         return;
     }
@@ -368,7 +377,7 @@ fn tick_window(
         return;
     }
 
-    let token = hooked_get_window_option(window_target, ctx.token_key).unwrap_or_default();
+    let token = ctx.snap.window_token(window_target).unwrap_or_default();
     if !token.is_empty() {
         if win_dbg.observed_token.as_deref() != Some(token.as_str()) {
             hooked_notify_debug_emit(

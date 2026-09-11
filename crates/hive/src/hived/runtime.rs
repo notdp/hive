@@ -737,53 +737,68 @@ pub(crate) fn runtime_snapshot_payload(pane_id: &str) -> Map<String, Value> {
     payload
 }
 
+/// The tick's member bindings: the roster (registry, the truth) joined to
+/// the snapshot's panes by the `@hive-team` / `@hive-agent` tags. A member
+/// without a pane binds to `""`; a pane tagged for a name the roster does
+/// not hold is not a member. No tmux call: the snapshot already lists every
+/// pane.
 pub(crate) fn team_member_bindings_impl(
     team_name: &str,
+    snap: &TickSnapshot,
 ) -> Result<Vec<(String, Map<String, Value>)>> {
-    let team = hooked_team_load(team_name)?;
+    let entry = crate::registry::load(team_name)
+        .ok_or_else(|| anyhow::anyhow!("team '{team_name}' not found"))?;
     let mut members: Vec<(String, Map<String, Value>)> = Vec::new();
-    let mut upsert = |name: String, row: Map<String, Value>| match members
-        .iter_mut()
-        .find(|(n, _)| *n == name)
+    for member in entry
+        .get("members")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
     {
-        Some(slot) => slot.1 = row,
-        None => members.push((name, row)),
-    };
-
-    if let Some(lead) = team.lead_agent() {
+        let Some(member) = member.as_object() else {
+            continue;
+        };
+        let name = map_get_str(member, "name");
+        if name.is_empty() || members.iter().any(|(n, _)| *n == name) {
+            continue;
+        }
+        let pane = snap
+            .panes
+            .iter()
+            .find(|p| p.team == team_name && p.agent == name && p.is_member_pane());
+        let cli = Some(map_get_str(member, "cli"))
+            .filter(|c| !c.is_empty())
+            .or_else(|| pane.map(|p| p.cli.clone()).filter(|c| !c.is_empty()))
+            .unwrap_or_else(|| "claude".to_string());
         let mut row = Map::new();
-        row.insert("name".to_string(), Value::from(lead.name.clone()));
+        row.insert("name".to_string(), Value::from(name.clone()));
         row.insert(
             "role".to_string(),
-            Value::from(hooked_member_role_for_pane(&lead.pane_id)),
+            Value::from(pane.map(|p| p.role.as_str()).unwrap_or("agent")),
         );
-        row.insert("pane".to_string(), Value::from(lead.pane_id.clone()));
-        row.insert("cli".to_string(), Value::from(lead.cli.clone()));
-        upsert(lead.name.clone(), row);
+        row.insert(
+            "pane".to_string(),
+            Value::from(pane.map(|p| p.pane_id.clone()).unwrap_or_default()),
+        );
+        row.insert("cli".to_string(), Value::from(cli));
+        members.push((name, row));
     }
-
-    let mut sorted_agents: Vec<&Agent> = team.agents.iter().collect();
-    sorted_agents.sort_by(|a, b| a.name.cmp(&b.name));
-    for agent in sorted_agents {
-        let mut row = Map::new();
-        row.insert("name".to_string(), Value::from(agent.name.clone()));
-        row.insert("role".to_string(), Value::from("agent"));
-        row.insert("pane".to_string(), Value::from(agent.pane_id.clone()));
-        row.insert("cli".to_string(), Value::from(agent.cli.clone()));
-        upsert(agent.name.clone(), row);
-    }
-
+    members.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(members)
 }
 
-pub(crate) fn idle_notify_agent_panes_impl(team_name: &str) -> Vec<String> {
-    let bindings = hooked_team_member_bindings(team_name).unwrap_or_default();
-    agent_panes_from_bindings(&bindings)
+pub(crate) fn idle_notify_agent_panes_impl(team_name: &str, snap: &TickSnapshot) -> Vec<String> {
+    let bindings = hooked_team_member_bindings(team_name, snap).unwrap_or_default();
+    agent_panes_from_bindings(&bindings, snap)
 }
 
 /// The live agent panes among *bindings*: role `agent`, pane alive, a CLI
-/// process on it (a retained shell is not an agent), deduplicated.
-pub(super) fn agent_panes_from_bindings(bindings: &[(String, Map<String, Value>)]) -> Vec<String> {
+/// process on it (a retained shell is not an agent), deduplicated. Every
+/// answer is a snapshot lookup.
+pub(super) fn agent_panes_from_bindings(
+    bindings: &[(String, Map<String, Value>)],
+    snap: &TickSnapshot,
+) -> Vec<String> {
     let mut panes: Vec<String> = Vec::new();
     for (_, member) in bindings {
         if member.get("role").and_then(Value::as_str) != Some("agent") {
@@ -792,8 +807,8 @@ pub(super) fn agent_panes_from_bindings(bindings: &[(String, Map<String, Value>)
         let pane_id = map_get_str(member, "pane");
         if !pane_id.is_empty()
             && !panes.contains(&pane_id)
-            && hooked_is_pane_alive(&pane_id)
-            && hooked_detect_cli_process_for_pane(&pane_id).is_some()
+            && snap.is_alive(&pane_id)
+            && snap.cli_profile(&pane_id).is_some()
         {
             panes.push(pane_id);
         }

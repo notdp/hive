@@ -32,6 +32,13 @@ pub fn probe_socket(socket_path: &Path) -> bool {
     socket_path.exists() && connect_within(socket_path, PROBE_TIMEOUT).is_ok()
 }
 
+/// The probe's connect with its error kept: a refused or missing socket is
+/// a leader that died, anything else (a timeout, a permission error) a
+/// socket the caller cannot judge.
+pub(crate) fn probe_connect(socket_path: &Path) -> io::Result<()> {
+    connect_within(socket_path, PROBE_TIMEOUT)
+}
+
 /// Non-blocking unix connect that gives up after *timeout*.
 fn connect_within(socket_path: &Path, timeout: Duration) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
@@ -106,16 +113,20 @@ pub(super) trait DaemonChild: Send {
     fn terminate(&self);
 }
 
+/// A spawned leader. `None` once the child has been handed to a reaper.
 #[cfg_attr(test, allow(dead_code))]
-struct RealDaemonChild(Mutex<Child>);
+struct RealDaemonChild(Mutex<Option<Child>>);
 
 impl DaemonChild for RealDaemonChild {
     fn pid(&self) -> u32 {
-        self.0.lock().unwrap().id()
+        self.0.lock().unwrap().as_ref().map_or(0, Child::id)
     }
 
     fn poll(&self) -> Option<i32> {
-        let mut child = self.0.lock().unwrap();
+        let mut slot = self.0.lock().unwrap();
+        let Some(child) = slot.as_mut() else {
+            return Some(-1);
+        };
         match child.try_wait() {
             Ok(Some(status)) => Some(status.code().unwrap_or_else(|| {
                 use std::os::unix::process::ExitStatusExt;
@@ -127,13 +138,36 @@ impl DaemonChild for RealDaemonChild {
     }
 
     fn terminate(&self) {
-        let mut child = self.0.lock().unwrap();
+        let mut slot = self.0.lock().unwrap();
+        let Some(child) = slot.as_mut() else {
+            return;
+        };
         if let Ok(Some(_)) = child.try_wait() {
             return;
         }
         unsafe {
             libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
         }
+    }
+}
+
+impl Drop for RealDaemonChild {
+    /// The leader outlives its spawner by design (setsid), but while both
+    /// live the spawner is its parent, and a dropped `Child` would leave a
+    /// zombie behind when the leader later exits or is reaped — so a
+    /// thread waits on it instead.
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return;
+        };
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
+        }
+        let _ = thread::Builder::new()
+            .name("grok-leader-reaper".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            });
     }
 }
 
@@ -160,7 +194,7 @@ fn spawn_leader_real(
             Ok(())
         });
     }
-    Ok(Box::new(RealDaemonChild(Mutex::new(cmd.spawn()?))))
+    Ok(Box::new(RealDaemonChild(Mutex::new(Some(cmd.spawn()?)))))
 }
 
 fn spawn_leader(
@@ -530,6 +564,15 @@ fn terminate_process_group(pid: libc::pid_t) {
 /// record naming a dead or recycled pid is removed without touching the
 /// process.
 pub fn kill_daemon_key(key: &str) {
+    retire_daemon_key(key, false);
+}
+
+/// Stop an idle leader while retaining the session and alias used to resume it.
+pub(crate) fn park_daemon_key(key: &str) {
+    retire_daemon_key(key, true);
+}
+
+fn retire_daemon_key(key: &str, retain_session: bool) {
     // The alias this kill resolved through, read once up front: the reap
     // below takes seconds, and a join could bind the member to another
     // launch meanwhile — that alias is not this kill's to remove.
@@ -544,10 +587,13 @@ pub fn kill_daemon_key(key: &str) {
         sock.clone(),
         sock.with_extension("lock"),
         sock.with_extension("pid"),
-        sock.with_extension("session"),
     ] {
         let _ = fs::remove_file(path);
     }
+    if retain_session {
+        return;
+    }
+    let _ = fs::remove_file(sock.with_extension("session"));
     // The member's alias goes under the same lock a bind or rollback holds,
     // and only while it still names the launch this kill reaped; the lock
     // file itself stays — flock is by inode, and a lock file unlinked under

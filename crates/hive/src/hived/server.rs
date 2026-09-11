@@ -7,8 +7,8 @@ use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::sync::atomic::Ordering;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -21,6 +21,9 @@ use super::*;
 /// recording fake.
 pub trait HivedServerApi: Send + Sync {
     fn close(&self);
+    /// Wait without consuming a connection or acquiring an admission lease.
+    fn wait_readable(&self, timeout: f64) -> bool;
+    /// A zero timeout must accept without blocking: the admission lock is held.
     fn accept_timeout(&self, timeout: f64) -> Option<UnixStream>;
 }
 
@@ -33,19 +36,26 @@ impl HivedServerApi for ServerSocket {
         *self.listener.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    fn accept_timeout(&self, timeout: f64) -> Option<UnixStream> {
+    fn wait_readable(&self, timeout: f64) -> bool {
         let guard = self.listener.lock().unwrap_or_else(|e| e.into_inner());
-        let listener = guard.as_ref()?;
+        let Some(listener) = guard.as_ref() else {
+            return false;
+        };
         let mut pfd = libc::pollfd {
             fd: listener.as_raw_fd(),
             events: libc::POLLIN,
             revents: 0,
         };
         let ms = (timeout * 1000.0).ceil().max(0.0) as i32;
-        let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
-        if ret <= 0 {
+        unsafe { libc::poll(&mut pfd, 1, ms) > 0 && pfd.revents & libc::POLLIN != 0 }
+    }
+
+    fn accept_timeout(&self, timeout: f64) -> Option<UnixStream> {
+        if timeout > 0.0 && !self.wait_readable(timeout) {
             return None;
         }
+        let guard = self.listener.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = guard.as_ref()?;
         match listener.accept() {
             Ok((stream, _)) => {
                 let _ = stream.set_nonblocking(false);
@@ -187,7 +197,10 @@ pub(crate) fn handle_request(
             if dispatch_id.is_empty() {
                 return (err_response("node-result needs a dispatchId"), true);
             }
-            (node_result_payload(&dispatch_id), true)
+            (
+                durable_node_result(workspace, &team_in_request(), &dispatch_id),
+                true,
+            )
         }
         "turn-open" => {
             let response = turn_open_payload(
@@ -213,6 +226,32 @@ pub(crate) fn handle_request(
             (response, true)
         }
         "shutdown" => {
+            if let Some(expected) = request.get("expectedHived") {
+                if expected != &Value::Object(hived.clone()) {
+                    let mut response = Map::new();
+                    response.insert("ok".into(), Value::Bool(false));
+                    response.insert("generationChanged".into(), Value::Bool(true));
+                    return (response, true);
+                }
+            }
+            close_admission();
+            let force = FORCE_SHUTDOWN.load(Ordering::SeqCst)
+                || request
+                    .get("force")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            let pending = pending_operations(workspace);
+            if !force && pending > 0 {
+                reopen_admission();
+                return (
+                    serde_json::json!({"ok":false,"draining":true,"pendingOperations":pending})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    true,
+                );
+            }
+            FORCE_SHUTDOWN.store(force, Ordering::SeqCst);
             let mut response = Map::new();
             response.insert("ok".to_string(), Value::Bool(true));
             (response, false)
@@ -221,6 +260,7 @@ pub(crate) fn handle_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_connection(
     conn: UnixStream,
     workspace: &str,
@@ -229,8 +269,8 @@ fn serve_connection(
     tmux_window_id: &str,
     hived_started_at: &str,
     read_timeout: f64,
+    mut lease: RequestLease,
 ) {
-    INFLIGHT_REQUESTS.fetch_add(1, Ordering::SeqCst);
     let _ = conn.set_read_timeout(Some(Duration::from_secs_f64(read_timeout.max(0.001))));
     let mut raw: Vec<u8> = Vec::new();
     let mut buf = [0u8; 65536];
@@ -248,6 +288,7 @@ fn serve_connection(
         Ok(Value::Object(map)) => map,
         _ => Map::new(),
     };
+    lease.classify(request.get("action").and_then(Value::as_str).unwrap_or(""));
     let (response, keep_running) = handle_request(
         workspace,
         team,
@@ -259,22 +300,99 @@ fn serve_connection(
     let mut body = serde_json::to_string(&Value::Object(response)).unwrap_or_default();
     body.push('\n');
     let _ = (&conn).write_all(body.as_bytes());
+    let _ = conn.shutdown(std::net::Shutdown::Write);
     // Answer first, then retire: the reply must be on the wire before the
     // loop tears the socket down.
     if !keep_running {
         SHUTDOWN.store(true, Ordering::SeqCst);
     }
-    INFLIGHT_REQUESTS.fetch_sub(1, Ordering::SeqCst);
 }
 
-/// Accept for up to ``timeout`` seconds, handling each request off-loop.
-///
-/// Handlers run on their own thread because their budgets differ by an order
-/// of magnitude: a delivery may hold the native transport for
-/// ``send_request_timeout()`` while ``hive team`` / ``hive doctor`` give up
-/// after ``SOCKET_READY_TIMEOUT`` and report a missing hived. Serving them
-/// in accept order made one slow send fake the hived's death for every
-/// short read behind it.
+/// Owns the accept worker with the socket generation. `close` joins it before
+/// the listener can be unlinked or re-executed; handlers retain their leases.
+pub(super) struct RequestServer {
+    server: Arc<dyn HivedServerApi>,
+    stopped: Arc<AtomicBool>,
+    worker: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+impl RequestServer {
+    pub(super) fn start(
+        server: Box<dyn HivedServerApi>,
+        workspace: &str,
+        team: &str,
+        tmux_window: &str,
+        tmux_window_id: &str,
+        started_at: &str,
+    ) -> Result<Box<dyn HivedServerApi>> {
+        let server: Arc<dyn HivedServerApi> = Arc::from(server);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_server = Arc::clone(&server);
+        let worker_stopped = Arc::clone(&stopped);
+        let context = RequestContext {
+            workspace: workspace.into(),
+            team: team.into(),
+            tmux_window: tmux_window.into(),
+            tmux_window_id: tmux_window_id.into(),
+            started_at: started_at.into(),
+        };
+        let worker = thread::Builder::new()
+            .name("hived-accept".into())
+            .spawn(move || {
+                while !worker_stopped.load(Ordering::SeqCst) {
+                    serve_until(worker_server.as_ref(), &context, 1.0, &worker_stopped);
+                    // Closed admission leaves queued arrivals for the coordinator's
+                    // synchronous rejection (which can cancel idle retirement).
+                    if SHUTDOWN.load(Ordering::SeqCst)
+                        || admission().lock().unwrap_or_else(|e| e.into_inner()).closed
+                    {
+                        thread::park_timeout(Duration::from_millis(100));
+                    }
+                }
+            })?;
+        Ok(Box::new(Self {
+            server,
+            stopped,
+            worker: Mutex::new(Some(worker)),
+        }))
+    }
+}
+
+impl HivedServerApi for RequestServer {
+    fn close(&self) {
+        let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(worker) = worker.take() {
+            self.stopped.store(true, Ordering::SeqCst);
+            worker.thread().unpark();
+            let _ = worker.join();
+            self.server.close();
+        }
+    }
+
+    fn wait_readable(&self, timeout: f64) -> bool {
+        self.server.wait_readable(timeout)
+    }
+
+    fn accept_timeout(&self, timeout: f64) -> Option<UnixStream> {
+        self.server.accept_timeout(timeout)
+    }
+}
+
+impl Drop for RequestServer {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+struct RequestContext {
+    workspace: String,
+    team: String,
+    tmux_window: String,
+    tmux_window_id: String,
+    started_at: String,
+}
+
+#[cfg(test)]
 pub(crate) fn serve_requests(
     server: &dyn HivedServerApi,
     workspace: &str,
@@ -284,20 +402,60 @@ pub(crate) fn serve_requests(
     hived_started_at: &str,
     timeout: f64,
 ) -> bool {
-    let end = monotonic() + timeout;
-    while !SHUTDOWN.load(Ordering::SeqCst) {
-        let remaining = end - monotonic();
-        if remaining <= 0.0 {
+    serve_until(
+        server,
+        &RequestContext {
+            workspace: workspace.into(),
+            team: team.into(),
+            tmux_window: tmux_window.into(),
+            tmux_window_id: tmux_window_id.into(),
+            started_at: hived_started_at.into(),
+        },
+        timeout,
+        &AtomicBool::new(false),
+    )
+}
+
+fn serve_until(
+    server: &dyn HivedServerApi,
+    context: &RequestContext,
+    timeout: f64,
+    stopped: &AtomicBool,
+) -> bool {
+    let end = std::time::Instant::now() + Duration::from_secs_f64(timeout);
+    while !SHUTDOWN.load(Ordering::SeqCst) && !stopped.load(Ordering::SeqCst) {
+        if admission().lock().unwrap_or_else(|e| e.into_inner()).closed {
             break;
         }
-        let Some(conn) = server.accept_timeout(remaining) else {
+        let remaining = end.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
             break;
+        }
+        // Waiting on an idle listener is not an in-flight request. Bound the
+        // poll so close can join the worker even with no incoming connection.
+        if !server.wait_readable(remaining.as_secs_f64().min(0.1)) {
+            continue;
+        }
+        let (conn, lease) = {
+            let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+            if state.closed || stopped.load(Ordering::SeqCst) {
+                break;
+            }
+            let Some(conn) = server.accept_timeout(0.0) else {
+                continue;
+            };
+            state.leases += 1;
+            (conn, RequestLease::default())
         };
-        let workspace = workspace.to_string();
-        let team = team.to_string();
-        let tmux_window = tmux_window.to_string();
-        let tmux_window_id = tmux_window_id.to_string();
-        let hived_started_at = hived_started_at.to_string();
+        #[cfg(test)]
+        if let Some(f) = hookget(|h| h.after_accept.clone()).flatten() {
+            f();
+        }
+        let workspace = context.workspace.clone();
+        let team = context.team.clone();
+        let tmux_window = context.tmux_window.clone();
+        let tmux_window_id = context.tmux_window_id.clone();
+        let hived_started_at = context.started_at.clone();
         let _ = thread::Builder::new()
             .name("hived-request".to_string())
             .spawn(move || {
@@ -309,8 +467,33 @@ pub(crate) fn serve_requests(
                     &tmux_window_id,
                     &hived_started_at,
                     timeout,
+                    lease,
                 );
             });
     }
     !SHUTDOWN.load(Ordering::SeqCst)
+}
+
+/// The coordinator owns this synchronous rejection while admission is shut.
+/// No handler or engine operation is started, and the reply is sent before
+/// the coordinator can proceed to teardown.
+pub(super) fn reject_draining_request(server: &dyn HivedServerApi) -> bool {
+    let Some(mut conn) = server.accept_timeout(0.1) else {
+        return false;
+    };
+    let timeout = Some(Duration::from_millis(100));
+    let _ = conn.set_read_timeout(timeout);
+    let _ = conn.set_write_timeout(timeout);
+    let mut buf = [0u8; 65536];
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < deadline {
+        match conn.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    let reply = b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining; request not admitted; retry later\"}\n";
+    let _ = conn.write_all(reply);
+    let _ = conn.shutdown(std::net::Shutdown::Write);
+    true
 }

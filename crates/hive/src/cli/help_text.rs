@@ -52,6 +52,7 @@ Team:
 
   create  Create a team.
   delete  Delete a team and clean up.
+  gc      Archive cold teams, purge expired archives, keep or restore.
   join    Join a team.
   layout  Apply a tmux layout preset to the current team window.
   mirror  Show or hide the team's read-only orch mirror pane.
@@ -71,6 +72,7 @@ Debug:
 
   capture    Debug: capture raw pane output from a team member's pane.
   doctor     Diagnose agent connectivity and session state.
+  ps         List Hive processes and recorded resources without changing them.
   inject     Debug: inject raw input into an agent pane.
   interrupt  Interrupt an agent's running turn.
   kill       Kill an agent pane and remove it from the team.
@@ -259,24 +261,128 @@ Options:
 
   Delete a team and clean up.
 
-  Removes the registry entry ($HIVE_HOME/teams/NAME/team.json), closes the
-  window hive built, stops the hived. The team directory's bus, run/ and
-  artifacts/ stay for reading until the name is recycled; --delete-workspace
-  removes the whole team directory — or the external workspace the entry
-  records, which is never removed without the flag.
+  Closes the window hive built, stops the hived, and moves the team
+  directory ($HIVE_HOME/teams/NAME/, entry and all) into the trash,
+  $HIVE_HOME/trash/<archive-id>/, where it is purged 30 days later unless
+  kept (`hive gc keep <archive-id>`); `hive gc restore <archive-id>` brings
+  it back. The name is free at once. --keep-workspace archives with no
+  purge date; --delete-workspace removes the team directory here and now,
+  outside the trash — and the external workspace the entry records, which
+  is otherwise only recorded and never removed; a workspace another live
+  team also records, or one that is a symlink, is refused before anything
+  is stopped. The two exclude each other.
 
-  --down is the teardown of a workflow run (`hive create RUN`, `hive workflow
-  run` nodes, `hive delete RUN --down`): every member is retired first, and
-  the team's own tmux session — the one `hive create` built outside tmux,
-  named after the team — is killed after, by its exact name, never a prefix
+  A member mid-turn refuses the delete: let it finish, or --down. --down is
+  the teardown of a workflow run (`hive create RUN`, `hive workflow run`
+  nodes, `hive delete RUN --down`): every member is retired first, and the
+  team's own tmux session — the one `hive create` built outside tmux, named
+  after the team — is killed after, by its exact name, never a prefix
   match. Refuses when neither a team nor such a session exists.
 
 Options:
   -w, --workspace TEXT  Workspace path to remove (default: the entry's)
-  --delete-workspace    Also delete the workspace directory
+  --delete-workspace    Remove the workspace at once, outside the trash,
+                        instead of archiving it
+  --keep-workspace      Archive with no purge date
   --down                Retire every member first and kill the team's tmux
                         session
   -h, --help            Show this message and exit.
+"#
+        }
+        ["gc"] => {
+            r#"Usage: hive gc [OPTIONS] COMMAND [ARGS]...
+
+  Archive cold teams, purge expired archives, keep or restore.
+
+  A team nobody displays, whose engines are gone and whose hived owes
+  nothing is cold. Cold for 30 days it is archived: its directory moves
+  whole to $HIVE_HOME/trash/<archive-id>/payload/ and its name is free.
+  An archive not kept is purged 30 days later. `hive delete` is the same
+  archive without the wait. The collector runs by itself at the tail of a
+  mutating verb (create, join, spawn, send, kill, delete, attach, workflow,
+  fork) at most once a day per hive home, within a 20s budget; it only
+  archives what it has positively seen idle — tmux not answering, an
+  unreadable claude job ledger, a hived that listens without answering, an
+  unreadable or unfinished node record, an engine it cannot ask, each
+  block a team — and only after closing the team (writers are refused for
+  a moment), asking its hived to stop gracefully and looking again.
+
+Options:
+  -h, --help  Show this message and exit.
+
+Commands:
+  keep     Exempt a team from the cold clock, or an archive from purging.
+  restore  Bring an archive back as a new team instance.
+  run      Collect now: clock cold teams, archive the expired, purge the
+           trash.
+"#
+        }
+        ["gc", "run"] => {
+            r#"Usage: hive gc run [OPTIONS]
+
+  Collect now: clock cold teams, archive the expired, purge the trash.
+
+  Prints a row per registry team (active, cooling with its archive date,
+  blocked with why, kept, archived; a store directory without team.json
+  as unmanaged) and per archive (quarantined with its purge date, kept,
+  purged, deferred when its payload was written into; an unreadable
+  manifest as corrupt). Runs whatever the daily throttle says; exits 1
+  when a row ended in an error.
+
+Options:
+  --dry-run   Report what would happen; write nothing in the store or the
+              trash — no clock starts. Still asks each team's hived for its
+              runtime, as a real run does.
+  --json      Machine-readable report
+  -h, --help  Show this message and exit.
+"#
+        }
+        ["gc", "keep"] => {
+            r#"Usage: hive gc keep [OPTIONS] TARGET
+
+  Exempt a team from the cold clock, or an archive from purging.
+
+  TARGET is a team name or an archive id. A kept team is never archived by
+  the collector (`hive delete` still ends it); a kept archive has no purge
+  date. --off lifts the exemption: a team's clock starts over from now, an
+  archive is purged 30 days from now.
+
+Options:
+  --off       Lift the exemption
+  -h, --help  Show this message and exit.
+"#
+        }
+        ["gc", "restore"] => {
+            r#"Usage: hive gc restore [OPTIONS] ARCHIVE_ID
+
+  Bring an archive back as a new team instance.
+
+  The payload moves back to $HIVE_HOME/teams/NAME/ with its bus, artifacts
+  and roster, under the archived name or --as NAME, as a new instance (a
+  new createdAt: nothing the old one left behind lands on it). Refuses a
+  name in use — pass --as — and a member whose engine session is bound to
+  a live team. Data only: no engine starts, `hive attach` builds the
+  display. Absolute paths recorded under the old name are not rewritten.
+
+Options:
+  --as TEXT   Restore under another name
+  -h, --help  Show this message and exit.
+"#
+        }
+        ["ps"] => {
+            r#"Usage: hive ps [OPTIONS]
+
+  List Hive processes and recorded resources without changing them.
+
+  Logical ownership and OS parentage are separate columns. Missing observations
+  are unknown. Tmux display observations use the caller's tmux server; engine
+  records use the configured homes. Process discovery covers the OS snapshot.
+  A registered team with neither hived nor display is asleep; a team with
+  either is running. Incomplete observations remain unknown.
+
+Options:
+  --json      Print a JSON array, one resource object per line.
+  -h, --help  Show this message and exit.
 "#
         }
         ["doctor"] => {
@@ -422,12 +528,19 @@ Options:
   sized toward 80x24 cells, and re-plans on every layout event — a
   resize, a spawn or kill, a mirror coming and going — through two window
   hooks. A dragged pane
-  border holds until the plan changes. ``auto`` applies the plan now
-  (the repair for a window dragged out of shape); an explicit preset
-  applies as given and holds until the next event.
+  border holds until the plan changes, and is remembered in the
+  workspace (`state/hive-arrangement/window.json`: the layout, the plan
+  it held under, the member on each leaf): a window planned again to the
+  same plan over the same members — rebuilt by `hive attach` after the
+  tmux server died, or back to that member count after a kill — gets the
+  drag back instead of the plan. ``auto`` applies the plan now and
+  forgets the drag (the repair for a window dragged out of shape); an
+  explicit preset applies as given and holds, and is remembered, the
+  same way.
 
   The window records the applied plan's key as `@hive-layout`; ``auto``
-  prints it as `layout`, with `applied` and a `reason` when it did not.
+  prints it as `layout`, with `applied` and a `reason` when it did not
+  (`restored` when the remembered drag was applied).
 
 Options:
   --on-change      Hook form: apply only when the plan's key changed; prints
@@ -447,7 +560,10 @@ Options:
   `@hive-hidden`), the viewer keeps running, and the window records
   `@hive-mirror off` so `hive attach` and spawn leave it out when they heal
   the display; `on` joins the same pane back as the window's first pane —
-  or rebuilds it when the hidden pane is gone — and records `on`. No
+  or rebuilds it when the hidden pane is gone — and records `on`. The
+  choice is also remembered in the workspace
+  (`state/hive-arrangement/window.json`), so a window rebuilt after the
+  tmux server died withholds the mirror the same way. No
   argument toggles. The status bar's orch chip (▴ closed, ▾ open) and
   prefix+m run the same verb on the current window; --window names the
   window when the caller has no pane (a tmux run-shell job). prefix+m is

@@ -6,7 +6,9 @@
 // --------------------------------------------------------------------------
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Map, Value};
@@ -99,14 +101,6 @@ pub(super) fn hooked_get_most_recent_client_window(session_name: &str) -> Option
     })
 }
 
-pub(super) fn hooked_get_pane_window_target(pane_id: &str) -> Option<String> {
-    #[cfg(test)]
-    if let Some(f) = hookget(|h| h.get_pane_window_target.clone()).flatten() {
-        return f(pane_id);
-    }
-    crate::tmux::get_pane_window_target(pane_id)
-}
-
 pub(super) fn hooked_get_window_option(target: &str, key: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.get_window_option.clone()).flatten() {
@@ -148,6 +142,54 @@ pub(super) fn hooked_list_panes_all() -> Vec<crate::tmux::PaneInfo> {
         return f();
     }
     crate::tmux::list_panes_all()
+}
+
+// --- tick snapshot seams ----------------------------------------------------
+//
+// Under a test hook set these never reach tmux or ps. A fixture that lists
+// panes (`list_panes_all` / `list_panes_all_status`) yields a snapshot
+// without per-pane columns, and `TickSnapshot` then answers per pane through
+// the seams the fixture hooked (`is_pane_alive`, `get_pane_window_target`,
+// `detect_cli_process_for_pane`, `get_window_option`).
+
+/// `tmux::list_panes_snapshot_status`: every pane with its snapshot columns.
+pub(super) fn hooked_list_panes_snapshot_status(
+) -> (Option<crate::tmux::PaneSnapshot>, &'static str) {
+    #[cfg(test)]
+    {
+        if let Some(f) = hookget(|h| h.list_panes_all_status.clone()).flatten() {
+            let (panes, status) = f();
+            return (panes.map(|p| (p, Default::default())), status);
+        }
+        if let Some(f) = hookget(|h| h.list_panes_all.clone()).flatten() {
+            return (Some((f(), Default::default())), "ok");
+        }
+        if hookget(|_| ()).is_some() {
+            return (Some(Default::default()), "ok");
+        }
+    }
+    crate::tmux::list_panes_snapshot_status()
+}
+
+/// `tmux::list_window_option_all`: one window option across every window.
+pub(super) fn hooked_list_window_option_all(
+    key: &str,
+) -> Option<std::collections::HashMap<String, String>> {
+    #[cfg(test)]
+    if hookget(|_| ()).is_some() {
+        return None;
+    }
+    crate::tmux::list_window_option_all(key)
+}
+
+/// `tmux::list_all_tty_processes`: the process table grouped by tty.
+pub(super) fn hooked_list_all_tty_processes(
+) -> Option<std::collections::HashMap<String, Vec<crate::tmux::TTYProcessInfo>>> {
+    #[cfg(test)]
+    if hookget(|_| ()).is_some() {
+        return None;
+    }
+    crate::tmux::list_all_tty_processes()
 }
 
 pub(super) fn hooked_tmux_socket_path() -> Option<String> {
@@ -582,6 +624,15 @@ pub(super) fn hooked_gl_kill_daemon_key(key: &str) {
     crate::adapters::grok_leader::kill_daemon_key(key)
 }
 
+pub(super) fn hooked_gl_park_daemon_key(key: &str) {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_park_daemon_key.clone()).flatten() {
+        f(key);
+        return;
+    }
+    crate::adapters::grok_leader::park_daemon_key(key)
+}
+
 pub(super) fn hooked_gl_pool_drop_key(key: &str) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.gl_pool_drop_key.clone()).flatten() {
@@ -811,30 +862,34 @@ pub(super) fn hooked_codex_app_server_runtime(pane_id: &str) -> Option<Map<Strin
     codex_app_server_runtime(pane_id)
 }
 
-pub(crate) fn idle_notify_agent_panes(team_name: &str) -> Vec<String> {
+pub(crate) fn idle_notify_agent_panes(team_name: &str, snap: &TickSnapshot) -> Vec<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.idle_notify_agent_panes.clone()).flatten() {
         return f(team_name);
     }
-    idle_notify_agent_panes_impl(team_name)
+    idle_notify_agent_panes_impl(team_name, snap)
 }
 
-pub(super) fn hooked_idle_notify_agent_panes(team_name: &str) -> Vec<String> {
-    idle_notify_agent_panes(team_name)
+pub(super) fn hooked_idle_notify_agent_panes(team_name: &str, snap: &TickSnapshot) -> Vec<String> {
+    idle_notify_agent_panes(team_name, snap)
 }
 
-fn team_member_bindings(team_name: &str) -> Result<Vec<(String, Map<String, Value>)>> {
+fn team_member_bindings(
+    team_name: &str,
+    snap: &TickSnapshot,
+) -> Result<Vec<(String, Map<String, Value>)>> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.team_member_bindings.clone()).flatten() {
         return f(team_name);
     }
-    team_member_bindings_impl(team_name)
+    team_member_bindings_impl(team_name, snap)
 }
 
 pub(super) fn hooked_team_member_bindings(
     team_name: &str,
+    snap: &TickSnapshot,
 ) -> Result<Vec<(String, Map<String, Value>)>> {
-    team_member_bindings(team_name)
+    team_member_bindings(team_name, snap)
 }
 
 fn fresh_snapshot_session_id(pane_id: &str, now: Option<f64>) -> String {
@@ -928,12 +983,12 @@ pub(super) fn hooked_execv(argv: &[String]) -> ExecOutcome {
     execv_impl(argv)
 }
 
-pub(super) fn hooked_compute_build_hash() -> String {
+pub(super) fn hooked_disk_build_hash(state: &mut ReexecState) -> String {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.compute_build_hash.clone()).flatten() {
         return f();
     }
-    compute_build_hash()
+    disk_build_hash(state)
 }
 
 pub(super) fn hooked_stale_disk_build_hash(state: &mut ReexecState, now: f64) -> Option<String> {
@@ -944,29 +999,13 @@ pub(super) fn hooked_stale_disk_build_hash(state: &mut ReexecState, now: f64) ->
     stale_disk_build_hash_for_reexec(state, now)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn hooked_serve_requests(
-    server: &dyn HivedServerApi,
-    workspace: &str,
-    team: &str,
-    tmux_window: &str,
-    tmux_window_id: &str,
-    hived_started_at: &str,
-    timeout: f64,
-) -> bool {
+pub(super) fn hooked_wait_tick(timeout: f64) -> bool {
     #[cfg(test)]
-    if let Some(f) = hookget(|h| h.serve_requests.clone()).flatten() {
+    if let Some(f) = hookget(|h| h.wait_tick.clone()).flatten() {
         return f();
     }
-    serve_requests(
-        server,
-        workspace,
-        team,
-        tmux_window,
-        tmux_window_id,
-        hived_started_at,
-        timeout,
-    )
+    std::thread::sleep(Duration::from_secs_f64(timeout));
+    !SHUTDOWN.load(Ordering::SeqCst)
 }
 
 pub(super) fn hooked_open_server_socket(workspace: &str) -> Result<Box<dyn HivedServerApi>> {

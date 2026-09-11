@@ -29,6 +29,15 @@ const IDENTITY_VARS: &[&str] = &[
 struct Rig {
     tmp: tempfile::TempDir,
     team: String,
+    /// The rig's private bin dir first, then the developer's PATH: the
+    /// built `hive` under test and every stub CLI live there. tmux gives a
+    /// new pane the PATH of the *client* that asked for it (3.7
+    /// `spawn.c`, when that client sits in no session — every hive
+    /// process here), so it rides on every tmux client and every hive
+    /// process the rig runs; `HOME` is the rig's too, or the pane's login
+    /// shell would rebuild PATH from the developer's dotfiles and find the
+    /// installed hive and the real engines instead.
+    path: String,
 }
 
 impl Rig {
@@ -36,7 +45,20 @@ impl Rig {
         require_tmux();
         let tmp = tempfile::tempdir().expect("temp dir");
         std::fs::create_dir_all(tmp.path().join("ws")).expect("workspace dir");
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).expect("bin dir");
+        // A pane command is `hive <cli> --resume …`, resolved by the pane
+        // shell: this link, not the developer's installed binary, is what
+        // it finds.
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_hive"), bin.join("hive"))
+            .expect("hive on the rig's PATH");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         Rig {
+            path,
             tmp,
             team: format!("hivetest-{tag}-{}", std::process::id()),
         }
@@ -85,6 +107,8 @@ impl Rig {
             .arg("-S")
             .arg(&socket)
             .args(args)
+            .env("PATH", &self.path)
+            .env("HOME", self.tmp.path())
             .env("TMUX_TMPDIR", self.tmp.path());
         for key in IDENTITY_VARS {
             cmd.env_remove(key);
@@ -138,6 +162,8 @@ impl Rig {
         cmd.args(args)
             .current_dir(self.tmp.path())
             .stdin(Stdio::null())
+            .env("PATH", &self.path)
+            .env("HOME", self.tmp.path())
             .env("HIVE_HOME", self.home())
             .env("CLAUDE_CONFIG_DIR", self.tmp.path().join("claude"))
             .env("CLAUDE_HOME", self.tmp.path().join("claude-home"))
@@ -166,17 +192,92 @@ impl Rig {
     /// A stub `claude` on a private bin dir, *script* being its body after
     /// the shebang; returns the PATH that resolves it first.
     fn stub_claude(&self, script: &str) -> String {
-        let bin = self.tmp.path().join("bin");
-        std::fs::create_dir_all(&bin).expect("stub bin dir");
-        let stub = bin.join("claude");
-        std::fs::write(&stub, format!("#!/bin/sh\n{script}")).expect("stub claude");
+        self.stub_cli("claude", script)
+    }
+
+    /// A stub *name* on the rig's private bin dir (the one every pane shell
+    /// and hive process already searches first), *script* being its body
+    /// after the shebang; returns the rig's PATH.
+    fn stub_cli(&self, name: &str, script: &str) -> String {
+        let stub = self.tmp.path().join("bin").join(name);
+        std::fs::write(&stub, format!("#!/bin/sh\n{script}")).expect("stub cli");
         std::fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .expect("stub claude mode");
-        format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        )
+            .expect("stub cli mode");
+        self.path.clone()
+    }
+
+    /// Roster rows `(name, cli, sessionId)` added to the team's registry
+    /// entry under the store lock — members with an engine identity the
+    /// heal draws a pane for, without a real engine ever being asked.
+    fn add_members(&self, rows: &[(&str, &str, &str)]) {
+        use std::os::unix::io::AsRawFd;
+        let store = self.home().join("teams");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(store.join(".lock"))
+            .expect("store lock");
+        assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+        let path = store.join(&self.team).join("team.json");
+        let mut entry: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("entry")).expect("json");
+        let members = entry["members"].as_array_mut().expect("members");
+        for (name, cli, sid) in rows {
+            members.push(serde_json::json!({
+                "name": name,
+                "cli": cli,
+                "sessionId": sid,
+                "cwd": self.tmp.path(),
+            }));
+        }
+        std::fs::write(&path, entry.to_string()).expect("entry written");
+        let _ = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
+    }
+
+    /// `(@hive-agent, width x height, left,top)` of every pane in a window,
+    /// in window order: the geometry of the arrangement, pane ids aside.
+    fn cells(&self, window_id: &str) -> Vec<String> {
+        self.tmux_ok(&[
+            "list-panes",
+            "-t",
+            window_id,
+            "-F",
+            "#{@hive-agent} #{pane_width}x#{pane_height} #{pane_left},#{pane_top}",
+        ])
+        .lines()
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn window_layout(&self, window_id: &str) -> String {
+        self.tmux_ok(&["display-message", "-p", "-t", window_id, "#{window_layout}"])
+    }
+
+    /// The remembered arrangement of the rig's workspace, once its drag
+    /// names *layout*; the hook that writes it runs off-loop.
+    fn wait_for_remembered_drag(&self, layout: &str) -> Value {
+        let path = self
+            .ws()
+            .join("state")
+            .join("hive-arrangement")
+            .join("window.json");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(doc) = serde_json::from_str::<Value>(&text) {
+                    if doc["drag"]["layout"] == Value::String(layout.to_string()) {
+                        return doc;
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no remembered drag for {layout} at {}",
+                path.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
     }
 
     /// `hive` run by a live Claude session `me` (sessionId `s-me`) that
@@ -1023,7 +1124,7 @@ fn test_unmanaged_engine_cannot_create_a_shell_team_outside_tmux() {
 }
 
 #[test]
-fn test_attach_rebuilds_in_the_team_session_when_only_a_parked_mirror_survives() {
+fn test_attach_rebuilds_in_the_team_session_and_keeps_the_mirror_parked() {
     let rig = Rig::new("parked-heal");
     let ws = rig.ws();
     rig.hive_as_claude_ok(
@@ -1051,11 +1152,135 @@ fn test_attach_rebuilds_in_the_team_session_when_only_a_parked_mirror_survives()
 
     rig.hive_ok(&["attach", &rig.team], Some((&socket, &human)));
 
+    // The window is rebuilt in the team session — and the `hive mirror
+    // off` the dead window recorded outlives it: the rebuilt window
+    // withholds the mirror, whose parked pane stays parked.
     let (session, rebuilt) = rig.team_windows().into_iter().next().unwrap();
     assert_eq!(session, rig.team);
+    assert_eq!(rig.window_option(&rebuilt, "hive-mirror"), "off");
+    let panes = rig.panes(&rebuilt);
+    assert!(panes.iter().all(|p| p.1 != "mirror"), "{panes:?}");
+    let hidden = rig.hidden_panes(&rig.team);
+    assert_eq!(hidden.len(), 1, "{hidden:?}");
+    assert_eq!(hidden[0].1, mirror);
+    assert_eq!(rig.pane_pid(&mirror), pid);
+
+    // `on` joins that same pane back as the rebuilt window's first pane.
+    let shell = panes[0].0.clone();
+    rig.hive_ok(&["mirror", "on"], Some((&socket, &shell)));
     assert_eq!(rig.panes(&rebuilt)[0].0, mirror);
     assert_eq!(rig.pane_pid(&mirror), pid);
     assert!(rig.hidden_panes(&rig.team).is_empty());
+    rig.delete();
+    assert!(session_alive(&rig, "human"));
+}
+
+#[test]
+fn test_attach_restores_the_dragged_arrangement_of_a_rebuilt_window() {
+    let rig = Rig::new("arrange");
+    // The rebuilt member panes run their engine's launcher; `grok` on the
+    // rig's PATH is a stub that records the call and exits at once, so no
+    // real engine is ever started and nothing outlives the pane. The panes
+    // stay, dead, tags and all.
+    let grok_calls = rig.tmp.path().join("grok-calls");
+    rig.stub_cli(
+        "grok",
+        &format!("echo \"$@\" >> {}\nexit 0\n", grok_calls.display()),
+    );
+    let ws = rig.ws();
+    rig.hive_as_claude_ok(
+        &["create", &rig.team, "--workspace", ws.to_str().unwrap()],
+        None,
+    );
+    rig.tmux_ok(&["set-option", "-g", "remain-on-exit", "on"]);
+    let (_, window) = rig.team_windows().into_iter().next().unwrap();
+    let socket = rig.socket_path();
+    let mirror = rig.panes(&window)[0].0.clone();
+    rig.add_members(&[("sage", "grok", "sid-sage"), ("scout", "grok", "sid-scout")]);
+    rig.hive_ok(&["attach", &rig.team], Some((&socket, &mirror)));
+    let panes = rig.panes(&window);
+    let agents: Vec<&str> = panes.iter().map(|p| p.2.as_str()).collect();
+    assert_eq!(agents, vec!["orch", "sage", "scout"], "{panes:?}");
+    // The panes' launchers reached the stub, not an engine: the built
+    // hive's `hive grok` spawned the stub as the leader and gave up on it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::fs::read_to_string(&grok_calls)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the grok stub was never run"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let calls = std::fs::read_to_string(&grok_calls).unwrap();
+    assert!(calls.contains("agent leader"), "{calls}");
+    let plan_key = rig.window_option(&window, "hive-layout");
+    assert!(plan_key.contains("/m2/"), "{plan_key}");
+
+    // The human swaps the two members and squeezes one: the hooks see the
+    // plan's key unchanged and remember the window as it is now.
+    rig.tmux_ok(&["swap-pane", "-d", "-s", &panes[1].0, "-t", &panes[2].0]);
+    rig.tmux_ok(&["resize-pane", "-t", &panes[1].0, "-y", "12"]);
+    let dragged = rig.window_layout(&window);
+    let remembered = rig.wait_for_remembered_drag(&dragged);
+    assert_eq!(
+        remembered["drag"]["planKey"],
+        Value::String(plan_key.clone())
+    );
+    let leaves: Vec<String> = remembered["drag"]["leaves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["member"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(leaves, vec!["orch", "scout", "sage"]);
+    let cells = rig.cells(&window);
+    assert_eq!(rig.window_option(&window, "hive-layout"), plan_key);
+
+    // The display dies; a human attaches from elsewhere.
+    let human = rig.tmux_ok(&["new-session", "-d", "-s", "human", "-P", "-F", "#{pane_id}"]);
+    rig.tmux_ok(&["kill-window", "-t", &window]);
+    assert!(rig.team_windows().is_empty());
+    rig.hive_ok(&["attach", &rig.team], Some((&socket, &human)));
+
+    // The rebuilt window has new panes in roster order; the arrangement
+    // puts them back where the human had them, cell for cell.
+    let (session, rebuilt) = rig.team_windows().into_iter().next().unwrap();
+    assert_eq!(session, rig.team);
+    assert_ne!(rebuilt, window);
+    let store = ws
+        .join("state")
+        .join("hive-arrangement")
+        .join("window.json");
+    let after = std::fs::read_to_string(&store).unwrap_or_default();
+    assert_eq!(
+        rig.cells(&rebuilt),
+        cells,
+        "key={} store={after} tags={}",
+        rig.window_option(&rebuilt, "hive-layout"),
+        rig.tmux_ok(&[
+            "display-message",
+            "-p",
+            "-t",
+            &rebuilt,
+            "#{@hive-team}|#{@hive-workspace}|#{@hive-created}|#{window_layout}"
+        ])
+    );
+    assert_eq!(rig.window_option(&rebuilt, "hive-layout"), plan_key);
+
+    // `hive layout auto` is the way back to the plan: the drag is
+    // forgotten with it.
+    let shell = rig.panes(&rebuilt)[0].0.clone();
+    let stdout = rig.hive_ok(&["layout", "auto"], Some((&socket, &shell)));
+    assert!(stdout.contains("\"applied\":true"), "{stdout}");
+    assert_ne!(rig.window_layout(&rebuilt), dragged);
+    let doc: Value = std::fs::read_to_string(&store)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    assert!(doc.get("drag").is_none(), "{doc}");
     rig.delete();
     assert!(session_alive(&rig, "human"));
 }

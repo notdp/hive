@@ -68,18 +68,19 @@ pub fn ticker_head(body: &str) -> String {
     head.replace('#', "##")
 }
 
-/// One status tick. Only `agent` panes get the two pane options — a
-/// mirror's `hive view` repaint would read as output, and a mirror or
-/// terminal pane has no chip to mark unread; the ticker lands on the window
-/// of the first bound engine pane.
+/// One status tick over *snap*, the tick's display snapshot. Only `agent`
+/// panes get the two pane options — a mirror's `hive view` repaint would
+/// read as output, and a mirror or terminal pane has no chip to mark
+/// unread; the ticker lands on the window of the first bound engine pane.
 pub(crate) fn status_tick(
     workspace: &str,
     members: &[(String, Map<String, Value>)],
     monitor: Option<&dyn OutputMonitor>,
     state: &mut StatusTickState,
     now_epoch: i64,
+    snap: &TickSnapshot,
 ) {
-    let panes = hooked_list_panes_all();
+    let panes = &snap.panes;
     if panes.is_empty() {
         return; // an empty listing is a tmux failure, not an empty server
     }
@@ -132,7 +133,7 @@ pub(crate) fn status_tick(
     else {
         return;
     };
-    let Some(window) = hooked_get_pane_window_target(anchor).filter(|w| !w.is_empty()) else {
+    let Some(window) = snap.window_of(anchor) else {
         return;
     };
     let Ok(events) = crate::bus::latest_send_events(workspace, TICKER_ROWS) else {

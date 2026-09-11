@@ -42,6 +42,10 @@ pub struct FakeAdapter {
 
 #[derive(Default)]
 pub struct Hook {
+    pub monotonic: Option<F0<f64>>,
+    pub gl_park_daemon_key: Option<S1<()>>,
+    pub gl_idle_owned_keys: Option<S1<Option<Vec<String>>>>,
+    pub after_accept: Option<F0<()>>,
     // adapters / gate
     pub adapters_get: Option<S1<Option<AdapterHandle>>>,
     pub check_input_gate: Option<P1<GateResult>>,
@@ -55,6 +59,8 @@ pub struct Hook {
     pub set_window_option: Option<S3<()>>,
     pub send_keys: Option<S2<()>>,
     pub list_panes_all: Option<F0<Vec<crate::tmux::PaneInfo>>>,
+    #[allow(clippy::type_complexity)]
+    pub list_panes_all_status: Option<F0<(Option<Vec<crate::tmux::PaneInfo>>, &'static str)>>,
     pub tmux_socket_path: Option<F0<Option<String>>>,
     pub is_tmux_window_alive: Option<S1<bool>>,
     // agent_cli
@@ -164,7 +170,7 @@ pub struct Hook {
     pub execv: Option<V1<ExecOutcome>>,
     pub compute_build_hash: Option<F0<String>>,
     pub stale_disk_build_hash: Option<F0<Option<String>>>,
-    pub serve_requests: Option<F0<bool>>,
+    pub wait_tick: Option<F0<bool>>,
     #[allow(clippy::type_complexity)]
     pub open_server_socket:
         Option<Arc<dyn Fn(&str) -> anyhow::Result<Box<dyn HivedServerApi>> + Send + Sync>>,

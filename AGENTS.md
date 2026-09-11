@@ -14,9 +14,35 @@ behavior is documented in the modules themselves.
   default workspace (`hive.db`, `run/`, `artifacts/`); an explicit
   `--workspace` lives elsewhere and the entry's `workspace` field records
   it. `hive create` on the default resets it (a recycled pool name must not
-  inherit its predecessor's bus); `hive delete` removes `team.json` only,
-  `--delete-workspace` the whole directory. The store lock is
-  `$HIVE_HOME/teams/.lock`. tmux is display, resolved on top of it, and a
+  inherit its predecessor's bus). A team ends by moving its directory whole,
+  entry and all, into the trash, `$HIVE_HOME/trash/<archive-id>/payload/`
+  beside a `manifest.json` (`gc.rs`): `hive delete` does it at once
+  (`--keep-workspace` with no purge date; `--delete-workspace` removes the
+  directory here and now instead, outside the trash — an external
+  workspace is only recorded unless that flag names it), the collector
+  does it to a team cold for 30 days, and an archive not kept is purged 30
+  days after it was quarantined or last written into, whichever is later. The name is free the moment the entry
+  leaves the store — the trash reserves nothing — and `hive gc restore`
+  brings an archive back as a new instance (a new `createdAt`). Cold means
+  positively seen idle: no window, no engine alive, no hived answering
+  with a busy or alive member, no unfinished node operation; tmux or a
+  ledger not answering, an unreadable record, an engine the collector
+  cannot ask — each blocks, never counts as idle. The cold clock is
+  `gc.coldSince` on the entry, cleared by any use (`Team::load` under a
+  mutating verb), by `gc.keep` and by a blocked run; the collector runs at
+  the tail of a mutating verb at most once a day per hive home
+  (`$HIVE_HOME/state/gc/last-attempt`, under the store lock). Archiving is
+  a closed transaction: `gc.closing = {at, by}` on the entry first, which
+  `Team::load` and the registry's write lane (`commit_succession`
+  included) refuse to admit work into while fresh (120s), then a graceful
+  stop of the hived when one listens, a second look from fresh
+  observations, and the archive under the store lock only on the same
+  instance, the same still-expired cold clock and the still-fresh intent;
+  every trash transition re-reads the manifest under that lock, and neither
+  the trash root nor an archive may be reached through a symlink. A member mid-turn refuses a plain `hive delete` (the caller's
+  own member excepted); `--down` retires it; `--delete-workspace` refuses
+  an external workspace another live team records or a symlinked one. The
+  store lock is `$HIVE_HOME/teams/.lock`. tmux is display, resolved on top of it, and a
   pane or a window is not the authority on who is on a team. The orch
   mirror is display state of the same kind: `@hive-role mirror` on the
   pane, `@hive-mirror on|off` on the team window (`hive mirror`; unset
@@ -27,7 +53,14 @@ behavior is documented in the modules themselves.
   the two window hooks (`layout/hooks.rs`, installed with every other
   window mark by `tmux::configure_hive_window`) re-run the comparison on
   every resize and layout change, and nothing is in the registry; a
-  human's border drag holds until the plan itself changes. The team
+  human's border drag holds until the plan itself changes. The drag and
+  the `hive mirror` choice are remembered as display preference in the
+  workspace, `state/hive-arrangement/window.json`
+  (`layout/arrangement.rs`: the layout string, the plan key it held
+  under, the member on each leaf, the team instance): a window planned to
+  the same key over the same members gets the drag back, `hive layout
+  auto` forgets it, and a file that does not fit the window is ignored —
+  it decides no membership and names no process. The team
   session's status bar
   (`tmux/status.rs`) is rendered from tmux options alone —
   `@hive-busy`/`@hive-unread` per pane and `@hive-ticker` per window are
@@ -42,11 +75,14 @@ behavior is documented in the modules themselves.
   `GROK_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`); `tmux/` is display,
   takes explicit targets, and reads neither markers nor the registry. The
   one host marker, the desktop app's `CLAUDE_CODE_HOST_SESSION_ID`, is read
-  by `adapters/claude_desktop.rs` at enrol alone and never as identity: it
-  stamps `hostSessionId` on the roster row so the hived can follow the
-  conversation when the desktop restarts the CLI under a new session id
-  (`hived/succession.rs`); the who-am-I ladder still matches the session
-  id exactly.
+  by `adapters/claude_desktop.rs` at enrol and when session identity fails.
+  Enrol stamps `hostSessionId` on the roster row; the hived's periodic
+  reconcile and the CLI's synchronous fallback share the succession planner
+  (`succession.rs`) when the desktop restarts its CLI under a new session id.
+  The host marker selects a candidate, checked against the desktop record,
+  live sessions and existing bindings before a registry CAS; it is not
+  identity by itself. The who-am-I ladder still matches an existing session
+  id first, and synchronous succession needs neither tmux nor a hived.
 - `cli/` is one module per domain of verbs (`team`, `member`, `attach`,
   `fork`, `workflow`, `launch`, `setup`, `update`, `worktree`) that parse, print and
   exit; the logic they call lives in the crate and is what `run_node`
@@ -73,7 +109,11 @@ behavior is documented in the modules themselves.
   engine handle the hived holds under the dispatch id (`nd-<12 hex>`, also
   in the task artifact path and the first body line); the engine's own
   turn-end signal (codex `turn/completed` on the client that started the
-  turn, grok the `session/prompt` response) is the result's boundary, the
+  turn, grok the `session/prompt` response) is the result's boundary — a
+  grok member hive spawned runs always-approve (`_meta.yoloMode` at mint
+  and load, `--always-approve` on its pane TUI; a human's own `hgrok`
+  keeps its prompts), because a headless member has nobody to answer a
+  tool prompt and hive never answers one for a human — the
   member's last message of the turn its text, and the runner reads both
   back through the hived's `node-result`. Nothing reads the engine's
   transcript. A claude node is Claude Code's own subagent, not hive's: a
@@ -275,7 +315,7 @@ When bumping, scan all commits since the last version bump commit and determine 
 ## Security & runtime notes
 
 Do not hardcode secrets, session IDs, or local machine paths.
-The hived is a long-lived workspace process. When validating hived-related runtime changes manually, use the isolated dev lane described under build and test (a disposable `HIVE_HOME` with its own team) and restart that lane's hived onto the checkout build before trusting `doctor`, delivery, or activity output; the live team's hived stays on the stable install.
+The hived stays resident while it has a display or an obligation; after ten minutes with neither it retires gracefully and the next command that needs it starts a new generation. When validating hived-related runtime changes manually, use the isolated dev lane described under build and test (a disposable `HIVE_HOME` with its own team) and restart that lane's hived onto the checkout build before trusting `doctor`, delivery, or activity output; the live team's hived stays on the stable install.
 
 ## Debug logs
 
@@ -286,8 +326,9 @@ carry:
 - `run/cvim/` is written by the embedded cvim bash toolkit
   (`assets/cvim/bin/cvim-command`), not by Rust, with `latest` naming the
   newest run. Grepping the crate's Rust source for the writer finds nothing.
-- Log verbosity defaults to `normal`, which drops the three highest-frequency
-  hived events (`DEV_ONLY_EVENTS` in `devlog.rs`); every other notify event is
+- Log verbosity defaults to `dev` for binary paths containing `target/debug`
+  or `target/release`, and `normal` otherwise; `normal` drops the three
+  highest-frequency hived events (`DEV_ONLY_EVENTS` in `devlog.rs`); every other notify event is
   recorded either way, and the gate is notify-only. An event missing from
   `notify.jsonl` is not evidence that it never fired. Use
   `HIVE_LOG_VERBOSITY=dev` only as a temporary debugging escape hatch.

@@ -3,7 +3,7 @@
 // --------------------------------------------------------------------------
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Map, Value};
@@ -58,15 +58,6 @@ pub(super) fn transcript_path_cache() -> &'static Mutex<HashMap<String, (String,
     CELL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Where each workflow node's task landed, by dispatch id: the engine
-/// handle `node-result` reads the turn's end and text under. Held only by
-/// the hived that dispatched — a restarted hived knows no handles, and
-/// answers `unknown` for every dispatch before it.
-pub(super) fn node_turns() -> &'static Mutex<HashMap<String, crate::agent::TurnHandle>> {
-    static CELL: OnceLock<Mutex<HashMap<String, crate::agent::TurnHandle>>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 pub(super) fn runtime_snapshots() -> &'static Mutex<RuntimeSnapshotStore> {
     static CELL: OnceLock<Mutex<RuntimeSnapshotStore>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(RuntimeSnapshotStore::default()))
@@ -93,8 +84,67 @@ pub(super) fn codex_reattach_at() -> &'static Mutex<HashMap<String, f64>> {
 }
 
 pub(super) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
-pub(super) static INFLIGHT_REQUESTS: AtomicI64 = AtomicI64::new(0);
+pub(super) static FORCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// Admission and the outstanding count share one lock. The accept loop
+/// accepts without blocking and reserves the handler lease under this lock.
+/// Waiting for listener readiness holds no lease and cannot postpone sleep.
+#[derive(Default)]
+pub(super) struct Admission {
+    pub closed: bool,
+    pub leases: usize,
+    pub readers: usize,
+    pub usage: u64,
+}
+
+pub(super) fn admission() -> &'static Mutex<Admission> {
+    static CELL: OnceLock<Mutex<Admission>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Admission::default()))
+}
+
+#[derive(Default)]
+pub(super) struct RequestLease {
+    read_only: bool,
+}
+
+impl RequestLease {
+    pub(super) fn classify(&mut self, action: &str) {
+        let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+        if read_only_request(action) {
+            self.read_only = true;
+            state.readers += 1;
+        } else {
+            state.usage = state.usage.wrapping_add(1);
+        }
+    }
+}
+
+pub(super) fn read_only_request(action: &str) -> bool {
+    matches!(
+        action,
+        "ping" | "doctor" | "team-runtime" | "runtime-snapshot" | "node-result" | "turn-open"
+    )
+}
+
+impl Drop for RequestLease {
+    fn drop(&mut self) {
+        let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+        state.leases -= 1;
+        if self.read_only {
+            state.readers -= 1;
+        }
+    }
+}
+
+pub(super) fn close_admission() -> bool {
+    let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+    state.closed = true;
+    state.leases == 0
+}
+
+pub(super) fn reopen_admission() {
+    admission().lock().unwrap_or_else(|e| e.into_inner()).closed = false;
+}
 
 pub(crate) fn requests_in_flight() -> bool {
-    INFLIGHT_REQUESTS.load(Ordering::SeqCst) > 0
+    admission().lock().unwrap_or_else(|e| e.into_inner()).leases > 0
 }

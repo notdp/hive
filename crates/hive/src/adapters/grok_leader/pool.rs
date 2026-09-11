@@ -142,6 +142,29 @@ impl GrokClientPool {
         }
     }
 
+    /// Inspect only this process's clients; never connect or spawn to decide sleep.
+    /// Unknown turn evidence is an outstanding obligation.
+    pub(crate) fn idle_owned_keys(&self, team: &str) -> Option<Vec<String>> {
+        let state = self.state.lock().unwrap();
+        state
+            .clients
+            .iter()
+            .filter(|(key, _)| member_from_key(key).is_some_and(|(owner, _)| owner == team))
+            .map(|(key, client)| {
+                let still_bound = client.socket_path == socket_path_for_key(key).to_string_lossy()
+                    && read_session_key(key).is_some_and(|record| {
+                        client.session_id().as_deref() == Some(record.session_id.as_str())
+                    });
+                (still_bound && client.idle_for_sleep()).then(|| key.clone())
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn hold_for_test(&self, key: &str, client: Arc<GrokStdioClient>) {
+        self.adopt_client(key, client);
+    }
+
     pub fn runtime_for_key(&self, key: &str) -> Option<SessionRuntime> {
         self.acting_client(key)?.runtime()
     }
@@ -165,6 +188,7 @@ impl GrokClientPool {
     /// A busy session is not bounced — the leader queues the prompt FIFO and
     /// runs it when the current turn ends, the same as typing into the TUI.
     pub fn send_to_key(&self, key: &str, text: &str) -> Option<&'static str> {
+        self.wake_for_submission(key);
         let client = self.acting_client(key)?;
         match client.prompt(text) {
             Ok(true) => Some(PROMPT_QUEUED),
@@ -176,6 +200,7 @@ impl GrokClientPool {
     /// the connection and request ids let `prompt_result_for_key` read the
     /// turn's outcome. `Err` covers no daemon and no session record too.
     pub fn dispatch_to_key(&self, key: &str, text: &str) -> Result<PromptId, String> {
+        self.wake_for_submission(key);
         let client = self
             .acting_client(key)
             .ok_or_else(|| format!("no grok leader client on {key}"))?;
@@ -275,6 +300,21 @@ impl GrokClientPool {
             .clients
             .insert(key.to_string(), client.clone());
         Some(client)
+    }
+
+    /// Only a new submission wakes a parked member; runtime reads keep their
+    /// existing probe-only path. Load the retained session instead of minting one.
+    fn wake_for_submission(&self, key: &str) {
+        let Some((team, member)) = member_from_key(key) else {
+            return;
+        };
+        if read_session_key(key).is_some()
+            && key_is_rostered(key)
+            && !probe_socket(&socket_path_for_key(key))
+            && spawn_member_daemon(&team, &member)
+        {
+            self.state.lock().unwrap().cooldown.remove(key);
+        }
     }
 
     fn set_cooldown(&self, key: &str) {

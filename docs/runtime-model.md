@@ -43,16 +43,23 @@ Consequences across modules:
   `priorCliSessionIds`; the roster row still names the old id, so the member
   reads as gone. Every 30s the hived (`hived/succession.rs`) moves such a
   row to the record's current session when, and only when, that record
-  lists the row's session as a prior, the current one is live, no member
-  anywhere holds it, and no other row of any team resolves to it (the tick
+  lists the row's session as a prior, the old one is no longer live, the
+  current one is live, no member anywhere holds it, and no other row of any team resolves to it (the tick
   plans over every team's rows and commits its own); the write is a
   compare-and-set under the store lock (`registry::commit_succession`) on
   the observed session *and* host id, so a row rebound or recreated since
   the observation is left alone, and a desktop record the app keeps under
   another account that cannot be listed makes the whole read unknown, and
   `member.session_succeeded` is emitted only for a write that landed
-  (`member.session_refused` names the reason otherwise). A conversation the
-  human forked has a stable id of its own and never matches — a fork is a
+  (`member.session_refused` names the reason otherwise). After a session-id
+  lookup fails, the CLI identity rung can make the same move synchronously:
+  a validated desktop host marker selects the row, and `succession.rs`
+  supplies the same planner both callers use. The CLI reads the desktop and
+  session records and commits through the same registry CAS, without tmux
+  or a hived; only a successful CLI write emits the success event with
+  `via: "cli"`. This lets a desktop conversation recover its membership
+  after the desk sleeps; an existing session-id binding still wins.
+  A conversation the human forked has a stable id of its own and never matches — a fork is a
   new session, not the member. A CLI's own rewind keeps its session id and
   needs nothing. Out of scope: a bg job member's `/clear` (its roster
   session id is also its job address; following it needs a job id on the
@@ -61,6 +68,32 @@ Consequences across modules:
   it, and hived identity is `(workspace socket, team, hive home)`, so a dead
   window does not retire a hived on its own; a missing registry entry with
   no window left behind it does.
+- **The desk sleeps.** A hived stays resident while it has a display or an
+  obligation. With neither for 600 seconds, it closes admission and retires
+  gracefully; registry, bus and run files stay in place. A display is absent
+  when tmux is unreachable, or both the original window and the registry's
+  cached window are gone. An accepted request, a pending node result or an
+  owned Grok client whose idle state cannot be established blocks sleep.
+  Grok needs a completed load/replay, no open turn and no outstanding RPC;
+  a completed replay with zero turn events is idle. Observing the
+  pool does not connect or spawn a client. Claude background jobs belong to
+  their supervisor and do not keep the desk awake. Ordinary Codex sends do
+  not own a node-result obligation.
+  Read-only ping, doctor, team-runtime, runtime-snapshot, node-result and
+  turn-open requests do not renew the timer, though their replies must finish
+  before exit. Other requests renew it even if they finish between ticks.
+  Display recovery or an obligation resets the timer. An arrival during the
+  sleep drain cancels retirement; a queued connection gets `notAdmitted` and
+  can retry. Before exit the hived backfills the registry, stops only its own
+  idle Grok clients' team keys, emits `hived.sleep` with `idleSeconds` and
+  `display-unreachable` / `window-gone`, and performs owner-checked socket
+  cleanup. Grok session records and aliases survive parking; the next send
+  starts the member leader and loads the recorded session. Runtime reads do
+  not start parked leaders. Codex shared daemons are left to their home. The existing ensure
+  path starts the next generation on demand, including a subsequent send or
+  attach. `hive ps` reports a registered team with neither hived nor display
+  as `state: "asleep"`; either present is `running`, incomplete evidence is
+  `unknown`. This is a read-only inventory, not a request to wake the team.
 - **The hive home is part of the identity.** A hived answers `ping` with
   the `HIVE_HOME` it resolved. A client of the same home that finds another
   build, api version or team on the socket restarts the hived from its own
@@ -77,13 +110,87 @@ Consequences across modules:
   entry's `workspace` field records it; `team.json` stays in the team
   directory. `create` always resets the default workspace (a pool name
   recycled after `hive delete` must not inherit the old bus or event log).
-  `hive delete` removes `team.json` and leaves the rest; `--down` first
-  retires every member and kills the session named after the team only
-  when it contains a window marked `@hive-built=1` and `@hive-team=<team>`;
-  `--delete-workspace` removes the whole directory (or the external
-  workspace); an external workspace is never removed without the flag. A
-  long `HIVE_HOME` relocates the hived socket under `/tmp/hive-<uid>/` as
-  any long workspace does (`devlog.rs::hived_socket_path_in`).
+  `hive delete` moves the team directory whole into the trash (below);
+  `--down` first retires every member and kills the session named after
+  the team only when it contains a window marked `@hive-built=1` and
+  `@hive-team=<team>`; `--delete-workspace` removes the directory at once
+  instead (and the external workspace, which is otherwise only recorded);
+  `--keep-workspace` archives with no purge date. A member mid-turn (the
+  hived's `busy`, the codex daemon's open turn without a hived) refuses
+  the plain form — the caller's own member excepted, it is mid-turn by
+  running the verb — and `--down` is the answer. A long `HIVE_HOME`
+  relocates the hived socket under `/tmp/hive-<uid>/` as any long
+  workspace does (`devlog.rs::hived_socket_path_in`).
+- **The trash and the cold clock (`gc.rs`).** A team ends in one way: its
+  directory becomes `$HIVE_HOME/trash/<archive-id>/payload/` next to a
+  `manifest.json` (team, the archived instance's `createdAt`, origin
+  `delete`/`expired`, `quarantinedAt`, `purgeAfter` or null for kept, the
+  external workspace if any, the member names). The manifest is written
+  `preparing` before the rename and `quarantined` after, so a crash
+  between leaves something the next run commits or drops. The entry goes
+  with the directory, so the name is free at once; nothing is reserved.
+  An archive past `purgeAfter` is purged (manifest `purging` first, then
+  the payload, then the rest), unless its payload was written into since
+  it was quarantined and that write is less than 30 days old — then the
+  purge date moves to 30 days after the write; a payload the collector
+  cannot read whole is not purged. Every manifest transition re-reads the
+  manifest under the store lock (`teams/.lock`) first: a purge acts only
+  on `quarantined` past its date or a `purging` a crash left, keep only on
+  `quarantined`, and the trash never follows a symlink (a trash root that
+  is one stops the trash side of the run with an error row; a symlinked
+  entry or an unreadable manifest is reported as `corrupt`, never
+  touched). `hive gc restore <id>
+  [--as NAME]` moves the payload back under `teams/NAME/` as a new
+  instance — a new `createdAt`, `display` empty, `restoredFrom` recording
+  the archive — refusing a name in use and a member whose engine session a
+  live team's roster holds; the manifest says `restoring` and the new
+  entry is written into the payload before the directory moves, so a
+  failure publishes nothing; no engine starts, the next attach builds the
+  display, and the arrangement the archive kept follows the new instance.
+  The collector (`hive gc run`, and by itself at the tail of create /
+  join / spawn / send / kill / delete / attach / workflow / fork at most
+  once a day per hive home — the stamp `$HIVE_HOME/state/gc/last-attempt`
+  is checked and written under the store lock — within a 20s budget: the
+  scan writes clocks, and a scan that has run over the budget does nothing
+  destructive that round, those rows reported `deferred`) classifies every
+  registry
+  team from one tmux window listing, the hived's `team-runtime` when a
+  hived listens on its socket (a socket nobody listens on is no hived; a
+  socket unreachable for any other reason blocks), the `run/operations/`
+  journal, one `claude agents --json --all` read and the live claude
+  session registry only when a claude member needs them (a desktop
+  conversation's CLI is a live session, under the roster's session id or
+  the one its desktop record names as current when succession has not
+  moved the row yet; a `hostSessionId` whose desktop record cannot be read
+  blocks), the codex daemon's `turn-open` for a
+  codex member, and the grok leader's socket for a grok member (refused or
+  missing is dead, any other failure blocks); a member on an engine the
+  collector has no probe for blocks. Displayed, or a member busy or alive,
+  is active and clears `gc.coldSince`; a blocked team's clock is cleared
+  too, since nothing unseen counts as idle time; nothing of the kind is
+  cold, and the first cold sight writes `gc.coldSince` (a clock from the
+  future starts over); cold for 30 days archives (origin `expired`). The
+  archive is a closed transaction: the collector first writes a close
+  intent `gc.closing = {at, by}` on the entry under the store lock — only
+  onto the instance and cold clock the scan saw, still expired — which
+  `Team::load` and the registry's write lane (`commit_succession` too)
+  refuse to admit work into for `CLOSING_TTL_SECONDS` (120s; an older
+  intent is a crashed collector's and gates nothing), asks the team's
+  hived, when one listens, to stop gracefully (a hived with a node result
+  pending declines and the team stays; a socket nobody listens on is no
+  hived), classifies the team once more from fresh observations, and
+  commits the archive under the lock only if the entry is still that
+  instance, its cold clock unchanged and still expired, under that intent
+  still fresh, and not kept — a use in between (a renewed clock) keeps the
+  team and clears its clock. `gc.keep` exempts a
+  team; `hive gc keep` toggles it on a team or an archive. `--dry-run`
+  writes nothing in the store or the trash, not even a clock, though it
+  still asks a listening hived for its runtime like a real run. Events
+  (`quarantined`, `deferred`, `purged`, `restored`, `kept`) append to
+  `$HIVE_HOME/state/gc/events.jsonl`, trimmed to its last 1000 lines past
+  1 MiB; the manifests, not the log, are the record. A store directory
+  without `team.json` (an older delete's leftover) is reported as
+  `unmanaged`, never touched.
 - **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
   delete/attach) need no tmux client: `create` outside tmux puts the
   team window in the session named after the team (created detached when
@@ -180,6 +287,35 @@ from a human forces the apply; an explicit preset applies as given and
 holds the same way. `hive delete` (and every tag sweep) unsets the hooks
 and the key with the window tags: a window a human's session lent the
 team is theirs again, not re-tiled at their next split.
+
+A drag outlives the display. The hook that finds the key unchanged and
+`#{window_layout}` away from the plan's layout is looking at the human's
+drag (or a preset), and remembers it — the layout string, the plan key it
+held under, the window's size, and the member and role on each leaf in
+window order — in the workspace's `state/hive-arrangement/window.json`
+(`layout/arrangement.rs`), keyed by the team instance (`@hive-created`),
+under the window's apply lock. An apply that would plan a window (a key
+that differs) first asks the store, and so does the apply that closes a
+build — attach's rebuild, a backfill — whatever the key says, since the
+hooks fire per split and one of them may have planned the half-built
+window before its last pane was tagged: a drag
+whose plan key is the plan's, and whose leaves pair one to one with the
+window's panes by member and role, is applied instead — the panes are
+swapped into leaf order, the drag's layout string is handed to
+`select-layout`, which tmux scales to the window's size as it does on any
+resize, and the plan's key is written, so from then on it holds as a drag
+does, until the plan changes. `hive attach` rebuilding the window after
+the tmux server died and a kill bringing the window back to the count the
+drag had both come through that path; another plan, another member on a
+leaf, another team instance (a recycled name), a corrupt file or a layout
+tmux refuses all fall through to the plan, and the refused drag is
+dropped. `hive layout auto` forgets the drag before it applies the plan;
+the hook the apply fires finds the plan's own layout and remembers
+nothing. `hive mirror on|off` records its choice in the same file, so a
+rebuilt window withholds the mirror the way the last one did. The file
+is display preference: it decides no membership and names no process,
+and a `hive create --state hive-arrangement=…` entry occupying the path
+is left alone (nothing is remembered).
 `@hive-mirror` on the window is the recorded choice: `off`, written by
 `hive mirror off`, keeps heal and backfill from drawing it; `on`, written by
 `hive mirror on` or when a session mirror is built, is what makes the status
@@ -270,6 +406,37 @@ busy since; the ticker is the two newest bus sends as `from → to · age ·
 verbatim. They are display of the runtime fields below, never a source for
 them.
 
+Every tick that reads the display — the status tick, the claude view tick,
+idle-notify and the roster binding they share — reads one snapshot per
+tick (`hived/snapshot.rs`): a `list-panes -a` with the pane's window, tty,
+pid, cwd and dead flag, a `list-windows -a` for the notify token, and one
+`ps` grouped by tty. Pane liveness, the pane's window, the CLI on its tty
+and the window's token are lookups into it, so a successful snapshot costs
+those three forks however many members the team has (a failed listing falls
+back per item, the sleep probe's `window_exists` and the 30s supervisor /
+backfill passes fork on their own). The roster binding is the registry
+joined to the snapshot's `@hive-team` / `@hive-agent` tags — the hived no
+longer calls `Team::load` per tick. While the server does not answer
+(`no-server` or `unknown` alike), the ticks are skipped and the probe backs
+off, doubling from one tick up to `DISPLAY_PROBE_MAX_BACKOFF_SECONDS`, with
+`display.unreachable` / `display.recovered` logged once per flip. The
+request socket has its own accept worker, independent of display sampling
+and maintenance. Listener readiness waits hold no request lease; nonblocking
+accept and lease reservation share the admission lock. Closing admission leaves
+queued connections for the coordinator to reject synchronously. Closing the
+socket joins its accept worker before unlink/reexec; a failed exec starts a
+new worker on the rebound listener. The
+control-mode monitor's reattach backs off the same way (`tmux/control_mode.rs`),
+so a dead tmux server costs a hived one probe per 30s instead of a fork
+storm per second. The monitor records every control client it spawns in
+`<run dir>/control-clients.json` — pid, `ps lstart` birth, session — and
+removes the row when the client exits; at start it reaps a `tmux -C attach`
+client left reparented to pid 1 by a hived that was killed only when the
+ledger names that pid with the same birth and argv (a pid alone is reused,
+an argv alone may be a human's client on another server's same-named
+session); a reparented client the ledger does not vouch for is only
+reported (`monitor.orphan_unowned`).
+
 ### Addresses beyond the roster
 
 Of the send address kinds, only a member names an engine with a transport.
@@ -303,8 +470,11 @@ runner refuses a claude member before anything is spawned.
   member's session, whose request id and client generation are kept until
   its response. A Grok result lookup requires the original generation;
   a replacement client cannot supply a result for the old handle. The hived
-  holds that engine handle under the dispatch id (`hived/state.rs::node_turns`)
-  for as long as it runs. The run record (below) is written `pending`
+  holds the engine handle in memory and writes its operation record under
+  `run/operations/<incarnation>/<dispatchId>.json`. The record is
+  prepared before the bus write or engine submission; the handle and native
+  terminal result are then saved with atomic rename (without fsync). Completed
+  results remain readable by `node-result` after hived restarts. The run record (below) is written `pending`
   before any of that, so a runner that dies between the delivery and its
   own bookkeeping leaves a pending record behind, never a gap a same-name
   run could walk through.
@@ -325,13 +495,28 @@ runner refuses a claude member before anything is spawned.
   the answer (`grok_leader::PromptResult`). In both engines the result is
   the member's last message of the turn; a member that stops to ask has
   ended its turn with that question.
+- **Retirement.** A graceful shutdown with pending node operations returns
+  `draining: true` and leaves the hived serving and ticking. An identity
+  upgrade that receives this answer uses the old generation until its normal
+  reexec gate can retire it. A shutdown accepted before a concurrent node
+  dispatch becomes visible also resumes service when that dispatch is seen.
+  Only accepted request leases are waited on, for at most five seconds;
+  graceful timeout resumes service. Explicit deletion uses `force: true`,
+  records unresolved nodes as interrupted/ambiguous and exits after the bounded
+  request wait. During that short wait, new requests receive `notAdmitted`.
+  Ordinary sends stay in memory and do not delay retirement; their terminal
+  entries are removed. Persisted node terminal entries are also removed from
+  memory, with subsequent reads served by the journal. Failed node writes
+  retain the in-memory result and emit a diagnostic. Incarnation lookup for
+  `node-result` reads the registry directly, without tmux or `Team::load`.
 - **The read-back.** The runner polls the hived's `node-result` for the
   dispatch id at 1s: `running` while the turn is open; `ended` with
   `status` (the engine's word), `text` and `error` once it is; `unknown`
-  with a `reason` when this hived holds nothing for the id — restarted
-  since the dispatch, the engine handed back no turn id (`untracked` in
-  the dispatch answer), or the adapter client that started the turn was
-  replaced. `unknown` is never a verdict on the turn: with the member's
+  with a `reason` when no operation is recorded for the id. A journaled
+  operation whose outcome cannot be recovered returns `ambiguous`, including
+  a restart before its terminal result was saved, a missing turn id, or loss
+  of the original adapter client. The runner immediately retains an `unknown`
+  record for `ambiguous`; it does not classify that as `no_result` or resend. `unknown` is never a verdict on the turn: with the member's
   turn open or unanswered the runner keeps waiting (the turn may still end
   in front of a client that never saw it start), and only 5 consecutive
   unknowns with the turn closed (`turn-open` `false`) end the run
@@ -867,9 +1052,25 @@ leader. The alias also lets member teardown reach that leader.
   `turn_completed` closes) is the session's state at load time — so a
   hived restarted onto an idle member answers `turn-open` `false` at once
   instead of `null` until the member's next turn.
-- **Permission requests.** Hive answers its own copy with `cancelled` and
-  reports the member as waiting: the decision belongs to the human at the TUI,
-  which gets its own copy.
+- **Permission requests.** A member hive spawns has no one at its TUI to
+  approve a tool, so its session runs grok's always-approve — minted with
+  `_meta.yoloMode: true` (`GrokStdioClient::new_session`), reloaded with the
+  same by hive's own client, and its pane TUI launched with
+  `--always-approve` so the TUI's `session/load` carries it too (a load can
+  only turn the mode on, never off) — the policy codex members already run
+  under. A human's own `hgrok`, in a pane or at a terminal, keeps grok's
+  prompts. When a prompt does appear, the leader broadcasts the shared
+  request to its subscribers and accepts the first answer. Hive observes it
+  as waiting for the human at the TUI and sends no answer: even `cancelled`
+  would resolve the shared request and cut the turn short. A tool update clears the wait
+  after the human decides; turn completion also clears it. With no one
+  answering (including a headless node), the request and turn remain pending
+  while the engine lives. The leader replays the pending modal to a TUI that
+  attaches later. `hive workflow run` has no post-dispatch deadline while
+  the hived reports `Running`; an outer runner timeout does not itself
+  cancel the engine turn. A human decision or explicit interrupt/kill ends
+  that wait. The routing is in grok `leader/server.rs`: interaction fan-out,
+  unchanged response ids, and pending-modal replay on load.
 - **No transcript-gate fallback.** That gate knows only the claude and codex
   record shapes and would read a pending grok permission request as clear, so
   a grok pane with no leader state reports unknown instead.

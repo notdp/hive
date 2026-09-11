@@ -1366,7 +1366,47 @@ fn test_prompt_tracked_leaves_the_echo_ack_path_alone() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn test_permission_request_is_cancelled_and_marks_waiting_user() {
+fn test_tracked_prompt_waits_for_the_tui_permission_decision() {
+    let _bed = setup();
+    let (client, proc) = loaded(None, vec![]);
+    let rid = client.prompt_tracked("write the requested file").unwrap();
+    proc.feed(&agent_chunk(Some(P), "preparing"));
+    proc.feed(&json!({
+        "jsonrpc": "2.0",
+        "id": 77,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": SID,
+            "toolCall": {"toolCallId": "write-file", "title": "write file"},
+            "options": [{"optionId": "allow", "name": "Allow", "kind": "allow_once"}],
+        },
+    }));
+    let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
+    assert!(runtime.busy);
+    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
+    assert!(!proc
+        .sent()
+        .iter()
+        .any(|msg| msg.get("id") == Some(&json!(77))));
+    assert!(!proc
+        .sent()
+        .iter()
+        .any(|msg| msg["method"] == "session/cancel"));
+
+    // The leader forwards the tool result after the TUI answers its modal.
+    proc.feed(&update(
+        "tool_call_update",
+        json!({"toolCallId": "write-file", "status": "completed"}),
+    ));
+    settle(&client, |rt| rt.input_state == "ready");
+    proc.feed(&turn_completed(P, "end_turn"));
+    proc.feed(&prompt_response(rid, P, "end_turn"));
+    assert_eq!(settle_ended(&client, rid), ended("end_turn", "preparing"));
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_permission_request_marks_waiting_user_without_answering() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&json!({
@@ -1379,14 +1419,11 @@ fn test_permission_request_is_cancelled_and_marks_waiting_user() {
             "options": [{"optionId": "a", "name": "Allow", "kind": "allow_once"}],
         },
     }));
-    let answer = settle_sent(&proc, |msg| {
-        msg.get("id").and_then(Value::as_i64) == Some(77)
-    });
-    assert_eq!(
-        answer["result"],
-        json!({"outcome": {"outcome": "cancelled"}})
-    );
     let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
+    assert!(!proc
+        .sent()
+        .iter()
+        .any(|msg| msg.get("id") == Some(&json!(77))));
     // a prompt alone is not turn evidence
     assert_eq!(runtime.turn_open, None);
     teardown(&client, &proc);
@@ -2619,6 +2656,41 @@ fn set_listening_daemon_spawn() -> Arc<Mutex<usize>> {
 }
 
 #[test]
+fn test_a_members_session_is_minted_and_reloaded_always_approve_a_humans_is_not() {
+    let _bed = setup();
+    // a member key: the mint and the reload both carry `_meta.yoloMode`
+    let proc = FakeProc::new(Some(minting_responder()));
+    let handout = proc.clone();
+    set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+    let client = Arc::new(GrokStdioClient::new("m-honey.sage").unwrap());
+    assert!(client.new_session(SID, CWD));
+    let minted = settle_sent(&proc, |msg| msg["method"] == "session/new");
+    assert_eq!(minted["params"]["_meta"]["yoloMode"], json!(true));
+    assert_eq!(minted["params"]["_meta"]["sessionId"], json!(SID));
+    teardown(&client, &proc);
+    write_session_key("m-honey.sage", SID, CWD).unwrap();
+    let (client, proc) = {
+        let proc = FakeProc::new(Some(responder(None, Vec::new())));
+        let handout = proc.clone();
+        set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+        (
+            Arc::new(GrokStdioClient::new("m-honey.sage").unwrap()),
+            proc,
+        )
+    };
+    assert!(client.handshake());
+    let reloaded = settle_sent(&proc, |msg| msg["method"] == "session/load");
+    assert_eq!(reloaded["params"]["_meta"]["yoloMode"], json!(true));
+    teardown(&client, &proc);
+
+    // a human's own pane: grok's prompts stay
+    let (client, proc) = loaded(None, vec![]);
+    let request = settle_sent(&proc, |msg| msg["method"] == "session/load");
+    assert!(request["params"].get("_meta").is_none(), "{request}");
+    teardown(&client, &proc);
+}
+
+#[test]
 fn test_new_session_accepts_a_reply_after_the_load_budget_without_retrying() {
     let _bed = setup();
     let (client, proc) = make(
@@ -3165,4 +3237,164 @@ fn test_a_member_kill_leaves_an_alias_rebound_to_another_launch_meanwhile() {
     // l-ab12's own files went, l-cd34 is untouched
     assert!(!hive_dir.join("l-ab12.session").exists());
     assert!(hive_dir.join("l-cd34.sock").exists());
+}
+
+#[test]
+fn test_sleep_pool_observation_is_scoped_and_requires_idle_evidence() {
+    let _bed = setup();
+    let pool = GrokClientPool::new();
+    let key = "m-cedar.worker";
+    write_session_key(key, SID, CWD).unwrap();
+    let proc = FakeProc::new(Some(responder(None, vec![])));
+    let handed = Arc::clone(&proc);
+    set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
+    let client = Arc::new(GrokStdioClient::new(key).unwrap());
+    assert!(client.handshake());
+    pool.hold_for_test(key, client.clone());
+    assert_eq!(pool.idle_owned_keys("other"), Some(Vec::new()));
+    assert_eq!(pool.idle_owned_keys("cedar"), Some(vec![key.into()]));
+    proc.feed(&activity("working"));
+    settle(&client, |rt| rt.turn_open == Some(true));
+    assert_eq!(pool.idle_owned_keys("cedar"), None);
+    proc.feed(&activity("idle"));
+    settle(&client, |rt| rt.turn_open == Some(false));
+    assert_eq!(
+        pool.idle_owned_keys("cedar"),
+        Some(vec!["m-cedar.worker".into()])
+    );
+    fs::write(alias_path_for_key(key), "l-rebound").unwrap();
+    assert_eq!(
+        pool.idle_owned_keys("cedar"),
+        None,
+        "rebound key is not owned by the held client"
+    );
+    fs::remove_file(alias_path_for_key(key)).unwrap();
+    let rid = client.prompt_tracked("queued").unwrap();
+    assert_eq!(
+        pool.idle_owned_keys("cedar"),
+        None,
+        "outstanding prompt cannot be retired on idle notification alone"
+    );
+    proc.feed(&prompt_response(rid, "queued-prompt", "end_turn"));
+    settle_ended(&client, rid);
+    teardown(&client, &proc);
+    assert_eq!(
+        pool.idle_owned_keys("cedar"),
+        None,
+        "dead client cannot prove leader idle"
+    );
+}
+
+#[test]
+fn test_parked_member_keeps_session_and_alias_and_wakes_only_on_submission() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    let key = "m-cedar.worker";
+    let dir = bed.tmp.path().join("hive");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(alias_path_for_key(key), "l-cafe").unwrap();
+    write_session_key(key, SID, CWD).unwrap();
+    let session = session_path_for_key(key);
+    let mut record: Value = serde_json::from_slice(&fs::read(&session).unwrap()).unwrap();
+    record["extra"] = json!("preserved");
+    fs::write(&session, record.to_string()).unwrap();
+    fs::write(socket_path_for_key(key), "").unwrap();
+    set_process_listing(Vec::new);
+    park_daemon_key(key);
+    assert!(!socket_path_for_key(key).exists());
+    assert_eq!(alias_target(key).as_deref(), Some("l-cafe"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&session).unwrap()).unwrap(),
+        record
+    );
+    crate::registry::record_team(
+        "cedar",
+        CWD,
+        "123",
+        &[json!({"name":"worker", "cli":"grok"})
+            .as_object()
+            .unwrap()
+            .clone()],
+        "",
+    )
+    .unwrap();
+    let listeners = Arc::new(Mutex::new(Vec::new()));
+    let listening = Arc::clone(&listeners);
+    let starts = Arc::new(Mutex::new(0));
+    let starting = Arc::clone(&starts);
+    set_daemon_spawn(move |argv, _| {
+        *starting.lock().unwrap() += 1;
+        let socket = &argv[argv
+            .iter()
+            .position(|arg| arg == "--leader-socket")
+            .unwrap()
+            + 1];
+        assert!(socket.ends_with("l-cafe.sock"));
+        listening
+            .lock()
+            .unwrap()
+            .push(bind_leader_socket(std::path::Path::new(socket)));
+        Ok(Box::new(FakeDaemonChild {
+            pid: 7777,
+            returncode: None,
+            panic_on_terminate: false,
+        }))
+    });
+    let proc = FakeProc::new(Some(responder(Some(on_prompt_queue_echo()), vec![])));
+    let handed = Arc::clone(&proc);
+    set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
+    let pool = GrokClientPool::new();
+    assert!(pool.runtime_for_key(key).is_none());
+    assert_eq!(*starts.lock().unwrap(), 0);
+    assert_eq!(pool.send_to_key(key, "wake"), Some(PROMPT_QUEUED));
+    assert_eq!(*starts.lock().unwrap(), 1);
+    let sent = proc.sent();
+    let load = sent
+        .iter()
+        .find(|msg| msg["method"] == "session/load")
+        .unwrap();
+    assert_eq!(load["params"]["sessionId"], SID);
+    assert!(sent.iter().all(|msg| msg["method"] != "session/new"));
+    assert_eq!(
+        sent.iter()
+            .filter(|msg| msg["method"] == "session/prompt")
+            .count(),
+        1
+    );
+    let client = pool.client_for_key(key).unwrap();
+    teardown(&client, &proc);
+}
+
+#[test]
+fn test_zero_turn_session_is_idle_only_after_replay_completes() {
+    let _bed = setup();
+    let key = "m-cedar.worker";
+    write_session_key(key, SID, CWD).unwrap();
+    let (arrived, load_request) = std::sync::mpsc::channel();
+    let proc = FakeProc::new(Some(Box::new(move |msg| match msg["method"].as_str() {
+        Some("initialize") => vec![ok(msg, json!({"protocolVersion":1}))],
+        Some("session/load") => {
+            arrived.send(msg.clone()).unwrap();
+            Vec::new()
+        }
+        _ => Vec::new(),
+    })));
+    let handed = Arc::clone(&proc);
+    set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
+    let client = Arc::new(GrokStdioClient::new(key).unwrap());
+    let pool = GrokClientPool::new();
+    pool.hold_for_test(key, client.clone());
+    assert!(!client.idle_for_sleep());
+    let loading = Arc::clone(&client);
+    let handshake = thread::spawn(move || loading.handshake());
+    let request = load_request.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(client.turn_open(), None);
+    assert!(!client.idle_for_sleep());
+    assert_eq!(pool.idle_owned_keys("cedar"), None);
+    proc.feed(&ok(&request, json!({})));
+    assert!(handshake.join().unwrap());
+    assert_eq!(client.turn_open(), None);
+    assert!(client.idle_for_sleep());
+    assert_eq!(pool.idle_owned_keys("cedar"), Some(vec![key.into()]));
+    teardown(&client, &proc);
 }
