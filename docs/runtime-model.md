@@ -107,9 +107,9 @@ Consequences across modules:
   starts the member leader and loads the recorded session. Runtime reads do
   not start parked leaders. Codex shared daemons are left to their home. The existing ensure
   path starts the next generation on demand, including a subsequent send or
-  attach. `hive ps` reports a registered team with neither hived nor display
-  as `state: "asleep"`; either present is `running`, incomplete evidence is
-  `unknown`. This is a read-only inventory, not a request to wake the team.
+  attach. `hive ps` reports a registered team as `running` while its hived is up and
+  `asleep` without one, window or no window (`displayPresent` carries the
+  window separately); an unknown hived observation is `unknown`. This is a read-only inventory, not a request to wake the team.
 - **The hive home is part of the identity.** A hived answers `ping` with
   the `HIVE_HOME` it resolved. A client of the same home that finds another
   build, api version or team on the socket restarts the hived from its own
