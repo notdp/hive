@@ -71,15 +71,20 @@ Consequences across modules:
 - **The desk sleeps.** A hived stays resident while it has a display or an
   obligation. With neither for 600 seconds, it closes admission and retires
   gracefully; registry, bus and run files stay in place. A display is absent
-  when tmux is unreachable, when both the original window and the registry's
-  cached window are gone, or when no terminal is attached to the window's
-  session (`unwatched`): a window nobody looks at is a picture, and hive's
+  when tmux is unreachable, when neither the original window nor the
+  registry's cached window is this team's any more (a window id is checked
+  for the team's own tag, never by existence alone: ids restart from `@0`
+  with the tmux server, and a hived from before the restart once read
+  another team's `@0` as its display for days), or when no terminal is
+  attached to the window's session (`unwatched`): a window nobody looks at is a picture, and hive's
   own control-mode monitor is not a viewer. The viewer count is asked only
   once the cheaper gates pass, and a count tmux will not give never reads as
   nobody. A retiring desk leaves `run/desk.asleep` with its
   reason; the next generation's start removes it. The team session carries
   `client-attached` and `client-session-changed` hooks that run `hive wake
-  --window` on its current window, and `wake` starts a desk only where that
+  --window` on its current window (installed with the session's status bar
+  and again by every hived start on a session hive built, so a session from
+  an older binary gets them at the first start after an upgrade), and `wake` starts a desk only where that
   marker says `unwatched` — so a plain `tmux attach` brings back a desk that
   left for want of a viewer before the human notices a stale bar, and a
   hook firing on any other window, or on a team whose desk never ran or

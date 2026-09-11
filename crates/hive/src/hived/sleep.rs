@@ -67,11 +67,15 @@ fn idle_owned_grok_keys(team: &str) -> Option<Vec<String>> {
     crate::adapters::grok_leader::pool().idle_owned_keys(team)
 }
 
+/// Whether the team's window is on screen. A window id is checked as this
+/// team's window, never by existence alone: ids restart from `@0` when the
+/// tmux server restarts, so a hived from before the restart would otherwise
+/// read another team's `@0` as its own display and never retire.
 fn absent_display(team: &str, window: &str, snap: Option<&TickSnapshot>) -> Option<&'static str> {
     let Some(snap) = snap else {
         return Some("display-unreachable");
     };
-    if snap.panes.iter().any(|pane| pane.team == team) || hooked_is_tmux_window_alive(window) {
+    if snap.panes.iter().any(|pane| pane.team == team) || hooked_team_window_alive(window, team) {
         return None;
     }
     if let Some(display) = crate::registry::load(team).and_then(|entry| {
@@ -80,7 +84,7 @@ fn absent_display(team: &str, window: &str, snap: Option<&TickSnapshot>) -> Opti
             .and_then(Value::as_str)
             .map(str::to_owned)
     }) {
-        if !display.is_empty() && display != window && hooked_is_tmux_window_alive(&display) {
+        if !display.is_empty() && display != window && hooked_team_window_alive(&display, team) {
             return None;
         }
     }
