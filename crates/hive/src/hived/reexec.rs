@@ -5,6 +5,7 @@
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -14,12 +15,20 @@ use super::*;
 
 /// SHA-256 of the binary at `current_exe()` as it sits on disk right now.
 /// `hived_build_hash` caches the first result for the process lifetime (the
-/// running build); `stale_disk_build_hash_for_reexec` recomputes it, which
-/// is how an install that replaced the file shows up as a different hash.
+/// running build); `stale_disk_build_hash_for_reexec` re-reads the disk,
+/// which is how an install that replaced the file shows up as a different
+/// hash, but only hashes again once the file's fingerprint has changed.
+#[cfg(not(test))]
 pub(crate) fn compute_build_hash() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|exe| compute_build_hash_at(&exe))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(crate) fn compute_build_hash_at(path: &Path) -> String {
     let inner = || -> std::io::Result<String> {
-        let exe = std::env::current_exe()?;
-        let bytes = fs::read(&exe)?;
+        let bytes = fs::read(path)?;
         let mut hasher = Sha256::new();
         hasher.update(&bytes);
         Ok(hasher
@@ -29,6 +38,55 @@ pub(crate) fn compute_build_hash() -> String {
             .collect())
     };
     inner().unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// What a fresh install changes about the file at the exe path: cargo's
+/// rename gives a new inode, an in-place copy a new mtime and usually a new
+/// length. The same fingerprint is the same bytes for this purpose, so the
+/// 5s check is a `stat` until one of these moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiskFingerprint {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_ns: i128,
+}
+
+impl DiskFingerprint {
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = fs::metadata(path).ok()?;
+        Some(DiskFingerprint {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime_ns: i128::from(meta.mtime()) * 1_000_000_000 + i128::from(meta.mtime_nsec()),
+        })
+    }
+}
+
+/// The disk hash for the reexec check, hashing only when the file's
+/// fingerprint differs from the one last hashed.
+pub(crate) fn disk_build_hash_at(path: &Path, state: &mut ReexecState) -> String {
+    let fingerprint = DiskFingerprint::of(path);
+    if let (Some(fp), Some((seen, hash))) = (&fingerprint, &state.disk) {
+        if fp == seen {
+            return hash.clone();
+        }
+    }
+    let hash = compute_build_hash_at(path);
+    state.disk = match fingerprint {
+        Some(fp) if hash != "unknown" => Some((fp, hash.clone())),
+        _ => None,
+    };
+    hash
+}
+
+pub(crate) fn disk_build_hash(state: &mut ReexecState) -> String {
+    match std::env::current_exe() {
+        Ok(exe) => disk_build_hash_at(&exe, state),
+        Err(_) => "unknown".to_string(),
+    }
 }
 
 #[cfg(not(test))]
@@ -68,6 +126,8 @@ pub(crate) fn hived_reexec_argv(
 pub struct ReexecState {
     pub last_code_check_at: f64,
     pub candidate_hash: Option<String>,
+    /// The exe fingerprint last hashed and its digest.
+    pub(crate) disk: Option<(DiskFingerprint, String)>,
 }
 
 impl Default for ReexecState {
@@ -77,6 +137,7 @@ impl Default for ReexecState {
             // first check; negative infinity makes it run on the first tick.
             last_code_check_at: f64::NEG_INFINITY,
             candidate_hash: None,
+            disk: None,
         }
     }
 }
@@ -91,7 +152,7 @@ pub(crate) fn stale_disk_build_hash_for_reexec(
     }
     state.last_code_check_at = now;
 
-    let disk_hash = hooked_compute_build_hash();
+    let disk_hash = hooked_disk_build_hash(state);
     if disk_hash == "unknown" || disk_hash == hived_build_hash() {
         state.candidate_hash = None;
         return None;

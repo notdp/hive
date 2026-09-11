@@ -981,12 +981,12 @@ pub(super) fn hooked_execv(argv: &[String]) -> ExecOutcome {
     execv_impl(argv)
 }
 
-pub(super) fn hooked_compute_build_hash() -> String {
+pub(super) fn hooked_disk_build_hash(state: &mut ReexecState) -> String {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.compute_build_hash.clone()).flatten() {
         return f();
     }
-    compute_build_hash()
+    disk_build_hash(state)
 }
 
 pub(super) fn hooked_stale_disk_build_hash(state: &mut ReexecState, now: f64) -> Option<String> {

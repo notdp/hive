@@ -4144,6 +4144,54 @@ fn test_stale_disk_build_hash_requires_stable_changed_hash() {
 }
 
 #[test]
+fn test_disk_build_hash_rehashes_only_when_the_exe_fingerprint_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("hive");
+    fs::write(&exe, b"build one").unwrap();
+    let mut state = ReexecState::default();
+
+    let first = disk_build_hash_at(&exe, &mut state);
+    assert_ne!(first, "unknown");
+    assert!(state.disk.is_some());
+
+    // Same inode, length and mtime: the cached digest answers without a
+    // read, even though the bytes underneath differ.
+    let stamp = fs::metadata(&exe).unwrap().modified().unwrap();
+    fs::write(&exe, b"build two").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&exe)
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
+    assert_eq!(disk_build_hash_at(&exe, &mut state), first);
+
+    // A newer mtime is a new fingerprint: the file is hashed again.
+    let later = stamp + Duration::from_secs(2);
+    fs::File::options()
+        .write(true)
+        .open(&exe)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    let second = disk_build_hash_at(&exe, &mut state);
+    assert_ne!(second, first);
+    assert_eq!(second, compute_build_hash_at(&exe));
+
+    // An install that renames a new file into place is a new inode.
+    let staged = dir.path().join("hive.new");
+    fs::write(&staged, b"build three").unwrap();
+    fs::rename(&staged, &exe).unwrap();
+    let third = disk_build_hash_at(&exe, &mut state);
+    assert_ne!(third, second);
+
+    // A vanished file is unknown and forgets the cache.
+    fs::remove_file(&exe).unwrap();
+    assert_eq!(disk_build_hash_at(&exe, &mut state), "unknown");
+    assert!(state.disk.is_none());
+}
+
+#[test]
 fn test_stale_disk_build_hash_clears_candidate_when_code_matches() {
     let hook = Hook {
         compute_build_hash: Some(Arc::new(|| hived_build_hash().to_string())),
@@ -4153,6 +4201,7 @@ fn test_stale_disk_build_hash_clears_candidate_when_code_matches() {
     let mut state = ReexecState {
         last_code_check_at: 5.0,
         candidate_hash: Some("new-hash".to_string()),
+        ..Default::default()
     };
 
     assert_eq!(stale_disk_build_hash_for_reexec(&mut state, 10.0), None);
