@@ -4,6 +4,23 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.21.1
+
+### Features
+
+- A team window no terminal is attached to is no display: hive's own control-mode monitor is not a viewer, so the hived retires after the same ten idle minutes (`hived.sleep unwatched`) and leaves `run/desk.asleep`; the team session's `client-attached` / `client-session-changed` hooks run the hidden `hive wake`, which starts a desk again only where that marker says `unwatched`, so a plain `tmux attach` brings it back before the bar looks stale (#216, #217)
+
+### Fixes
+
+- Hive's codex client resumed every thread the shared app-server had loaded on connect, and resuming is subscribing: any connected hived pinned every other team's and every finished member's thread against codex's own 30-minute idle unload (34 threads, 132 child processes, 840 MiB for 3 live members). Each read now backfills only its own thread and the hived unsubscribes a member's thread when it clears the dead pane's record; the daemon unloaded 33 of them 30 minutes later (#215)
+- A window id counts as the team's display only with the team's tag on it: tmux hands out ids from `@0` again after a server restart, and a hived from before one read another team's `@0` as its own window for days (#217)
+- The hived reinstalls the wake hooks on its hive-built team session at every start, so sessions built by an older binary get them after an upgrade (#217)
+- `hive ps` reports a team `asleep` whenever its hived is down, window or no window; `displayPresent` carries the window separately (#218)
+
+### Internal
+
+- Stale doc comments refreshed across the crate (#214)
+
 ## 0.21.0
 
 ### Features
