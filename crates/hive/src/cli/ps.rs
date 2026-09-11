@@ -515,18 +515,22 @@ fn collect() -> Result<Vec<Value>, String> {
             json!(hived_teams.contains(&(team.clone(), workspace)))
         };
         item["displayPresent"] = display_present(panes.as_deref(), server, &team);
-        item["state"] = json!(team_state(&item["hivedPresent"], &item["displayPresent"]));
+        item["state"] = json!(team_state(&item["hivedPresent"]));
         item["orchSession"] = json!(orch_state(entry));
         rows.push(item);
     }
     Ok(rows)
 }
 
-fn team_state(hived: &Value, display: &Value) -> &'static str {
-    match (hived.as_bool(), display.as_bool()) {
-        (Some(false), Some(false)) => "asleep",
-        (Some(true), _) | (_, Some(true)) => "running",
-        _ => UNKNOWN,
+/// A team runs while its hived is up; without one it is asleep whether or
+/// not its window is still on screen — a window nobody watches is a
+/// picture, and the desk retires under it (`hived.sleep unwatched`). The
+/// window is reported beside it as `displayPresent`.
+fn team_state(hived: &Value) -> &'static str {
+    match hived.as_bool() {
+        Some(true) => "running",
+        Some(false) => "asleep",
+        None => UNKNOWN,
     }
 }
 
@@ -608,8 +612,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_registered_team_without_hived_or_display_is_asleep() {
-        let state = team_state(&json!(false), &json!(false));
+    fn test_registered_team_without_a_hived_is_asleep_window_or_not() {
+        let state = team_state(&json!(false));
         assert_eq!(state, "asleep");
         let item = json!({"kind":"team", "logicalOwner":"cedar", "state":state});
         assert!(render_table(std::slice::from_ref(&item)).contains("state=asleep"));
@@ -617,9 +621,10 @@ mod tests {
             serde_json::from_str::<Value>(&render_json(&[item])).unwrap()[0]["state"],
             "asleep"
         );
-        assert_eq!(team_state(&json!(true), &json!(false)), "running");
-        assert_eq!(team_state(&json!(false), &json!(true)), "running");
-        assert_eq!(team_state(&json!(false), &json!("unknown")), "unknown");
+        assert_eq!(team_state(&json!(true)), "running");
+        // A window with no desk under it is a picture, not a running team.
+        assert_eq!(team_state(&json!(false)), "asleep");
+        assert_eq!(team_state(&json!("unknown")), "unknown");
     }
 
     #[test]
