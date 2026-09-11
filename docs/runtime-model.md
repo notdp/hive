@@ -194,7 +194,8 @@ Consequences across modules:
 - **Verbs outside tmux.** The team verbs (create/join/spawn/team/kill/
   delete/attach) need no tmux client: `create` outside tmux puts the
   team window in the session named after the team (created detached when
-  missing). Desktop Claude joins with a mirror; a managed terminal session
+  missing). Desktop Claude joins with its mirror collapsed (`hive mirror
+  on` draws it); a managed terminal session
   transfers its viewer into a pane; raw terminal engines are refused (`join`
   follows the same boundary). `spawn` splits
   a pane into the team's window by id from anywhere, and `attach` rebuilds
@@ -317,10 +318,15 @@ is display preference: it decides no membership and names no process,
 and a `hive create --state hive-arrangement=…` entry occupying the path
 is left alone (nothing is remembered).
 `@hive-mirror` on the window is the recorded choice: `off`, written by
-`hive mirror off`, keeps heal and backfill from drawing it; `on`, written by
-`hive mirror on` or when a session mirror is built, is what makes the status
-bar's orch chip appear; unset reads as open — nothing withholds the mirror
-by default. `hive mirror off` parks the pane with `break-pane -d` in a hidden
+`hive mirror off` or by the build that first withholds a session mirror,
+keeps heal and backfill from drawing it; `on`, written by `hive mirror on`,
+is the only state that draws it; either value makes the status bar's orch
+chip appear. Unset reads as closed: the desktop already shows the session
+a mirror would repeat, so a new window starts collapsed and the chip (▴)
+or `hive mirror on` opens it (the desktop session runs the verb with no
+pane and acts on its own team's window). The bare shell a withheld mirror
+leaves as the window's only pane goes to the next member that needs one:
+`hive spawn` and the heal's backfill take it over instead of splitting. `hive mirror off` parks the pane with `break-pane -d` in a hidden
 window of the team session (the caller's session when the team has none)
 tagged `@hive-hidden <team>`, `@hive-built=1` and `@hive-team=<team>`:
 the ownership marks allow a rebuild if only the parked mirror survives.

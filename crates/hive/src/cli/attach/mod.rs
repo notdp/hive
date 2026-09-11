@@ -108,14 +108,26 @@ pub(crate) fn mirror_cmd(mode: &str, window: &str) {
     }
 }
 
+/// The team window of the caller's own membership when it has no pane: the
+/// desktop session whose mirror the verb shows or hides.
+fn bound_team_window() -> Option<String> {
+    let (_, team) = resolve_scoped_team(None, false).ok()?;
+    team.map(|t| t.tmux_window).filter(|w| !w.is_empty())
+}
+
 /// The verb's one line of output, or its refusal. *window_arg* names the
 /// team window when there is no caller pane (the status-bar click and
-/// prefix+m run from a run-shell job, which has no TMUX_PANE).
+/// prefix+m run from a run-shell job, which has no TMUX_PANE); a paneless
+/// team member (the desktop session) acts on its own team's window.
 pub(crate) fn mirror(mode: &str, window_arg: &str) -> Result<String, String> {
     let window = if window_arg.is_empty() {
         identity::current_window_target()
             .filter(|w| !w.is_empty())
-            .ok_or_else(|| "hive mirror runs from a pane in a team window".to_string())?
+            .or_else(bound_team_window)
+            .ok_or_else(|| {
+                "hive mirror runs from a pane in a team window or a team member's session"
+                    .to_string()
+            })?
     } else {
         window_arg.to_string()
     };

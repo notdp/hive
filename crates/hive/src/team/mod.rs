@@ -142,6 +142,9 @@ struct SpawnCall {
     name: String,
     team_name: String,
     target_pane: String,
+    /// The member runs in *target_pane* itself (the bare shell a withheld
+    /// mirror left as the team window's only pane) instead of a split.
+    take_over: bool,
     model: String,
     prompt: String,
     cwd: String,
@@ -169,6 +172,7 @@ fn agent_spawn(call: SpawnCall) -> Result<Agent> {
             model: call.model.clone(),
             prompt: call.prompt.clone(),
             cwd: call.cwd.clone(),
+            split_window: !call.take_over,
             split_horizontal: call.split_horizontal,
             split_size: call.split_size.clone(),
             skill: call.skill.clone(),
@@ -646,11 +650,23 @@ impl Team {
         let split_horizontal =
             self.agents.is_empty() && layout::split_horizontal(&window_for_split);
         let split_size = "50%";
+        // Only the team's own bound window can hold a bare pane worth taking
+        // over; a borrowed focused window is the caller's.
+        let bare = if self.tmux_window.is_empty() {
+            None
+        } else {
+            crate::team_display::bare_only_pane(&window_for_split, &self.name)
+        };
+        let (target, take_over) = match bare {
+            Some(pane) => (pane, true),
+            None => (target, false),
+        };
 
         let spawned = agent_spawn(SpawnCall {
             name: name.to_string(),
             team_name: self.name.clone(),
             target_pane: target,
+            take_over,
             model: model.to_string(),
             prompt: prompt.to_string(),
             cwd: if cwd.is_empty() {
@@ -675,6 +691,9 @@ impl Team {
             }
         };
 
+        if take_over {
+            crate::team_display::untag_placeholder_pane(&agent.pane_id);
+        }
         tmux::tag_pane(&agent.pane_id, "agent", name, &self.name, cli, "");
         self.upsert_agent(agent.clone());
         if !window_for_split.is_empty() {

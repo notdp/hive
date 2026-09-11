@@ -169,12 +169,13 @@ fn test_attach_heal_joins_the_hidden_mirror_instead_of_splitting() {
         "@7",
     )
     .unwrap();
-    // The window records nothing; the orch's mirror is parked from an
-    // earlier `hive mirror off` on a window since killed by hand.
+    // The window records `on`; the orch's mirror is parked from an earlier
+    // `hive mirror off` on a window since killed by hand.
     let argv = fake_tmux_tagged(
         MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[
+            ("dev:1", "hive-mirror", "on"),
             ("%1", "hive-hidden", "honey"),
             ("%1", "hive-role", "mirror"),
             ("%1", "hive-agent", "orch"),
@@ -199,10 +200,44 @@ fn test_attach_heal_joins_the_hidden_mirror_instead_of_splitting() {
         .iter()
         .all(|a| !(a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view")))));
     assert_eq!(count(&argv, "select-layout"), 1);
-    // A mirror on screen makes the orch chip appear.
+}
+
+#[test]
+fn test_attach_heal_leaves_the_parked_mirror_and_records_off_when_nothing_is_recorded() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    // Nothing recorded on this window: the mirror stays collapsed, parked
+    // pane and all, and the window records the default so the chip can
+    // open it.
+    let argv = fake_tmux_tagged(
+        MIRROR_WINDOW,
+        &["%0\t\tzsh\tterminal\t\thoney\t\t"],
+        &[
+            ("%1", "hive-hidden", "honey"),
+            ("%1", "hive-role", "mirror"),
+            ("%1", "hive-agent", "orch"),
+        ],
+    );
+
+    attach_cmd("honey");
+
+    assert_eq!(count(&argv, "join-pane"), 0);
+    assert_eq!(count(&argv, "split-window"), 0);
+    assert!(argv
+        .borrow()
+        .iter()
+        .all(|a| !(a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view")))));
     assert!(has_row(
         &argv,
-        &["set-window-option", "-t", "dev:1", "@hive-mirror", "on"]
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "off"]
     ));
 }
 
@@ -222,6 +257,7 @@ fn test_attach_heal_splits_a_fresh_viewer_when_the_parked_pane_is_another_member
         MIRROR_WINDOW,
         &["%0\t\tzsh\tterminal\t\thoney\t\t"],
         &[
+            ("dev:1", "hive-mirror", "on"),
             ("%1", "hive-hidden", "honey"),
             ("%1", "hive-role", "mirror"),
             ("%1", "hive-agent", "scout"),
@@ -275,7 +311,7 @@ fn test_attach_rebuild_hands_the_first_pane_to_the_next_member_when_the_mirror_i
 }
 
 #[test]
-fn test_attach_heal_builds_the_mirror_when_not_suppressed() {
+fn test_attach_heal_withholds_the_mirror_and_records_off_by_default() {
     let mut env = display_env();
     let _claude = claude_session_me(&mut env);
     crate::registry::record_team(
@@ -290,14 +326,43 @@ fn test_attach_heal_builds_the_mirror_when_not_suppressed() {
 
     attach_cmd("honey");
 
+    // Nothing recorded: no mirror pane, no viewer; the window records the
+    // collapsed default so the orch chip appears and can open it.
+    assert_eq!(count(&argv, "split-window"), 0);
+    assert!(argv
+        .borrow()
+        .iter()
+        .all(|a| !(a[0] == "send-keys" && a.iter().any(|arg| arg.contains("hive view")))));
+    assert!(has_row(
+        &argv,
+        &["set-window-option", "-t", "dev:1", "@hive-mirror", "off"]
+    ));
+}
+
+#[test]
+fn test_attach_heal_builds_the_mirror_when_the_window_records_on() {
+    let mut env = display_env();
+    let _claude = claude_session_me(&mut env);
+    crate::registry::record_team(
+        "honey",
+        "",
+        "100.0",
+        &[member_row("orch", "claude", "s-me")],
+        "@7",
+    )
+    .unwrap();
+    let argv = fake_tmux_tagged(
+        MIRROR_WINDOW,
+        &["%0\t\tzsh\tterminal\t\thoney\t\t"],
+        &[("dev:1", "hive-mirror", "on")],
+    );
+
+    attach_cmd("honey");
+
     assert_eq!(count(&argv, "split-window"), 1);
     assert!(has_row(
         &argv,
         &["set-option", "-p", "-t", "%1", "@hive-role", "mirror"]
-    ));
-    assert!(has_row(
-        &argv,
-        &["set-window-option", "-t", "dev:1", "@hive-mirror", "on"]
     ));
     // The mirror beside the shell pane: the plan for a 200x50 window with
     // a mirror and one member, its key recorded on the window.

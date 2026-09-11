@@ -41,6 +41,10 @@ const UNROSTERED_ENGINE_MESSAGE: &str = "this engine's session names nobody on a
 // `workflow run --team` rides the same doctrine: it exists for callers
 // without a pane identity (a workflow proxy subagent, a desktop session).
 const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
+    // `mirror` acts on a named window: the status click's run-shell job
+    // and the desktop session (no pane, its own team window) both run it
+    // without a client.
+    "mirror",
     "gc",
     "plugin",
     "config",
@@ -1268,9 +1272,9 @@ mod tests {
         assert_eq!(no_tmux_refusal("interrupt"), Some(TMUX_REQUIRED_MESSAGE));
         // ... and the tmux-optional verbs never reach the gate
         assert_eq!(no_tmux_refusal("config"), None);
-        // `mirror` moves panes on the server: tmux-only (a run-shell job
-        // carries TMUX)
-        assert_eq!(no_tmux_refusal("mirror"), Some(TMUX_REQUIRED_MESSAGE));
+        // `mirror` names its window (--window, or the caller's own team):
+        // the desktop session runs it with no tmux client at all
+        assert_eq!(no_tmux_refusal("mirror"), None);
     }
 
     /// Root help lists a command exactly when its clap node is not hidden:

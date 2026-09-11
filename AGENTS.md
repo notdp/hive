@@ -46,8 +46,12 @@ behavior is documented in the modules themselves.
   pane or a window is not the authority on who is on a team. The orch
   mirror is display state of the same kind: `@hive-role mirror` on the
   pane, `@hive-mirror on|off` on the team window (`hive mirror`; unset
-  means open), `@hive-hidden <team>` on the window that parks a closed
-  mirror pane, and nothing in the registry. The window's layout is
+  means closed — the desktop already shows the session a mirror would
+  repeat, so a window records `off` the first time it withholds one and
+  the mirror is drawn only on `on`; the bare shell that leaves as the
+  window's only pane goes to the next member that needs a pane),
+  `@hive-hidden <team>` on the window that parks a closed mirror pane,
+  and nothing in the registry. The window's layout is
   display state of the same kind: the planner (`layout/plan.rs`) is pure,
   `@hive-layout` on the team window is the key of the plan last applied,
   the two window hooks (`layout/hooks.rs`, installed with every other
