@@ -2124,6 +2124,7 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
         Ok(fake_team("t", agents))
     };
     let clear_sink = Arc::clone(&calls);
+    let unsubscribe_sink = Arc::clone(&calls);
     let drop_sink = Arc::clone(&calls);
     let spawn_sink = Arc::clone(&calls);
     let send_sink = Arc::clone(&calls);
@@ -2147,6 +2148,12 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
         tmux_socket_path: Some(Arc::new(move || s_own.own_socket.clone())),
         cas_clear_pane_thread: Some(Arc::new(move |pane| {
             clear_sink.lock().unwrap().push(format!("clear {pane}"))
+        })),
+        cas_unsubscribe_thread: Some(Arc::new(move |thread_id| {
+            unsubscribe_sink
+                .lock()
+                .unwrap()
+                .push(format!("unsubscribe {thread_id}"))
         })),
         cas_thread_id_for_pane: Some(Arc::new(move |pane| s_threads.threads.get(pane).cloned())),
         cas_pane_cwd: Some(Arc::new(move |pane| s_cwds.cwds.get(pane).cloned())),
@@ -2198,14 +2205,23 @@ fn test_supervisor_healthy_world_does_nothing() {
 }
 
 #[test]
-fn test_supervisor_prunes_records_of_dead_panes() {
+fn test_supervisor_prunes_records_of_dead_panes_and_releases_their_threads() {
     let mut state = super_state();
     state.recorded = vec!["%1".to_string(), "%dead".to_string()];
+    state
+        .threads
+        .insert("%dead".to_string(), "tid-dead".to_string());
     let (_guard, calls) = super_env(state);
     codex_supervisor_tick("/tmp/ws", "t");
     let calls = calls.lock().unwrap();
-    assert!(calls.contains(&"clear %dead".to_string()));
+    // The dead pane's thread is unsubscribed before its record goes, so the
+    // daemon's idle unload can take the thread; the live member's stays.
+    let dead = calls.iter().position(|c| c == "unsubscribe tid-dead");
+    let cleared = calls.iter().position(|c| c == "clear %dead");
+    assert!(dead.is_some() && cleared.is_some(), "{calls:?}");
+    assert!(dead < cleared, "{calls:?}");
     assert!(!calls.contains(&"clear %1".to_string()));
+    assert!(!calls.contains(&"unsubscribe tid-1".to_string()));
 }
 
 #[test]

@@ -419,34 +419,28 @@ impl CodexDaemonClient {
         res.get("result").is_some()
     }
 
-    /// Recover state for already-active threads (busy late-join).
+    /// Release this client's subscription to *thread_id* and forget its
+    /// cached runtime, so a later read resumes afresh instead of trusting
+    /// state no notification will update.
     ///
-    /// A client online when a status edge fires gets the broadcast; this
-    /// covers the late-join case by resuming each loaded thread once — the
-    /// resume response carries the thread's current status.
-    pub fn attach(&self) {
-        for tid in self.loaded_list() {
-            self.resume(&tid);
-        }
+    /// `thread/resume` is also the subscription, and the daemon unloads a
+    /// thread — tool hosts and MCP servers with it — only once it has had
+    /// no subscriber and no active turn for its idle delay. A subscription
+    /// hive no longer needs is what keeps a finished member's thread
+    /// loaded.
+    pub fn unsubscribe(&self, thread_id: &str) -> bool {
+        let res = self.call("thread/unsubscribe", json!({"threadId": thread_id}));
+        let mut state = self.inner.state.lock().unwrap();
+        state.threads.remove(thread_id);
+        state.resume_cooldown.remove(thread_id);
+        res.get("result").is_some()
     }
 
-    pub fn loaded_list(&self) -> Vec<String> {
-        let res = self.call("thread/loaded/list", json!({}));
-        if res.get("result").is_none() {
-            return Vec::new();
-        }
-        res.get("result")
-            .and_then(|result| result.get("data"))
-            .and_then(Value::as_array)
-            .map(|data| {
-                data.iter()
-                    .filter_map(|item| item.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Backfill a thread's current status from `thread/resume`.
+    /// Backfill a thread's current status from `thread/resume` — which
+    /// also subscribes this client to the thread's notifications. Only the
+    /// threads hive actually reads are resumed (`runtime_or_backfill`),
+    /// never every thread the daemon has loaded: a subscription pins a
+    /// thread against the daemon's idle unload.
     pub fn resume(&self, thread_id: &str) -> bool {
         let res = self.call(
             "thread/resume",
@@ -672,6 +666,9 @@ pub trait DaemonClient: Send + Sync {
     fn runtime_or_backfill(&self, _thread_id: &str) -> Option<ThreadRuntime> {
         unimplemented!("runtime_or_backfill")
     }
+    fn unsubscribe_thread(&self, _thread_id: &str) -> bool {
+        unimplemented!("unsubscribe_thread")
+    }
     fn compact_start(&self, _thread_id: &str) -> Value {
         unimplemented!("compact_start")
     }
@@ -705,6 +702,9 @@ impl DaemonClient for CodexDaemonClient {
     }
     fn runtime_or_backfill(&self, thread_id: &str) -> Option<ThreadRuntime> {
         CodexDaemonClient::runtime_or_backfill(self, thread_id)
+    }
+    fn unsubscribe_thread(&self, thread_id: &str) -> bool {
+        CodexDaemonClient::unsubscribe(self, thread_id)
     }
     fn compact_start(&self, thread_id: &str) -> Value {
         CodexDaemonClient::compact_start(self, thread_id)

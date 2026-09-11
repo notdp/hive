@@ -484,9 +484,36 @@ fn shared_client_prod() -> Option<CodexDaemonClient> {
         set_cooldown();
         return None;
     }
-    client.attach(); // busy late-join recovery
+    // No eager resume of the daemon's loaded threads: each read backfills
+    // its own thread once (`runtime_or_backfill`), and resuming is
+    // subscribing — a client that resumed everything the daemon held kept
+    // every other team's and every finished member's thread from ever
+    // unloading.
     CLIENT.lock().unwrap().client = Some(client.clone());
     Some(client)
+}
+
+/// The client this process already holds, without connecting one: a
+/// subscription to release can only exist on a live connection.
+fn existing_client() -> Option<Arc<dyn DaemonClient>> {
+    #[cfg(test)]
+    {
+        if let Some(overridden) = super::tests::shared_client_override() {
+            return overridden;
+        }
+    }
+    let slot = CLIENT.lock().unwrap();
+    let client = slot.client.as_ref().filter(|client| client.is_alive())?;
+    let dynamic: Arc<dyn DaemonClient> = Arc::new(client.clone());
+    Some(dynamic)
+}
+
+/// Release this process's subscription to *thread_id*; false when it held
+/// no connection to release it on.
+pub fn unsubscribe_thread(thread_id: &str) -> bool {
+    existing_client()
+        .map(|client| client.unsubscribe_thread(thread_id))
+        .unwrap_or(false)
 }
 
 fn set_cooldown() {

@@ -511,6 +511,15 @@ pub(super) fn hooked_cas_pane_thread_socket(pane: &str) -> Option<String> {
     crate::adapters::codex_app_server::read_pane_thread(pane).and_then(|record| record.tmux_socket)
 }
 
+pub(super) fn hooked_cas_unsubscribe_thread(thread_id: &str) {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_unsubscribe_thread.clone()).flatten() {
+        f(thread_id);
+        return;
+    }
+    let _ = crate::adapters::codex_app_server::unsubscribe_thread(thread_id);
+}
+
 pub(super) fn hooked_cas_clear_pane_thread(pane: &str) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_clear_pane_thread.clone()).flatten() {
