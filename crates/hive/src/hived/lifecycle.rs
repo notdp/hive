@@ -209,8 +209,9 @@ impl Drop for StartupLock {
 /// `HIVE_HOME` is refused, not restarted: nothing is spawned and the error
 /// names both homes.
 ///
-/// The error cases are loud: a startup lock that cannot be taken within its
-/// budget, and a hived this hive must not touch.
+/// The error cases are all loud: a startup lock that cannot be taken within
+/// its budget, a hived this hive must not touch, and a spawned hived that
+/// never answered a matching ping.
 pub fn ensure_hived(
     workspace: &str,
     team: &str,
@@ -276,7 +277,14 @@ pub fn ensure_hived(
         }
         thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
     }
-    Ok(pid)
+    // The spawned hived may still come up; killing it here would race a
+    // generation that is about to be correct, and unlinking its socket
+    // without its owner token would take down whoever did bind.
+    bail!(
+        "hived for team '{team}' did not answer a matching ping within {SOCKET_READY_TIMEOUT}s; \
+         see {}",
+        devlog::hived_stderr_path(Path::new(workspace)).display()
+    )
 }
 
 pub(super) fn hooked_current_exe() -> String {
@@ -422,7 +430,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     );
-    sleep::clear_asleep_marker(workspace);
     // The session hooks that wake an unwatched desk ride the hived's start,
     // not only the session's build: a session an older binary built gets
     // them at the first start after an upgrade.
@@ -439,7 +446,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     );
     let inherited_reexec_lock_fd = take_reexec_lock_fd_from_env();
     let start_serving = |server| {
-        RequestServer::start(
+        hooked_start_request_server(
             server,
             workspace,
             team,
@@ -471,6 +478,11 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         }
     };
     hooked_write_hived_owner(workspace, getpid(), &hived_started_at, &owner_token);
+    // Ready: the listener is bound, the accept worker is up and the owner
+    // file names this generation. Only now does the retired desk's marker
+    // go — a start that failed before this point leaves it byte for byte,
+    // so the session hooks can still wake the desk.
+    sleep::clear_asleep_marker(workspace);
     hooked_release_reexec_lock_fd(inherited_reexec_lock_fd);
     let session_target = tmux_window
         .split_once(':')

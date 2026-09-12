@@ -3689,6 +3689,163 @@ fn test_startup_lock_timeout_and_eintr_do_not_spawn() {
 }
 
 #[test]
+fn test_startup_timeout_is_error_and_ready_clears_marker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_string_lossy().to_string();
+
+    // A hived that never answers a matching ping is an error, not Ok(pid):
+    // the caller's request would otherwise be sent into a dead socket.
+    let spawns = Arc::new(Mutex::new(0usize));
+    {
+        let counted = Arc::clone(&spawns);
+        let _guard = testhook::install(Hook {
+            monotonic: Some(stepping_clock(10.0)),
+            request_ping: Some(Arc::new(|_ws, _timeout| None)),
+            cleanup_socket: Some(Arc::new(|_ws| {})),
+            popen: Some(Arc::new(move |_command, _stderr| {
+                *counted.lock().unwrap() += 1;
+                4242
+            })),
+            ..Default::default()
+        });
+        let err = ensure_hived(&workspace, "team-a", "dev:3", "@99")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("team-a"), "{err}");
+        assert!(err.contains("matching ping"), "{err}");
+    }
+    assert_eq!(*spawns.lock().unwrap(), 1);
+
+    // A ping that misses once and then matches is a success, on one spawn.
+    let spawns = Arc::new(Mutex::new(0usize));
+    {
+        let counted = Arc::clone(&spawns);
+        let pings = Arc::new(Mutex::new(0usize));
+        let _guard = testhook::install(Hook {
+            request_ping: Some(Arc::new(move |_ws, _timeout| {
+                let mut n = pings.lock().unwrap();
+                *n += 1;
+                (*n > 2).then(matching_identity)
+            })),
+            cleanup_socket: Some(Arc::new(|_ws| {})),
+            popen: Some(Arc::new(move |_command, _stderr| {
+                *counted.lock().unwrap() += 1;
+                4242
+            })),
+            ..Default::default()
+        });
+        assert_eq!(
+            ensure_hived(&workspace, "team-a", "dev:3", "@99").unwrap(),
+            Some(4242)
+        );
+    }
+    assert_eq!(*spawns.lock().unwrap(), 1);
+
+    // In the hived, the marker survives every startup barrier and goes
+    // only once the owner file names this generation.
+    let env = loop_probe_env("ok");
+    let marker = asleep_marker_path(&env.workspace);
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "{\"reason\":\"unwatched\"}\n").unwrap();
+    let barriers: Arc<Mutex<Vec<(&str, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let at_open = Arc::clone(&barriers);
+    let at_worker = Arc::clone(&barriers);
+    let at_owner = Arc::clone(&barriers);
+    let open_marker = marker.clone();
+    let worker_marker = marker.clone();
+    let owner_marker = marker.clone();
+    testhook::update(|h| {
+        h.open_server_socket = Some(Arc::new(move |_workspace| {
+            at_open.lock().unwrap().push(("bind", open_marker.exists()));
+            Ok(Box::new(RecServer {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }) as Box<dyn HivedServerApi>)
+        }));
+        h.start_request_server = Some(Arc::new(move |server| {
+            at_worker
+                .lock()
+                .unwrap()
+                .push(("worker", worker_marker.exists()));
+            Ok(server)
+        }));
+        h.write_hived_owner = Some(Arc::new(move |ws, pid, started_at, token| {
+            at_owner
+                .lock()
+                .unwrap()
+                .push(("owner", owner_marker.exists()));
+            write_hived_owner_impl(ws, pid, started_at, token);
+        }));
+        h.try_acquire_reexec_lock = Some(Arc::new(|_ws| Some(9)));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert_eq!(
+        *barriers.lock().unwrap(),
+        vec![("bind", true), ("worker", true), ("owner", true)]
+    );
+    assert!(!marker.exists(), "a ready hived clears the marker");
+}
+
+#[test]
+fn test_failed_bind_preserves_unwatched_marker() {
+    for failure in ["bind", "worker"] {
+        let env = loop_probe_env("ok");
+        let marker = asleep_marker_path(&env.workspace);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        let bytes = "{\"reason\":\"unwatched\",\"at\":1730000000}\n";
+        std::fs::write(&marker, bytes).unwrap();
+        let owners = Arc::new(Mutex::new(0usize));
+        let counted = Arc::clone(&owners);
+        testhook::update(|h| {
+            h.write_hived_owner = Some(Arc::new(move |ws, pid, started_at, token| {
+                *counted.lock().unwrap() += 1;
+                write_hived_owner_impl(ws, pid, started_at, token);
+            }));
+            h.try_acquire_reexec_lock = Some(Arc::new(|_ws| Some(9)));
+            if failure == "bind" {
+                h.open_server_socket = Some(Arc::new(|_workspace| {
+                    Err(anyhow::anyhow!("File name too long (os error 63)"))
+                }));
+            } else {
+                h.start_request_server = Some(Arc::new(|_server| {
+                    Err(anyhow::anyhow!("cannot spawn the accept worker"))
+                }));
+            }
+        });
+
+        hived_loop(&env.workspace, "probe", "probe:1", "@1");
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            bytes,
+            "{failure}: the marker bytes are left as they were found"
+        );
+        assert_eq!(
+            *owners.lock().unwrap(),
+            0,
+            "{failure}: nothing published an owner"
+        );
+        assert_eq!(
+            display_events(&env, "hived.socket_bind_failed").len(),
+            1,
+            "{failure}"
+        );
+
+        // Fault cleared: the next start reaches ready and the marker goes.
+        testhook::update(|h| {
+            h.open_server_socket = Some(Arc::new(|_workspace| {
+                Ok(Box::new(RecServer {
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                }) as Box<dyn HivedServerApi>)
+            }));
+            h.start_request_server = Some(Arc::new(Ok));
+        });
+        hived_loop(&env.workspace, "probe", "probe:1", "@1");
+        assert!(!marker.exists(), "{failure}");
+        assert_eq!(*owners.lock().unwrap(), 1, "{failure}");
+    }
+}
+
+#[test]
 fn test_ensure_hived_does_not_restart_when_ping_takes_longer_than_retry_interval() {
     let (pid, spawns, cleanups) = ensure_hived_with_delayed_ping(Some(Duration::from_millis(250)));
     assert_eq!(pid, None);

@@ -1080,6 +1080,31 @@ pub(crate) fn flock_nb_impl(fd: i32) -> std::result::Result<(), i32> {
         .unwrap_or(libc::EIO))
 }
 
+/// Starting the accept worker can fail on its own (thread spawn), and a
+/// hived that never published an owner must leave the retired desk's
+/// marker exactly as it found it.
+pub(super) fn hooked_start_request_server(
+    server: Box<dyn HivedServerApi>,
+    workspace: &str,
+    team: &str,
+    tmux_window: &str,
+    tmux_window_id: &str,
+    started_at: &str,
+) -> Result<Box<dyn HivedServerApi>> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.start_request_server.clone()).flatten() {
+        return f(server);
+    }
+    RequestServer::start(
+        server,
+        workspace,
+        team,
+        tmux_window,
+        tmux_window_id,
+        started_at,
+    )
+}
+
 pub(super) fn hooked_open_server_socket(workspace: &str) -> Result<Box<dyn HivedServerApi>> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.open_server_socket.clone()).flatten() {
