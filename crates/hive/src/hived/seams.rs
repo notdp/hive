@@ -1060,6 +1060,26 @@ pub(super) fn hooked_wait_tick(timeout: f64) -> bool {
     !SHUTDOWN.load(Ordering::SeqCst)
 }
 
+/// `flock(LOCK_EX | LOCK_NB)`, errno on failure. The seam is what lets a
+/// test drive `EINTR` and the non-retryable errnos the startup lock's
+/// budget has to tell apart.
+pub(super) fn hooked_flock_nb(fd: i32) -> std::result::Result<(), i32> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.flock_nb.clone()).flatten() {
+        return f(fd);
+    }
+    flock_nb_impl(fd)
+}
+
+pub(crate) fn flock_nb_impl(fd: i32) -> std::result::Result<(), i32> {
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(());
+    }
+    Err(std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO))
+}
+
 pub(super) fn hooked_open_server_socket(workspace: &str) -> Result<Box<dyn HivedServerApi>> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.open_server_socket.clone()).flatten() {

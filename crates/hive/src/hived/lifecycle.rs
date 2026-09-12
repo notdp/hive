@@ -90,97 +90,193 @@ impl DisplayProbe {
     }
 }
 
+/// How long a starting CLI waits for `run/hived.lock`, and how often it
+/// retries inside that budget. A leaked holder must be a loud failure, not
+/// an unbounded hang: nothing here can name the process that holds a flock.
+pub const STARTUP_LOCK_TIMEOUT: f64 = 5.0;
+pub const STARTUP_LOCK_RETRY_INTERVAL: f64 = 0.02;
+
+/// The `run/hived.lock` descriptor a starting CLI holds while it decides
+/// whether to replace the team's hived.
+///
+/// The fd is close-on-exec. `start_hived` spawns the hived while this lock
+/// is held, and a descriptor riding into that child would keep the lock for
+/// as long as the child (or anything it spawns) lived: every later
+/// `ensure_hived` would then wait on a holder nothing can identify, and the
+/// hived's own retirement would deadlock against itself. The reexec handoff
+/// fd is the opposite contract — deliberately inheritable, opened separately
+/// by `try_acquire_reexec_lock` and released by the generation that inherits
+/// it.
+pub struct StartupLock {
+    fd: i32,
+    path: std::path::PathBuf,
+    held: bool,
+}
+
+impl StartupLock {
+    /// Open the workspace's startup lock close-on-exec and take it within
+    /// `STARTUP_LOCK_TIMEOUT`.
+    pub fn acquire(workspace: &str) -> Result<StartupLock> {
+        let path = lock_path(workspace);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let cpath = CString::new(path.as_os_str().as_bytes())?;
+        let fd = unsafe {
+            libc::open(
+                cpath.as_ptr(),
+                libc::O_CREAT | libc::O_RDWR | libc::O_CLOEXEC,
+                0o644,
+            )
+        };
+        if fd < 0 {
+            bail!(
+                "cannot open hived lock {} ({})",
+                path.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+        let mut lock = StartupLock {
+            fd,
+            path,
+            held: false,
+        };
+        lock.reacquire()?;
+        Ok(lock)
+    }
+
+    /// Take the lock again on the same descriptor, on a fresh budget.
+    pub(crate) fn reacquire(&mut self) -> Result<()> {
+        let deadline = monotonic() + STARTUP_LOCK_TIMEOUT;
+        loop {
+            match hooked_flock_nb(self.fd) {
+                Ok(()) => {
+                    self.held = true;
+                    return Ok(());
+                }
+                // EINTR retries on the same deadline; a busy lock is the
+                // only other reason to keep trying.
+                Err(errno)
+                    if errno == libc::EWOULDBLOCK
+                        || errno == libc::EAGAIN
+                        || errno == libc::EINTR => {}
+                Err(errno) => bail!(
+                    "cannot lock hived lock {} ({})",
+                    self.path.display(),
+                    std::io::Error::from_raw_os_error(errno)
+                ),
+            }
+            if monotonic() >= deadline {
+                bail!(
+                    "hived lock {} is still held after {STARTUP_LOCK_TIMEOUT}s; \
+                     another starter or a process that inherited it has not released it",
+                    self.path.display()
+                );
+            }
+            thread::sleep(Duration::from_secs_f64(STARTUP_LOCK_RETRY_INTERVAL));
+        }
+    }
+
+    /// Drop the lock but keep the descriptor: the retiring owner takes the
+    /// same lock for its cleanup, so it must not be held across a stop.
+    pub(crate) fn release(&mut self) {
+        if std::mem::replace(&mut self.held, false) {
+            unsafe {
+                libc::flock(self.fd, libc::LOCK_UN);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_fd(&self) -> i32 {
+        self.fd
+    }
+}
+
+impl Drop for StartupLock {
+    fn drop(&mut self) {
+        self.release();
+        unsafe {
+            libc::close(self.fd);
+        }
+    }
+}
+
 /// Ensure the team hived socket is alive.
 ///
 /// A hived of this hive home that is another build, api version or team
 /// is replaced from this binary. One serving the workspace from another
 /// `HIVE_HOME` is refused, not restarted: nothing is spawned and the error
 /// names both homes.
+///
+/// The error cases are loud: a startup lock that cannot be taken within its
+/// budget, and a hived this hive must not touch.
 pub fn ensure_hived(
     workspace: &str,
     team: &str,
     tmux_window: &str,
     tmux_window_id: &str,
 ) -> Result<Option<i32>> {
-    let lock_path = lock_path(workspace);
-    if let Some(parent) = lock_path.parent() {
-        let _ = fs::create_dir_all(parent);
+    let mut lock = StartupLock::acquire(workspace)?;
+    let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
+    match hived_identity(response.as_ref(), team) {
+        HivedIdentity::Matches => return Ok(None),
+        HivedIdentity::ForeignHome(served) => bail!(
+            "hived for {workspace} serves HIVE_HOME {served}, this hive runs with {}",
+            crate::paths::hive_home().display()
+        ),
+        HivedIdentity::Restart => {}
     }
-    let cpath = CString::new(lock_path.as_os_str().as_bytes())?;
-    let lock_fd = unsafe { libc::open(cpath.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644) };
-    if lock_fd < 0 {
-        bail!("cannot open hived lock {}", lock_path.display());
-    }
-    unsafe { libc::flock(lock_fd, libc::LOCK_EX) };
-    let result = (|| {
+    if response.is_some() {
+        // The retiring owner takes the same lock for cleanup. Do not
+        // hold it while waiting for its admission/operation drain.
+        lock.release();
+        let stopped = stop_hived_generation(
+            workspace,
+            response.as_ref().and_then(|r| r.get("hived")).cloned(),
+            false,
+        );
+        lock.reacquire()?;
+        if stopped == StopOutcome::Deferred {
+            return Ok(None);
+        }
         let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
-        match hived_identity(response.as_ref(), team) {
-            HivedIdentity::Matches => return Ok(None),
-            HivedIdentity::ForeignHome(served) => bail!(
-                "hived for {workspace} serves HIVE_HOME {served}, this hive runs with {}",
-                crate::paths::hive_home().display()
-            ),
-            HivedIdentity::Restart => {}
+        if hived_identity_matches(response.as_ref(), team) {
+            return Ok(None);
         }
-        if response.is_some() {
-            // The retiring owner takes the same lock for cleanup. Do not
-            // hold it while waiting for its admission/operation drain.
-            unsafe {
-                libc::flock(lock_fd, libc::LOCK_UN);
+        if stopped == StopOutcome::TimedOut
+            && response
+                .as_ref()
+                .and_then(|r| r.get("team"))
+                .and_then(Value::as_str)
+                == Some(team)
+        {
+            if let HivedIdentity::ForeignHome(home) = hived_identity(response.as_ref(), team) {
+                bail!("hived now serves another hive home: {home}");
             }
-            let stopped = stop_hived_generation(
-                workspace,
-                response.as_ref().and_then(|r| r.get("hived")).cloned(),
-                false,
-            );
-            unsafe {
-                libc::flock(lock_fd, libc::LOCK_EX);
-            }
-            if stopped == StopOutcome::Deferred {
-                return Ok(None);
-            }
-            let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
-            if hived_identity_matches(response.as_ref(), team) {
-                return Ok(None);
-            }
-            if stopped == StopOutcome::TimedOut
-                && response
-                    .as_ref()
-                    .and_then(|r| r.get("team"))
-                    .and_then(Value::as_str)
-                    == Some(team)
-            {
-                if let HivedIdentity::ForeignHome(home) = hived_identity(response.as_ref(), team) {
-                    bail!("hived now serves another hive home: {home}");
-                }
-                return Ok(None);
-            }
-            if stopped != StopOutcome::Stopped || response.is_some() {
-                bail!("hived is draining; retry after accepted operations finish");
-            }
+            return Ok(None);
         }
-        if std::os::unix::net::UnixStream::connect(socket_path(workspace)).is_ok() {
-            bail!(
-                "hived socket still accepts connections; refusing to replace an unresponsive owner"
-            );
+        if stopped != StopOutcome::Stopped || response.is_some() {
+            bail!("hived is draining; retry after accepted operations finish");
         }
-        hooked_cleanup_socket(workspace);
-        let pid = start_hived(workspace, team, tmux_window, tmux_window_id);
-        let deadline = monotonic() + SOCKET_READY_TIMEOUT;
-        while monotonic() < deadline {
-            let response = hooked_request_ping(workspace, SOCKET_RETRY_INTERVAL);
-            if hived_identity_matches(response.as_ref(), team) {
-                return Ok(pid);
-            }
-            thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
-        }
-        Ok(pid)
-    })();
-    unsafe {
-        libc::flock(lock_fd, libc::LOCK_UN);
-        libc::close(lock_fd);
     }
-    result
+    if std::os::unix::net::UnixStream::connect(socket_path(workspace)).is_ok() {
+        bail!("hived socket still accepts connections; refusing to replace an unresponsive owner");
+    }
+    hooked_cleanup_socket(workspace);
+    let pid = start_hived(workspace, team, tmux_window, tmux_window_id);
+    let deadline = monotonic() + SOCKET_READY_TIMEOUT;
+    loop {
+        let response = hooked_request_ping(workspace, SOCKET_RETRY_INTERVAL);
+        if hived_identity_matches(response.as_ref(), team) {
+            return Ok(pid);
+        }
+        if monotonic() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
+    }
+    Ok(pid)
 }
 
 pub(super) fn hooked_current_exe() -> String {
@@ -193,7 +289,7 @@ pub(super) fn hooked_current_exe() -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn start_hived(
+pub fn start_hived(
     workspace: &str,
     team: &str,
     tmux_window: &str,
