@@ -1060,6 +1060,51 @@ pub(super) fn hooked_wait_tick(timeout: f64) -> bool {
     !SHUTDOWN.load(Ordering::SeqCst)
 }
 
+/// `flock(LOCK_EX | LOCK_NB)`, errno on failure. The seam is what lets a
+/// test drive `EINTR` and the non-retryable errnos the startup lock's
+/// budget has to tell apart.
+pub(super) fn hooked_flock_nb(fd: i32) -> std::result::Result<(), i32> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.flock_nb.clone()).flatten() {
+        return f(fd);
+    }
+    flock_nb_impl(fd)
+}
+
+pub(crate) fn flock_nb_impl(fd: i32) -> std::result::Result<(), i32> {
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(());
+    }
+    Err(std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO))
+}
+
+/// Starting the accept worker can fail on its own (thread spawn), and a
+/// hived that never published an owner must leave the retired desk's
+/// marker exactly as it found it.
+pub(super) fn hooked_start_request_server(
+    server: Box<dyn HivedServerApi>,
+    workspace: &str,
+    team: &str,
+    tmux_window: &str,
+    tmux_window_id: &str,
+    started_at: &str,
+) -> Result<Box<dyn HivedServerApi>> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.start_request_server.clone()).flatten() {
+        return f(server);
+    }
+    RequestServer::start(
+        server,
+        workspace,
+        team,
+        tmux_window,
+        tmux_window_id,
+        started_at,
+    )
+}
+
 pub(super) fn hooked_open_server_socket(workspace: &str) -> Result<Box<dyn HivedServerApi>> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.open_server_socket.clone()).flatten() {
