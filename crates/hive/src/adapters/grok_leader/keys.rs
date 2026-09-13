@@ -268,10 +268,60 @@ pub fn write_pane_session(pane: &str, session_id: &str, cwd: &str) -> Result<()>
         );
         return update_record_keeping_binding(&own_session_path(&target), session_id, cwd);
     }
-    if member_from_key(&key).is_some() {
-        return update_record_keeping_binding(&own_session_path(&key), session_id, cwd);
+    if let Some((team, member)) = member_from_key(&key) {
+        let path = own_session_path(&key);
+        if path.exists() {
+            return update_record_keeping_binding(&path, session_id, cwd);
+        }
+        let binding = first_launch_binding(&team, &member, session_id)?;
+        return write_record_at(&path, session_id, cwd, Some(&binding));
     }
     write_record_at(&own_session_path(&key), session_id, cwd, None)
+}
+
+/// The binding of a member record its TUI's first launch writes: a member
+/// registered before any session was minted for it (`hive fork`, a join
+/// of a pane) has a roster row with no session yet, and the session its
+/// `hive grok` launch names is the one that row will carry. A row naming
+/// another session, a row that is gone (a killed member whose stale
+/// launch still writes), or no team at all is nothing to mint for.
+fn first_launch_binding(team: &str, member: &str, session_id: &str) -> Result<RecordBinding> {
+    let entry = crate::registry::load(team)
+        .ok_or_else(|| anyhow::anyhow!("team '{team}' is not in the registry"))?;
+    let created_at = match entry.get("createdAt") {
+        Some(Value::String(text)) => text.parse::<f64>().ok(),
+        Some(Value::Number(number)) => number.as_f64(),
+        _ => None,
+    }
+    .map(crate::team::created_at_key)
+    .filter(|key| !key.is_empty())
+    .ok_or_else(|| anyhow::anyhow!("team '{team}' has no createdAt"))?;
+    let row = entry
+        .get("members")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .filter_map(Value::as_object)
+                .find(|row| row.get("name").and_then(Value::as_str) == Some(member))
+        })
+        .ok_or_else(|| anyhow::anyhow!("'{member}' is not on the roster of '{team}'"))?;
+    anyhow::ensure!(
+        row.get("cli").and_then(Value::as_str) == Some("grok"),
+        "'{team}.{member}' is not a grok member"
+    );
+    let recorded = row
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        recorded.is_empty() || recorded == session_id,
+        "'{team}.{member}' already names session {recorded}"
+    );
+    Ok(RecordBinding {
+        team: team.to_string(),
+        created_at,
+        member: member.to_string(),
+    })
 }
 
 /// Rewrite the record at *path* on one handle: the binding it holds stays

@@ -1375,6 +1375,18 @@ socket on disk and the lock held): the runtime's `cliAlive` and `retained`,
 pid in the file is not consulted, and nothing hive does is a client the
 leader has to serve.
 
+A raise of a key's leader — the spawn behind a mint, a pane's `hive
+grok`, a launch, a revive — runs under the key's raise lock
+(`<key>.raise-lock`): two submissions reviving one cold member at once
+would each find no leader and spawn, and the second leader dies on the
+first one's lock while its raiser goes on to a socket it never bound; the
+second raiser waits and finds the leader the first raised. A member
+registered before any session was minted for it (`hive fork`, a join of a
+pane) gets its record at its TUI's first launch: `hive grok` on the tagged
+pane names the session, and with the roster row still naming none the
+launch writes the record bound to the row's team instance; a row naming
+another session, or gone, is nothing to mint for.
+
 What the exit leaves is the session record — `{sessionId, cwd, team,
 createdAt, member}`, the binding written at the mint (`session/new`, the
 resume and fork lanes) or when a create/join binds a launch
