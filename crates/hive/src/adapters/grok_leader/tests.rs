@@ -164,7 +164,7 @@ pub(crate) type KillLog = Arc<Mutex<Vec<libc::pid_t>>>;
 /// The command line of the leader that binds *sock*, as `ps` would print it.
 fn leader_args(sock: &std::path::Path) -> String {
     format!(
-        "grok agent leader --leader-socket {} --no-auto-update --no-exit-on-disconnect",
+        "grok agent leader --leader-socket {} --no-auto-update",
         sock.display()
     )
 }
@@ -1935,8 +1935,8 @@ fn test_spawn_daemon_builds_leader_argv_and_pane_env() {
             "--leader-socket".to_string(),
             pane_socket_path("%19").to_string_lossy().into_owned(),
             "--no-auto-update".to_string(),
-            "--no-exit-on-disconnect".to_string(),
-        ]
+        ],
+        "no --no-exit-on-disconnect: the leader exits with its last client"
     );
     assert_eq!(env.get("TMUX_PANE").map(String::as_str), Some("%19"));
     // the pidfile is the socket's sibling, written by the spawn itself

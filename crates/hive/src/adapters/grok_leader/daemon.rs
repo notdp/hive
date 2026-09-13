@@ -429,9 +429,12 @@ fn leader_pid(sock: &Path) -> Option<libc::pid_t> {
 /// Start (or reuse) the leader daemon on *key*'s socket.
 ///
 /// `setsid()` gives it a session of its own, detaching it from the
-/// short-lived CLI; the hived
-/// reaps member daemons the registry no longer lists, and pane-keyed ones
-/// when their pane dies.
+/// short-lived CLI. The argv leaves grok's exit-on-disconnect in force: the
+/// leader lives while a client holds it (a pane TUI, the hived's pool
+/// client, a launcher's terminal) and exits on its own once the last one
+/// disconnects, leaving the session record for a revival
+/// (`GrokClientPool::revive_key`). The hived still reaps member daemons
+/// the registry no longer lists, and pane-keyed ones when their pane dies.
 fn spawn_daemon_key(key: &str, env: HashMap<String, String>, grok_bin: &str, timeout: f64) -> bool {
     let sock = socket_path_for_key(key);
     if let Some(parent) = sock.parent() {
@@ -466,7 +469,6 @@ fn spawn_daemon_key(key: &str, env: HashMap<String, String>, grok_bin: &str, tim
         "--leader-socket".to_string(),
         sock.to_string_lossy().into_owned(),
         "--no-auto-update".to_string(),
-        "--no-exit-on-disconnect".to_string(),
     ];
     let child = match spawn_leader(&argv, &env) {
         Ok(child) => child,
