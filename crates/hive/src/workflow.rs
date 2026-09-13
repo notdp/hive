@@ -874,6 +874,13 @@ pub fn run_workflow(
             "the workflow lock for '{name}' is held by another runner"
         )));
     };
+    // The hived's team runtime is the liveness authority (`Team::
+    // member_liveness`): a retained member reads alive only through it,
+    // and a hived that retired for want of a viewer answers nothing until
+    // the next command that needs it starts a generation — this one,
+    // before the first question it asks of a member, whose answer decides
+    // whether an earlier dispatch on the record is still that member's.
+    env.ensure_hived().map_err(WorkflowError)?;
     if let Some(mut record) = read_record(workspace, name) {
         if record.is_pending() && env.alive(name) {
             // Holding the lock means the previous waiter is gone, not that
@@ -907,11 +914,6 @@ pub fn run_workflow(
     }
 
     let dispatch_id = mint_dispatch_id();
-    // The hived's team runtime is the liveness authority (`Team::
-    // member_liveness`): a retained member reads alive only through it,
-    // and a hived that retired for want of a viewer answers nothing until
-    // the next command that needs it starts a generation — this one.
-    env.ensure_hived().map_err(WorkflowError)?;
     let reused = env.alive(name);
     let (pane, cli) = if reused {
         let member = env.member(name).unwrap_or_default();
@@ -2618,6 +2620,34 @@ mod tests {
         assert_eq!(env.revives.lock().unwrap().len(), 1);
         assert!(env.retired.lock().unwrap().is_empty());
         assert!(env.spawns.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_run_workflow_starts_the_hived_before_it_reads_an_old_dispatch_off_a_cold_member() {
+        // A cold team with a pending record: judged without a hived the
+        // member reads dead and its record is replaced, the old dispatch
+        // never asked after. With the hived raised first the retained
+        // member is alive, the old dispatch is asked once and, unresolved,
+        // keeps the name busy — nothing new is dispatched, the record stays.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.liveness_needs_hived = true;
+        env.add_retained_grok("audit");
+        let old = pending("nd-aaaaaaaaaaaa");
+        write_record(&env.workspace_str(), "audit", &old).unwrap();
+        *env.node_answers.lock().unwrap() =
+            VecDeque::from([Some(NodeResult::Unknown("no handle".into()))]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([None]);
+        let result = run_workflow(&env, &workflow("audit", Some("grok"), "t")).unwrap();
+        assert_eq!(result["status"], "member_busy", "{result:?}");
+        assert_eq!(result["dispatchId"], old.dispatch_id);
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert!(env.spawns.lock().unwrap().is_empty());
+        assert_eq!(
+            *env.node_calls.lock().unwrap(),
+            vec![old.dispatch_id.clone()]
+        );
+        assert_eq!(read_record(&env.workspace_str(), "audit"), Some(old));
     }
 
     #[test]
