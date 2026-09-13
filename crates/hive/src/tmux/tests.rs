@@ -722,8 +722,9 @@ fn test_prefix_m_fallback_is_empty_for_an_unbound_key() {
 
 #[test]
 fn test_install_team_status_runs_options_then_bindings() {
-    let mut env = EnvGuard::new();
-    env.set("HIVE_BIN", "/x/hive");
+    // The wake hook install at the end takes the reached server's lock:
+    // a server under a temp tree, never the developer's.
+    let _env = wake_env();
     let calls = prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
 
     install_team_status("$3");
@@ -1356,27 +1357,55 @@ fn test_windows_snapshot_lists_the_instance_tags_and_the_token_in_one_read() {
 // --- wake hooks -----------------------------------------------------------
 
 /// The hook environment a wake-hook test installs under: a fixed binary,
-/// hive home, `HOME` and one engine home, no other engine home.
-fn wake_env() -> EnvGuard {
+/// hive home, `HOME` and one engine home, no other engine home, and the
+/// tmux server's directory under a temp dir of its own — the hook lock
+/// the installer takes lands beside that server's socket, never the
+/// developer's.
+struct WakeEnv {
+    env: EnvGuard,
+    tmp: tempfile::TempDir,
+}
+
+impl WakeEnv {
+    /// The lock file the installer and the remover take.
+    fn lock_path(&self) -> std::path::PathBuf {
+        self.tmp
+            .path()
+            .join(format!("tmux-{}", unsafe { libc::getuid() }))
+            .join("default.hive-hooks.lock")
+    }
+}
+
+fn wake_env() -> WakeEnv {
     let mut env = EnvGuard::cleared(&[
         "CLAUDE_HOME",
         "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
         "GROK_HOME",
+        "TMUX",
     ]);
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("TMUX_TMPDIR", tmp.path());
     env.set("HIVE_BIN", "/x/hive");
     env.set("HIVE_HOME", "/h/one");
     env.set("HOME", "/home/dp");
     env.set("CODEX_HOME", "/home/dp/.codex");
-    env
+    WakeEnv { env, tmp }
+}
+
+/// The wake entry `wake_env`'s installer bakes for *home*, as tmux lists it.
+fn wake_entry(home: &str) -> String {
+    format!("run-shell -b \"HIVE_HOME={home} HOME=/home/dp CODEX_HOME=/home/dp/.codex /x/hive wake --session #{{q:session_id}} >/dev/null 2>&1 || true\"")
 }
 
 const OWN_WAKE: &str = "run-shell -b \"HIVE_HOME=/h/one HOME=/home/dp CODEX_HOME=/home/dp/.codex /x/hive wake --session #{q:session_id} >/dev/null 2>&1 || true\"";
 const FOREIGN_WAKE: &str = "run-shell -b \"HIVE_HOME=/h/two HOME=/home/dp /y/hive wake --session #{q:session_id} >/dev/null 2>&1 || true\"";
 const USER_ATTACH: &str = "run-shell \"touch /tmp/attached\"";
 const USER_CHANGED: &str = "display-message hi";
-const LEGACY_OWN: &str = "run-shell -b \"/x/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
-const LEGACY_OTHER: &str = "run-shell -b \"/y/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
+/// Wake entries from before homes were baked in: this binary's and
+/// another's. Neither names a home, so neither is any home's.
+const LEGACY_THIS_BIN: &str = "run-shell -b \"/x/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
+const LEGACY_OTHER_BIN: &str = "run-shell -b \"/y/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
 
 type HookStore = Rc<RefCell<std::collections::BTreeMap<String, String>>>;
 
@@ -1478,10 +1507,10 @@ fn test_wake_environment_bakes_the_absolute_hive_home_and_set_engine_homes() {
     );
     // A relative or default home is baked resolved: the hook must name the
     // home it was installed for, not read one from the server's env.
-    env.remove("HIVE_HOME");
-    env.set("HOME", "/home/dp");
+    env.env.remove("HIVE_HOME");
+    env.env.set("HOME", "/home/dp");
     assert_eq!(wake_environment()[0].1, "/home/dp/.hive");
-    env.set("HIVE_HOME", "rel/home");
+    env.env.set("HIVE_HOME", "rel/home");
     let cwd = std::env::current_dir().unwrap();
     assert_eq!(
         wake_environment()[0].1,
@@ -1516,7 +1545,7 @@ fn test_parse_hook_entries_reads_indexed_and_plain_wake_hooks_only() {
 
 #[test]
 fn test_install_wake_hooks_preserves_user_and_foreign_home_entries() {
-    let _env = wake_env();
+    let env = wake_env();
     let (store, calls) = hook_server(
         &[
             ("client-attached[0]", USER_ATTACH),
@@ -1558,12 +1587,14 @@ fn test_install_wake_hooks_preserves_user_and_foreign_home_entries() {
         .all(|a| a[1] == "-t"
             && (a[3] == "client-attached[2]" || a[3] == "client-session-changed[1]")));
     assert!(calls.borrow().iter().all(|(_, check, _)| *check));
+    // The server's lock, beside its socket, taken for every install.
+    assert!(env.lock_path().is_file());
 }
 
 #[test]
 fn test_install_and_remove_wake_hooks_recognise_their_entry_under_a_relative_hive_home() {
     let mut env = wake_env();
-    env.set("HIVE_HOME", "rel/home");
+    env.env.set("HIVE_HOME", "rel/home");
     let (store, _calls) = hook_server(&[("client-attached[0]", USER_ATTACH)], false);
 
     // The entry is baked with the resolved home, and a second install
@@ -1586,16 +1617,16 @@ fn test_install_and_remove_wake_hooks_recognise_their_entry_under_a_relative_hiv
 }
 
 #[test]
-fn test_install_wake_hooks_migrates_this_binarys_unindexed_hook_and_drops_its_duplicates() {
+fn test_install_wake_hooks_leaves_home_less_legacy_hooks_and_drops_its_own_duplicates() {
     let _env = wake_env();
-    // An older install (no home baked in, the whole array clobbered to
-    // index 0) of this binary is replaced in place; the same shape from
-    // another binary is somebody else's. A second entry of this home's is
-    // a leftover to drop.
+    // Older installs (no home baked in, the whole array clobbered to
+    // index 0) of this binary and of another are nobody's: both stay as
+    // they are and this home takes the next free index. A second entry of
+    // this home's is a leftover to drop.
     let (store, _calls) = hook_server(
         &[
-            ("client-attached[0]", LEGACY_OWN),
-            ("client-attached[1]", LEGACY_OTHER),
+            ("client-attached[0]", LEGACY_THIS_BIN),
+            ("client-attached[1]", LEGACY_OTHER_BIN),
             ("client-session-changed[0]", OWN_WAKE),
             ("client-session-changed[2]", USER_CHANGED),
             ("client-session-changed[3]", OWN_WAKE),
@@ -1608,8 +1639,15 @@ fn test_install_wake_hooks_migrates_this_binarys_unindexed_hook_and_drops_its_du
     assert_eq!(
         entries(&store),
         vec![
-            ("client-attached[0]".to_string(), OWN_WAKE.to_string()),
-            ("client-attached[1]".to_string(), LEGACY_OTHER.to_string()),
+            (
+                "client-attached[0]".to_string(),
+                LEGACY_THIS_BIN.to_string()
+            ),
+            (
+                "client-attached[1]".to_string(),
+                LEGACY_OTHER_BIN.to_string()
+            ),
+            ("client-attached[2]".to_string(), OWN_WAKE.to_string()),
             (
                 "client-session-changed[0]".to_string(),
                 OWN_WAKE.to_string()
@@ -1617,6 +1655,63 @@ fn test_install_wake_hooks_migrates_this_binarys_unindexed_hook_and_drops_its_du
             (
                 "client-session-changed[2]".to_string(),
                 USER_CHANGED.to_string()
+            ),
+        ]
+    );
+}
+
+/// Two hive homes installed from one binary: the home-less legacy entry
+/// that binary left names no home, so a second home neither claims it as
+/// its own index nor removes it — its entry is created beside it, updated
+/// in place, and removed alone.
+#[test]
+fn test_a_second_home_of_the_same_binary_leaves_the_binarys_legacy_hook_alone() {
+    let mut env = wake_env();
+    env.env.set("HIVE_HOME", "/h/two");
+    let (store, calls) = hook_server(
+        &[
+            ("client-attached[0]", LEGACY_THIS_BIN),
+            ("client-session-changed[0]", LEGACY_THIS_BIN),
+        ],
+        false,
+    );
+    let two = wake_entry("/h/two");
+
+    for _ in 0..2 {
+        install_wake_hooks("$3").unwrap();
+        assert_eq!(
+            entries(&store),
+            vec![
+                (
+                    "client-attached[0]".to_string(),
+                    LEGACY_THIS_BIN.to_string()
+                ),
+                ("client-attached[1]".to_string(), two.clone()),
+                (
+                    "client-session-changed[0]".to_string(),
+                    LEGACY_THIS_BIN.to_string()
+                ),
+                ("client-session-changed[1]".to_string(), two.clone()),
+            ]
+        );
+    }
+    // Index 0 was never written: not to migrate it, not to unset it.
+    assert!(argvs(&calls)
+        .iter()
+        .filter(|a| a[0] == "set-hook")
+        .all(|a| a.iter().all(|arg| !arg.ends_with("[0]"))));
+
+    remove_wake_hooks("$3").unwrap();
+    assert_eq!(
+        entries(&store),
+        vec![
+            (
+                "client-attached[0]".to_string(),
+                LEGACY_THIS_BIN.to_string()
+            ),
+            (
+                "client-session-changed[0]".to_string(),
+                LEGACY_THIS_BIN.to_string()
             ),
         ]
     );
@@ -1652,8 +1747,9 @@ fn test_remove_wake_hooks_unsets_only_this_homes_entries() {
             ("client-attached[0]", USER_ATTACH),
             ("client-attached[1]", FOREIGN_WAKE),
             ("client-attached[2]", OWN_WAKE),
-            ("client-session-changed[0]", LEGACY_OWN),
-            ("client-session-changed[1]", LEGACY_OTHER),
+            ("client-session-changed[0]", LEGACY_THIS_BIN),
+            ("client-session-changed[1]", LEGACY_OTHER_BIN),
+            ("client-session-changed[2]", OWN_WAKE),
         ],
         false,
     );
@@ -1666,8 +1762,12 @@ fn test_remove_wake_hooks_unsets_only_this_homes_entries() {
             ("client-attached[0]".to_string(), USER_ATTACH.to_string()),
             ("client-attached[1]".to_string(), FOREIGN_WAKE.to_string()),
             (
+                "client-session-changed[0]".to_string(),
+                LEGACY_THIS_BIN.to_string()
+            ),
+            (
                 "client-session-changed[1]".to_string(),
-                LEGACY_OTHER.to_string()
+                LEGACY_OTHER_BIN.to_string()
             ),
         ]
     );
@@ -1679,7 +1779,7 @@ fn test_remove_wake_hooks_unsets_only_this_homes_entries() {
         unsets,
         vec![
             v(&["set-hook", "-u", "-t", "$3", "client-attached[2]"]),
-            v(&["set-hook", "-u", "-t", "$3", "client-session-changed[0]"]),
+            v(&["set-hook", "-u", "-t", "$3", "client-session-changed[2]"]),
         ]
     );
 

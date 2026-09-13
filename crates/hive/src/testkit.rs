@@ -47,8 +47,13 @@ pub(crate) fn display_env() -> DisplayEnv {
     env.set("GROK_HOME", tmp.path().join(".grok"));
     env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
     // Inside tmux: the jump must never reach exec_attach, which would
-    // replace the test process with `tmux attach`.
-    env.set("TMUX", "/tmp/hive-test-tmux,1,0");
+    // replace the test process with `tmux attach`. The socket named is
+    // the temp tree's, so what hive keeps beside a server's socket (the
+    // wake hook lock) lands there.
+    env.set(
+        "TMUX",
+        format!("{},1,0", tmp.path().join("tmux-socket").display()),
+    );
     env.set("TMUX_PANE", "%0");
     DisplayEnv { _tmp: tmp, env }
 }
@@ -62,6 +67,9 @@ pub(crate) fn display_env_outside() -> DisplayEnv {
     env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
     env.set("CODEX_HOME", tmp.path().join(".codex"));
     env.set("GROK_HOME", tmp.path().join(".grok"));
+    // Outside tmux the default server is the one reached: under the
+    // temp tree, never the developer's.
+    env.set("TMUX_TMPDIR", tmp.path());
     DisplayEnv { _tmp: tmp, env }
 }
 

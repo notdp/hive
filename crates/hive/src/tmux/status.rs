@@ -4,6 +4,11 @@
 //! option the CLI or the hived wrote — no `#()` shell-outs, the bar never
 //! forks.
 
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
+
 use super::run::run;
 
 /// The bar's colours, one set per appearance. The bar follows the same
@@ -431,20 +436,129 @@ pub(crate) fn run_shell_body(command: &str) -> Option<String> {
     unwrap(rest)
 }
 
-/// Whether a listed entry is this hive home's wake — one carrying this
-/// home's `HIVE_HOME` assignment, or the older unindexed form that named
-/// this binary and no home at all (installed before homes were baked in).
-pub(crate) fn owned_wake_entry(entry: &HookEntry, home: &str, hive: &str) -> bool {
-    let Some(body) = run_shell_body(&entry.command) else {
-        return false;
-    };
-    if body.starts_with(&wake_home_token(home)) {
-        return body.contains(" wake --");
+/// Whether a listed entry is this hive home's wake: one whose command
+/// starts with this home's `HIVE_HOME` assignment. The home an entry
+/// bakes is the only proof of whose it is — an older, home-less
+/// `wake --window` entry names a binary, and a binary is shared by every
+/// home installed from it, so such an entry is nobody's to claim, update
+/// or remove.
+pub(crate) fn owned_wake_entry(entry: &HookEntry, home: &str) -> bool {
+    run_shell_body(&entry.command)
+        .is_some_and(|body| body.starts_with(&wake_home_token(home)) && body.contains(" wake --"))
+}
+
+/// How long an installer or remover waits for the server's hook lock, and
+/// how often it retries inside that budget. A holder is another hive
+/// process mid-install on the same server, gone within milliseconds; a
+/// budget rather than a blocking wait keeps a stuck one a loud failure.
+const HOOK_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const HOOK_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+
+/// The socket the tmux client hive runs reaches, resolved the way that
+/// client resolves it and without asking it: the one `TMUX` names inside
+/// tmux, else the default server's under `TMUX_TMPDIR` (or `/tmp`).
+fn reached_socket_path() -> PathBuf {
+    if let Some(path) = std::env::var("TMUX")
+        .ok()
+        .and_then(|tmux| tmux.split(',').next().map(str::trim).map(str::to_owned))
+        .filter(|path| !path.is_empty())
+    {
+        return PathBuf::from(path);
     }
-    body.starts_with(&format!(
-        "{} wake --window ",
-        crate::shell::shlex_quote(hive)
-    ))
+    let tmpdir = std::env::var("TMUX_TMPDIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    PathBuf::from(tmpdir)
+        .join(format!("tmux-{}", unsafe { libc::getuid() }))
+        .join("default")
+}
+
+/// Where the wake hook lock of the reached server lives: beside its
+/// socket, named after it, so every hive home on that server finds the
+/// same file and no home's own tree could hold it.
+fn hook_lock_path() -> PathBuf {
+    let socket = reached_socket_path();
+    let name = socket
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    socket.with_file_name(format!("{name}.hive-hooks.lock"))
+}
+
+/// The lock every installer and remover of a wake hook holds while it
+/// reads a session's hook arrays and writes its entry back: the arrays
+/// are read-modify-write state shared by every hive home on the server,
+/// and two homes that each read index N free would each write it, the
+/// second wiping the first's wake. The lock is the server's, not any
+/// home's (`hook_lock_path`), and the flock goes with the descriptor, so
+/// a holder that dies holds nothing. Held for the whole of one install
+/// or remove, released on drop.
+struct HookArrayLock {
+    file: std::fs::File,
+}
+
+impl HookArrayLock {
+    /// The reached server's lock, within `HOOK_LOCK_TIMEOUT`; an error
+    /// when the file cannot be opened or the lock is still held at the
+    /// deadline. The socket directory is made the way tmux makes it (the
+    /// user's, mode 0700) when no server has made it yet.
+    fn acquire() -> anyhow::Result<HookArrayLock> {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = hook_lock_path();
+        if let Some(dir) = path.parent() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "cannot make the tmux socket directory {}: {err}",
+                        dir.display()
+                    )
+                })?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|err| {
+                anyhow::anyhow!("cannot open the wake hook lock {}: {err}", path.display())
+            })?;
+        let deadline = Instant::now() + HOOK_LOCK_TIMEOUT;
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(HookArrayLock { file });
+            }
+            let err = std::io::Error::last_os_error();
+            // EINTR retries on the same deadline; a busy lock is the only
+            // other reason to keep trying.
+            if !matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                anyhow::bail!("cannot lock the wake hook lock {}: {err}", path.display());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "the wake hook lock {} is still held after {}s",
+                    path.display(),
+                    HOOK_LOCK_TIMEOUT.as_secs()
+                );
+            }
+            thread::sleep(HOOK_LOCK_RETRY_INTERVAL);
+        }
+    }
+}
+
+impl Drop for HookArrayLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
 }
 
 /// The wake hook entries on *session_id*, or the error when tmux does not
@@ -457,9 +571,12 @@ fn wake_hook_entries(session_id: &str) -> anyhow::Result<Vec<HookEntry>> {
 /// Install this hive home's wake on *session_id* — the session the team's
 /// display sits in, hive's own or one the human lent — one indexed entry
 /// per hook: its own entry is updated in place, a first install takes the
-/// lowest free index, and nothing else in the array is written. Every
-/// tmux command is checked: a hook that failed to install is reported,
-/// because a desk retiring unwatched behind it could not be woken.
+/// lowest free index, and nothing else in the array is written. The read
+/// of the arrays and the writes back are one critical section under the
+/// server's hook lock, so another home's installer sees this entry before
+/// it picks an index. Every tmux command is checked: a hook that failed to
+/// install is reported, because a desk retiring unwatched behind it could
+/// not be woken.
 pub fn install_wake_hooks(session_id: &str) -> anyhow::Result<()> {
     if session_id.is_empty() {
         anyhow::bail!("no session to install the wake hooks on");
@@ -467,12 +584,13 @@ pub fn install_wake_hooks(session_id: &str) -> anyhow::Result<()> {
     let hive = crate::paths::self_exe();
     let home = wake_hive_home();
     let command = wake_run_shell(&wake_shell_line(&hive, &wake_environment()));
+    let _lock = HookArrayLock::acquire()?;
     let entries = wake_hook_entries(session_id)?;
     for hook in WAKE_HOOKS {
         let of_hook: Vec<&HookEntry> = entries.iter().filter(|e| e.hook == hook).collect();
         let mut own = of_hook
             .iter()
-            .filter(|e| owned_wake_entry(e, &home, &hive))
+            .filter(|e| owned_wake_entry(e, &home))
             .map(|e| e.index);
         let index = match own.next() {
             Some(index) => index,
@@ -511,18 +629,20 @@ pub fn install_wake_hooks(session_id: &str) -> anyhow::Result<()> {
 
 /// Remove this hive home's wake entries from *session_id*, and only those:
 /// what `hive delete` and a display that moved on do once no team of this
-/// home shows in the session. A session that is gone has nothing to
+/// home shows in the session. The entries are read and unset under the
+/// server's hook lock, so an index is never unset from a listing another
+/// home has since written to. A session that is gone has nothing to
 /// remove.
 pub fn remove_wake_hooks(session_id: &str) -> anyhow::Result<()> {
     if session_id.is_empty() {
         return Ok(());
     }
-    let hive = crate::paths::self_exe();
     let home = wake_hive_home();
+    let _lock = HookArrayLock::acquire()?;
     let Ok(entries) = wake_hook_entries(session_id) else {
         return Ok(());
     };
-    for entry in entries.iter().filter(|e| owned_wake_entry(e, &home, &hive)) {
+    for entry in entries.iter().filter(|e| owned_wake_entry(e, &home)) {
         run(
             &[
                 "set-hook",

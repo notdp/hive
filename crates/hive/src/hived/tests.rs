@@ -7331,6 +7331,165 @@ fn test_wake_hooks_follow_display_and_remove_only_owned_entries() {
     );
 }
 
+/// A second window of the instance arrives in another session while the
+/// primary stays put: that session gets this home's wake hooks too — a
+/// terminal arriving there is a viewer the sleep gate counts, so it must
+/// be able to bring the desk back — and loses them again once the window
+/// leaves it. The primary's monitor is not restarted for either.
+#[test]
+fn test_a_second_session_of_the_display_gets_the_wake_hooks_while_the_primary_stays() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let primary = probe_window("probe:1", "@1", "$1", &ws);
+    let second = probe_window("human:3", "@2", "$2", &ws);
+    let listings: Vec<Vec<WindowExtra>> = vec![
+        vec![primary.clone()],
+        vec![primary.clone(), second.clone()],
+        vec![primary.clone(), second.clone()],
+        vec![primary.clone()],
+        vec![primary.clone()],
+    ];
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let hooks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let monitors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    testhook::update(|h| {
+        h.make_busy_monitor = Some(tracked_monitors(&monitors));
+        let sink = Arc::clone(&hooks);
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("install {session}"));
+            Ok(())
+        }));
+        let sink = Arc::clone(&hooks);
+        h.remove_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("remove {session}"));
+        }));
+        let tick = Arc::clone(&ticks);
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let listing = listings[tick.load(Ordering::SeqCst).min(listings.len() - 1)].clone();
+            (Some(listing), "ok")
+        }));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            tick.fetch_add(1, Ordering::SeqCst) + 1 < 5
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *hooks.lock().unwrap(),
+        vec!["install $1", "install $2", "remove $2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        "the second session is armed on arrival and released when the window leaves it"
+    );
+    assert_eq!(
+        *monitors.lock().unwrap(),
+        vec!["make $1", "start $1", "stop $1"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        "the primary did not move: one monitor, stopped at teardown"
+    );
+    let sessions: Vec<Value> = display_events(&env, "hived.display")
+        .into_iter()
+        .map(|e| e["sessions"].clone())
+        .collect();
+    assert_eq!(
+        sessions,
+        vec![json!(["$1"]), json!(["$1", "$2"]), json!(["$1"])]
+    );
+}
+
+/// The display sits in two sessions and nobody watches either: the desk
+/// may retire unwatched only once *both* carry this home's wake hooks.
+/// While the second session refuses the install the primary's hooks are
+/// not enough — a terminal arriving at the second alone could not wake
+/// the desk — so the idle clock keeps running, the failure is reported
+/// per session and retried, and the first success there lets the desk go.
+#[test]
+fn test_unwatched_sleep_waits_for_the_second_sessions_wake_hooks() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    let installs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let windows = vec![
+        probe_window("probe:1", "@1", "$1", &ws),
+        probe_window("human:3", "@2", "$2", &ws),
+    ];
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
+        h.list_windows_snapshot = Some(Arc::new(move || (Some(windows.clone()), "ok")));
+        h.watching_clients = Some(Arc::new(|session| {
+            assert!(session == "$1" || session == "$2", "{session}");
+            Some(0)
+        }));
+        let sink = Arc::clone(&installs);
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            let mut installs = sink.lock().unwrap();
+            installs.push(session.to_string());
+            let refusals = installs.iter().filter(|s| *s == "$2").count();
+            if session == "$2" && refusals <= 2 {
+                Err("set-hook refused".to_string())
+            } else {
+                Ok(())
+            }
+        }));
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.wait_tick = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(
+                *n <= 3,
+                "a desk whose every session is armed failed to sleep"
+            );
+            true
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *installs.lock().unwrap(),
+        vec!["$1", "$2", "$2", "$2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        "the primary armed at once; the second session was retried until it took"
+    );
+    let failed = display_events(&env, "hived.wake_hooks_failed");
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert!(failed.iter().all(|e| e["session"] == "$2"), "{failed:?}");
+    assert_eq!(failed[0]["error"], "set-hook refused");
+    let slept = display_events(&env, "hived.sleep");
+    assert_eq!(slept.len(), 1, "{slept:?}");
+    assert_eq!(slept[0]["reason"], "unwatched");
+    // Not a tick earlier: the primary's hooks alone did not let it go, and
+    // the refusals never reset the clock — idle since the first tick.
+    assert_eq!(slept[0]["idleSeconds"], 2.0 * HIVED_SLEEP_AFTER_SECONDS);
+    let order: Vec<String> = env
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(event, _)| event.clone())
+        .filter(|event| event == "hived.sleep" || event == "hived.wake_hooks_failed")
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            "hived.wake_hooks_failed",
+            "hived.wake_hooks_failed",
+            "hived.sleep"
+        ]
+    );
+    let marker = fs::read_to_string(asleep_marker_path(&ws)).unwrap();
+    assert_eq!(asleep_reason(&marker).as_deref(), Some("unwatched"));
+}
+
 #[test]
 fn test_a_starting_hived_clears_the_asleep_marker() {
     let env = unwatched_probe_env(Some(1));
