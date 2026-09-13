@@ -722,8 +722,9 @@ fn test_prefix_m_fallback_is_empty_for_an_unbound_key() {
 
 #[test]
 fn test_install_team_status_runs_options_then_bindings() {
-    let mut env = EnvGuard::new();
-    env.set("HIVE_BIN", "/x/hive");
+    // The wake hook install at the end takes the reached server's lock:
+    // a server under a temp tree, never the developer's.
+    let _env = wake_env();
     let calls = prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
 
     install_team_status("$3");
