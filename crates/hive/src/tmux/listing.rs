@@ -76,7 +76,7 @@ pub fn list_panes_full_or_none(target: &str) -> Option<Vec<PaneInfo>> {
     if r.returncode != 0 {
         return None;
     }
-    Some(parse_panes_full(&r.stdout))
+    Some(parse_panes_full(&r.stdout)).filter(|panes| readable_pane_listing(panes))
 }
 
 /// List every pane across all sessions/windows with hive identity tags.
@@ -109,7 +109,11 @@ pub fn list_panes_all_status() -> (Option<Vec<PaneInfo>>, &'static str) {
         Err(_) => return (None, "unknown"),
     };
     if r.returncode == 0 {
-        return (Some(parse_panes_full(&r.stdout)), "ok");
+        let panes = parse_panes_full(&r.stdout);
+        if !readable_pane_listing(&panes) {
+            return (None, "unknown");
+        }
+        return (Some(panes), "ok");
     }
     if stderr_means_no_server(&r.stderr) {
         return (None, "no-server");
@@ -164,6 +168,18 @@ pub fn team_window_target(team: &str) -> Option<String> {
         .into_iter()
         .find(|w| w.team == team)
         .map(|w| w.window)
+}
+
+/// Whether every id in a listing is a pane id (`%<n>`). A client that
+/// tmux does not treat as UTF-8 gets its tabs written as `_`, and the
+/// first column is then the whole line: such a listing names no pane,
+/// and a reaper that read it as one would take every pane for gone.
+pub(crate) fn readable_pane_listing(panes: &[PaneInfo]) -> bool {
+    panes.iter().all(|p| {
+        p.pane_id
+            .strip_prefix('%')
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 fn parse_panes_full(stdout: &str) -> Vec<PaneInfo> {
@@ -335,7 +351,11 @@ pub fn list_panes_snapshot_status() -> (Option<PaneSnapshot>, &'static str) {
         Err(_) => return (None, "unknown"),
     };
     if r.returncode == 0 {
-        return (Some(parse_panes_snapshot(&r.stdout)), "ok");
+        let snapshot = parse_panes_snapshot(&r.stdout);
+        if !readable_pane_listing(&snapshot.0) {
+            return (None, "unknown");
+        }
+        return (Some(snapshot), "ok");
     }
     if stderr_means_no_server(&r.stderr) {
         return (None, "no-server");

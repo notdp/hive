@@ -5063,6 +5063,9 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
     let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     env.set("HIVE_HOME", tmp.path().join(".hive"));
+    // The loop's supervisors run for real here: their record store and
+    // their pane listing must be this test's, not the developer's.
+    env.set("CODEX_HOME", tmp.path().join(".codex"));
     env.set(HIVED_REEXEC_LOCK_ENV, "77");
     let workspace = tmp.path().to_string_lossy().to_string();
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -5089,6 +5092,7 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
         })),
         make_busy_monitor: Some(Arc::new(|_session| None)),
         notify_debug_emit: Some(Arc::new(|_ws, _event, _fields| {})),
+        list_panes_all: Some(Arc::new(Vec::new)),
         ..Default::default()
     };
     let _guard = testhook::install(hook);

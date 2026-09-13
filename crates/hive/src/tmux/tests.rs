@@ -1047,6 +1047,74 @@ fn test_pane_scan_status_maps_no_server_variants() {
 }
 
 #[test]
+fn test_pane_scan_status_reads_a_sanitized_listing_as_unknown() {
+    // A client tmux does not treat as UTF-8 gets its tabs written as `_`:
+    // the id column is then the whole line and names no pane. Such a
+    // listing is unreadable, never an empty server or a server without
+    // these panes.
+    let sanitized = "%1_[worker]_node_agent_worker_t_codex_\n%2_zsh_zsh_____\n";
+    set_run_override(move |_args, _check, _timeout| Ok(ok_run(0, sanitized, "")));
+    assert_eq!(list_panes_all_status(), (None, "unknown"));
+    assert_eq!(list_panes_full_or_none("t:1"), None);
+    assert_eq!(list_panes_snapshot_status().1, "unknown");
+    assert!(list_panes_snapshot_status().0.is_none());
+
+    let readable = "%1\t[worker]\tnode\tagent\tworker\tt\tcodex\t\n";
+    set_run_override(move |_args, _check, _timeout| Ok(ok_run(0, readable, "")));
+    let (panes, status) = list_panes_all_status();
+    assert_eq!(status, "ok");
+    assert_eq!(panes.unwrap()[0].pane_id, "%1");
+}
+
+#[test]
+fn test_tmux_client_gets_a_utf8_ctype_only_without_one() {
+    let mut env = EnvGuard::cleared(&["LC_ALL", "LC_CTYPE", "LANG"]);
+    let ctype_of = |cmd: &std::process::Command| -> (Option<String>, bool) {
+        let envs: Vec<_> = cmd.get_envs().collect();
+        let ctype = envs
+            .iter()
+            .find(|(k, _)| *k == "LC_CTYPE")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        let lc_all_removed = envs.iter().any(|(k, v)| *k == "LC_ALL" && v.is_none());
+        (ctype, lc_all_removed)
+    };
+
+    // No locale at all: the C locale, so the client gets a UTF-8 one.
+    let mut cmd = std::process::Command::new("tmux");
+    utf8_client(&mut cmd);
+    assert_eq!(ctype_of(&cmd), (Some("C.UTF-8".to_string()), true));
+
+    // A UTF-8 locale in any of the three variables is left alone.
+    for (key, value) in [
+        ("LANG", "en_US.UTF-8"),
+        ("LC_CTYPE", "C.utf8"),
+        ("LC_ALL", "de_DE.UTF-8@euro"),
+    ] {
+        for other in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            env.remove(other);
+        }
+        env.set(key, value);
+        let mut cmd = std::process::Command::new("tmux");
+        utf8_client(&mut cmd);
+        assert_eq!(ctype_of(&cmd), (None, false), "{key}={value}");
+    }
+    env.remove("LC_CTYPE");
+
+    // LC_ALL wins over the others: a non-UTF-8 one is replaced.
+    env.set("LANG", "en_US.UTF-8");
+    env.set("LC_ALL", "C");
+    let mut cmd = std::process::Command::new("tmux");
+    utf8_client(&mut cmd);
+    assert_eq!(ctype_of(&cmd), (Some("C.UTF-8".to_string()), true));
+
+    assert!(locale_is_utf8("en_US.UTF-8"));
+    assert!(locale_is_utf8("C.utf8"));
+    assert!(!locale_is_utf8("C"));
+    assert!(!locale_is_utf8(""));
+    assert!(!locale_is_utf8("en_US.ISO8859-1"));
+}
+
+#[test]
 fn test_pane_scan_status_keeps_permission_denied_unknown() {
     set_run_override(|_args, _check, _timeout| {
         Ok(ok_run(

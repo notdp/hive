@@ -554,6 +554,8 @@ pub(super) fn hooked_cas_list_recorded_panes() -> Vec<String> {
     if let Some(f) = hookget(|h| h.cas_list_recorded_panes.clone()).flatten() {
         return f();
     }
+    #[cfg(test)]
+    codex_home_redirected();
     crate::adapters::codex_app_server::list_recorded_panes()
 }
 
@@ -564,6 +566,8 @@ pub(super) fn hooked_cas_pane_thread_socket(pane: &str) -> Option<String> {
     if let Some(f) = hookget(|h| h.cas_pane_thread_socket.clone()).flatten() {
         return f(pane);
     }
+    #[cfg(test)]
+    codex_home_redirected();
     crate::adapters::codex_app_server::read_pane_thread(pane).and_then(|record| record.tmux_socket)
 }
 
@@ -573,6 +577,8 @@ pub(super) fn hooked_cas_unsubscribe_thread(thread_id: &str) {
         f(thread_id);
         return;
     }
+    #[cfg(test)]
+    codex_home_redirected();
     let _ = crate::adapters::codex_app_server::unsubscribe_thread(thread_id);
 }
 
@@ -582,6 +588,8 @@ pub(super) fn hooked_cas_clear_pane_thread(pane: &str) {
         f(pane);
         return;
     }
+    #[cfg(test)]
+    codex_home_redirected();
     let _ = crate::adapters::codex_app_server::clear_pane_thread(pane);
 }
 
@@ -1115,4 +1123,17 @@ pub(super) fn hooked_open_server_socket(workspace: &str) -> Result<Box<dyn Hived
         return f(workspace);
     }
     Ok(Box::new(open_server_socket(workspace)?))
+}
+
+/// A test that reaches the real codex record store fails loudly: the
+/// records under `~/.codex` bind live members to their threads, and a
+/// reaper run from a test against them has taken live teams' members
+/// offline. Tests redirect `CODEX_HOME` (`testenv::iso`) or hook the
+/// record seams.
+#[cfg(test)]
+fn codex_home_redirected() {
+    assert!(
+        std::env::var_os("CODEX_HOME").is_some(),
+        "hived test reached the codex record seams with CODEX_HOME unset: redirect it or hook them"
+    );
 }
