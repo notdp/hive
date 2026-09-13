@@ -705,8 +705,9 @@ without its owner token would take down whoever did bind.
 Two refusals happen before the loop ever runs. A hived whose own hive home
 holds no registry entry for its team exits 2 instead of serving — it could
 not read the roster it is supposed to supervise, and would reap every
-engine as an orphan. A socket that will not bind ends the same way, after
-the notify line above.
+engine as an orphan. A socket that will not bind also never serves: after
+`hived.socket_bind_failed` the process returns from its loop and exits 0,
+the marker still in place and nothing unlinked.
 
 ### Six ways a running desk leaves
 
@@ -742,17 +743,28 @@ an obligation, and a sleep can be cancelled at its final commit. A desk that
 should have gone and did not is evidence to collect, not a schedule to wait
 out.
 
-Every exit runs the same teardown, under the startup lock — a sleep takes it
-at its final commit, every other exit takes it here, and `ensure_hived`
-releases it before asking for a shutdown so a competing starter cannot bind
-in between. The gate shuts, the accept worker is joined and the listener
-closed, unfinished operations are journaled with the reason for this exit
-(`workspace removed`, `hived replaced`, `team removed`; a forced shutdown
-writes its own `forced shutdown`, and a sleep has none left to write), the
-socket is unlinked only while the owner token is still this generation's,
-and only then the slow work: the monitor's join and the pool clients this
-desk held. The lock outlasts all of it, so no new generation is writing the
-same state while the old one still might.
+Five of the six reach one teardown after the loop; a reexec that succeeded
+never returns to it — same pid, new bytes — having closed its intake and
+unlinked its socket before the `execv`, as item 3 says. The teardown runs
+under the startup lock for hived replaced, team removed and shutdown, which
+take it here, and for sleep, which took it at its final commit;
+`ensure_hived` releases it before asking for a shutdown so a competing
+starter cannot bind in between. Workspace removed takes no lock: the lock
+file lives in the run directory, and taking it would recreate the directory
+that the team's end removed. The gate shuts, the accept worker is joined and
+the listener closed, the journal gets its interruptions, the socket is
+unlinked only while the owner token is still this generation's, and only
+then the slow work: the monitor's join and the pool clients this desk held.
+The lock outlasts all of it, so no new generation is writing the same state
+while the old one still might.
+
+What the journal receives depends on the exit. Hived replaced and team
+removed mark every unfinished node operation `interrupted` with that reason.
+A forced shutdown wrote `forced shutdown` while it was still answering the
+RPC, and a graceful shutdown or a sleep was granted only because nothing was
+left to write, so neither writes here. Workspace removed writes nothing at
+all — the journal is under the directory that is gone, and the desk exits
+without recreating it (item 1).
 
 What the desk closes at the end is its own: the stdio clients it holds on
 its team's idle Grok keys. A Grok leader is the member's own process and the
