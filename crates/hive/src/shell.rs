@@ -36,13 +36,10 @@ pub fn tmux_dquote_unescape(value: &str) -> String {
     let mut chars = value.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
-            match chars.peek() {
-                Some(next @ ('\\' | '"' | '$')) => {
-                    out.push(*next);
-                    chars.next();
-                    continue;
-                }
-                _ => {}
+            if let Some(next @ ('\\' | '"' | '$')) = chars.peek() {
+                out.push(*next);
+                chars.next();
+                continue;
             }
         }
         out.push(c);
