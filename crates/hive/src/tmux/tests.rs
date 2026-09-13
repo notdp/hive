@@ -1356,19 +1356,40 @@ fn test_windows_snapshot_lists_the_instance_tags_and_the_token_in_one_read() {
 // --- wake hooks -----------------------------------------------------------
 
 /// The hook environment a wake-hook test installs under: a fixed binary,
-/// hive home, `HOME` and one engine home, no other engine home.
-fn wake_env() -> EnvGuard {
+/// hive home, `HOME` and one engine home, no other engine home, and the
+/// tmux server's directory under a temp dir of its own — the hook lock
+/// the installer takes lands beside that server's socket, never the
+/// developer's.
+struct WakeEnv {
+    env: EnvGuard,
+    tmp: tempfile::TempDir,
+}
+
+impl WakeEnv {
+    /// The lock file the installer and the remover take.
+    fn lock_path(&self) -> std::path::PathBuf {
+        self.tmp
+            .path()
+            .join(format!("tmux-{}", unsafe { libc::getuid() }))
+            .join("default.hive-hooks.lock")
+    }
+}
+
+fn wake_env() -> WakeEnv {
     let mut env = EnvGuard::cleared(&[
         "CLAUDE_HOME",
         "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
         "GROK_HOME",
+        "TMUX",
     ]);
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("TMUX_TMPDIR", tmp.path());
     env.set("HIVE_BIN", "/x/hive");
     env.set("HIVE_HOME", "/h/one");
     env.set("HOME", "/home/dp");
     env.set("CODEX_HOME", "/home/dp/.codex");
-    env
+    WakeEnv { env, tmp }
 }
 
 /// The wake entry `wake_env`'s installer bakes for *home*, as tmux lists it.
@@ -1485,10 +1506,10 @@ fn test_wake_environment_bakes_the_absolute_hive_home_and_set_engine_homes() {
     );
     // A relative or default home is baked resolved: the hook must name the
     // home it was installed for, not read one from the server's env.
-    env.remove("HIVE_HOME");
-    env.set("HOME", "/home/dp");
+    env.env.remove("HIVE_HOME");
+    env.env.set("HOME", "/home/dp");
     assert_eq!(wake_environment()[0].1, "/home/dp/.hive");
-    env.set("HIVE_HOME", "rel/home");
+    env.env.set("HIVE_HOME", "rel/home");
     let cwd = std::env::current_dir().unwrap();
     assert_eq!(
         wake_environment()[0].1,
@@ -1523,7 +1544,7 @@ fn test_parse_hook_entries_reads_indexed_and_plain_wake_hooks_only() {
 
 #[test]
 fn test_install_wake_hooks_preserves_user_and_foreign_home_entries() {
-    let _env = wake_env();
+    let env = wake_env();
     let (store, calls) = hook_server(
         &[
             ("client-attached[0]", USER_ATTACH),
@@ -1565,12 +1586,14 @@ fn test_install_wake_hooks_preserves_user_and_foreign_home_entries() {
         .all(|a| a[1] == "-t"
             && (a[3] == "client-attached[2]" || a[3] == "client-session-changed[1]")));
     assert!(calls.borrow().iter().all(|(_, check, _)| *check));
+    // The server's lock, beside its socket, taken for every install.
+    assert!(env.lock_path().is_file());
 }
 
 #[test]
 fn test_install_and_remove_wake_hooks_recognise_their_entry_under_a_relative_hive_home() {
     let mut env = wake_env();
-    env.set("HIVE_HOME", "rel/home");
+    env.env.set("HIVE_HOME", "rel/home");
     let (store, _calls) = hook_server(&[("client-attached[0]", USER_ATTACH)], false);
 
     // The entry is baked with the resolved home, and a second install
@@ -1643,7 +1666,7 @@ fn test_install_wake_hooks_leaves_home_less_legacy_hooks_and_drops_its_own_dupli
 #[test]
 fn test_a_second_home_of_the_same_binary_leaves_the_binarys_legacy_hook_alone() {
     let mut env = wake_env();
-    env.set("HIVE_HOME", "/h/two");
+    env.env.set("HIVE_HOME", "/h/two");
     let (store, calls) = hook_server(
         &[
             ("client-attached[0]", LEGACY_THIS_BIN),
