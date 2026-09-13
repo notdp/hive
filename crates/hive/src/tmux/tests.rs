@@ -1493,6 +1493,31 @@ fn test_install_wake_hooks_preserves_user_and_foreign_home_entries() {
 }
 
 #[test]
+fn test_install_and_remove_wake_hooks_recognise_their_entry_under_a_relative_hive_home() {
+    let mut env = wake_env();
+    env.set("HIVE_HOME", "rel/home");
+    let (store, _calls) = hook_server(&[("client-attached[0]", USER_ATTACH)], false);
+
+    // The entry is baked with the resolved home, and a second install
+    // under the same relative spelling finds it instead of growing.
+    install_wake_hooks("$3").unwrap();
+    let after_first = entries(&store);
+    assert_eq!(after_first.len(), 3);
+    let baked = &after_first[1].1;
+    let cwd = std::env::current_dir().unwrap();
+    assert!(baked.contains(&cwd.join("rel/home").to_string_lossy().to_string()));
+    install_wake_hooks("$3").unwrap();
+    assert_eq!(entries(&store), after_first);
+
+    // The remover recognises the same entry and leaves the user's alone.
+    remove_wake_hooks("$3").unwrap();
+    assert_eq!(
+        entries(&store),
+        vec![("client-attached[0]".to_string(), USER_ATTACH.to_string())]
+    );
+}
+
+#[test]
 fn test_install_wake_hooks_migrates_this_binarys_unindexed_hook_and_drops_its_duplicates() {
     let _env = wake_env();
     // An older install (no home baked in, the whole array clobbered to

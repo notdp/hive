@@ -316,17 +316,23 @@ const WAKE_ENGINE_HOMES: [&str; 4] = [
     "GROK_HOME",
 ];
 
+/// The hive home a wake hook is installed for: the resolved absolute path,
+/// which is also how the installer and the remover recognise their own
+/// entries, so a relative `HIVE_HOME` spelling finds the entry it baked.
+fn wake_hive_home() -> String {
+    std::path::absolute(crate::paths::hive_home())
+        .unwrap_or_else(|_| crate::paths::hive_home())
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// `HIVE_HOME`, the caller's `HOME` and its engine homes, as the `VAR=value`
 /// assignments the wake command starts with. The hive home is the
 /// resolved absolute path, set whether or not the caller had it in its
 /// environment: the hook must name the home it was installed for, never
 /// resolve one from the server's environment.
 pub(crate) fn wake_environment() -> Vec<(String, String)> {
-    let home = std::path::absolute(crate::paths::hive_home())
-        .unwrap_or_else(|_| crate::paths::hive_home())
-        .to_string_lossy()
-        .into_owned();
-    let mut env = vec![("HIVE_HOME".to_string(), home)];
+    let mut env = vec![("HIVE_HOME".to_string(), wake_hive_home())];
     if let Ok(user_home) = std::env::var("HOME") {
         if !user_home.is_empty() {
             env.push(("HOME".to_string(), user_home));
@@ -459,7 +465,7 @@ pub fn install_wake_hooks(session_id: &str) -> anyhow::Result<()> {
         anyhow::bail!("no session to install the wake hooks on");
     }
     let hive = crate::paths::self_exe();
-    let home = crate::paths::hive_home().to_string_lossy().into_owned();
+    let home = wake_hive_home();
     let command = wake_run_shell(&wake_shell_line(&hive, &wake_environment()));
     let entries = wake_hook_entries(session_id)?;
     for hook in WAKE_HOOKS {
@@ -512,7 +518,7 @@ pub fn remove_wake_hooks(session_id: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let hive = crate::paths::self_exe();
-    let home = crate::paths::hive_home().to_string_lossy().into_owned();
+    let home = wake_hive_home();
     let Ok(entries) = wake_hook_entries(session_id) else {
         return Ok(());
     };
