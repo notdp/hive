@@ -121,12 +121,15 @@ pub struct SpawnedAgent {
     pub cli: String,
 }
 
-/// A roster row as the runner needs it: where the member sits and which
-/// engine it runs.
+/// A roster row as the runner needs it: where the member sits, which
+/// engine it runs, and whether it is alive only as retained (a grok
+/// member whose leader has exited and whose session a `Revive` loads
+/// again before the runner waits on its turn).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemberInfo {
     pub pane_id: String,
     pub cli: String,
+    pub retained: bool,
 }
 
 /// The hived's `node-result` answer: the engine's own word on the turn
@@ -202,6 +205,11 @@ pub trait WorkflowEnv: Send + Sync {
     /// A fresh read of the member's roster row; None when it is not on
     /// the roster.
     fn member(&self, name: &str) -> Option<MemberInfo>;
+    /// The hived's `revive`: load a retained grok member's session under
+    /// the hived's client again, raising its leader when it has exited.
+    /// `Err` is the hived's refusal or silence — the member is not
+    /// retired on it, and nothing was dispatched.
+    fn revive(&self, name: &str) -> Result<(), String>;
     /// Whether a turn is open on the member right now, asked of its
     /// engine directly by the hived; None when the engine could not be
     /// asked. Never a guess: an unreachable engine is not an idle member.
@@ -433,6 +441,11 @@ pub enum WorkflowOp {
     Ready {
         name: String,
     },
+    /// A retained member's session loaded again before the runner waits
+    /// on its turn: no prompt, no dispatch.
+    Revive {
+        name: String,
+    },
     /// The task: the prompt rides a task artifact named after the dispatch
     /// id, the body opens with the id, the envelope has no sender.
     DispatchTask {
@@ -582,6 +595,12 @@ pub fn run_op(env: &dyn WorkflowEnv, op: &WorkflowOp) -> Result<Map<String, Valu
             result.insert("cli".to_string(), Value::String(spawned.cli));
         }
         WorkflowOp::Ready { name } => ready_gate(env, name)?,
+        WorkflowOp::Revive { name } => env.revive(name).map_err(|reason| {
+            WorkflowError(format!(
+                "member '{name}' is retained and could not be revived ({reason}); \
+                 its session was not discarded and nothing was dispatched"
+            ))
+        })?,
         WorkflowOp::DispatchTask {
             name,
             prompt,
@@ -826,7 +845,8 @@ fn await_result(env: &dyn WorkflowEnv, name: &str, dispatch_id: &str) -> Verdict
 /// `hive workflow run`: the whole node as one blocking call — what an
 /// external orchestrator's proxy runs in the background and reads the
 /// result of. A member of that name still alive is reused (the task
-/// becomes a follow-up to it); a dead roster row is retired first. A spawn
+/// becomes a follow-up to it; a retained grok member is revived before
+/// its turn is waited on); a dead roster row is retired first. A spawn
 /// made here is rolled back if the run fails before the task is
 /// dispatched, so the name never stays occupied by a corpse. Past the
 /// dispatch every end is a verdict in the returned map, never an `Err`.
@@ -892,6 +912,21 @@ pub fn run_workflow(
         let member = env.member(name).unwrap_or_default();
         node_cli(&member.cli)?;
         log(&format!("{name} alive in {}; reusing", member.pane_id));
+        // A retained grok member has no leader to ask about its turn:
+        // its session is loaded again first, and the wait below still
+        // opens the dispatch only on the engine's own "closed". The
+        // runtime's `retained` is a snapshot; the hived re-checks the
+        // binding as it revives, and a refusal ends the run here with
+        // the member as it was.
+        if member.cli == "grok" && member.retained {
+            log(&format!("{name} is retained; reviving its session"));
+            run_op(
+                env,
+                &WorkflowOp::Revive {
+                    name: name.to_string(),
+                },
+            )?;
+        }
         (member.pane_id, member.cli)
     } else {
         node_cli(spec.cli.as_deref().unwrap_or_default())?;
@@ -1239,7 +1274,26 @@ impl WorkflowEnv for RealEnv {
         Some(MemberInfo {
             pane_id: agent.pane_id.clone(),
             cli: agent.cli.clone(),
+            retained: team.member_liveness(name).retained,
         })
+    }
+
+    /// One admitted request to the hived (`revive`), which raises the
+    /// member's leader and loads its recorded session under the hived's
+    /// own client. An answer that is not `ok`, or none, is the reason.
+    fn revive(&self, name: &str) -> Result<(), String> {
+        let ctx = self.context().map_err(|e| e.0)?;
+        let answer = crate::hived::request_revive(&ctx.workspace, &ctx.team_name, name)
+            .map_err(|failure| format!("{failure:?}"))?;
+        if answer.get("ok") == Some(&Value::Bool(true)) {
+            return Ok(());
+        }
+        Err(answer
+            .get("reason")
+            .or_else(|| answer.get("error"))
+            .and_then(Value::as_str)
+            .unwrap_or("the hived refused the revive")
+            .to_string())
     }
 
     /// One question to the hived (`turn-open`), which asks the member's
@@ -1361,6 +1415,17 @@ pub(crate) mod test_env {
         pub turn_calls: AtomicU32,
         /// The engine a reused member reports.
         pub member_cli: Mutex<String>,
+        /// Members alive only as retained: their turn is unknown until a
+        /// revive lands, and `revives` records each request.
+        pub retained: Mutex<HashSet<String>>,
+        pub revived: Mutex<HashSet<String>>,
+        /// (member, sleeps so far) at every revive request.
+        pub revives: Mutex<Vec<(String, u32)>>,
+        /// Refuse every revive with this reason.
+        pub revive_err: Option<String>,
+        /// Answer a revive `Ok` without loading anything: the hived said
+        /// yes but the engine still shows no turn evidence.
+        pub revive_noop: bool,
         pub spawns: Mutex<Vec<SpawnCall>>,
         pub dispatches: Mutex<Vec<DispatchCall>>,
         /// The member's run record as it stood at every dispatch attempt,
@@ -1395,6 +1460,11 @@ pub(crate) mod test_env {
             turn_answers: Mutex::new(VecDeque::from([Some(true), Some(false)])),
             turn_calls: AtomicU32::new(0),
             member_cli: Mutex::new("codex".to_string()),
+            retained: Mutex::new(HashSet::new()),
+            revived: Mutex::new(HashSet::new()),
+            revives: Mutex::new(Vec::new()),
+            revive_err: None,
+            revive_noop: false,
             spawns: Mutex::new(Vec::new()),
             dispatches: Mutex::new(Vec::new()),
             dispatch_records: Mutex::new(Vec::new()),
@@ -1422,6 +1492,14 @@ pub(crate) mod test_env {
         pub(crate) fn add_live(&self, name: &str) {
             self.agents.lock().unwrap().push(name.to_string());
             *self.turn_answers.lock().unwrap() = VecDeque::from([Some(false)]);
+        }
+
+        /// Put a retained grok member on the roster: alive, no leader, so
+        /// its turn is unknown until a revive lands; idle once it has.
+        pub(crate) fn add_retained_grok(&self, name: &str) {
+            self.add_live(name);
+            *self.member_cli.lock().unwrap() = "grok".to_string();
+            self.retained.lock().unwrap().insert(name.to_string());
         }
 
         /// Script the engine's end of the turn at that sleep count: codex
@@ -1541,7 +1619,22 @@ pub(crate) mod test_env {
             Some(MemberInfo {
                 pane_id: format!("%{name}"),
                 cli: self.member_cli.lock().unwrap().clone(),
+                retained: self.retained.lock().unwrap().contains(name),
             })
+        }
+
+        fn revive(&self, name: &str) -> Result<(), String> {
+            self.revives
+                .lock()
+                .unwrap()
+                .push((name.to_string(), self.sleeps.load(Ordering::SeqCst)));
+            if let Some(reason) = &self.revive_err {
+                return Err(reason.clone());
+            }
+            if !self.revive_noop {
+                self.revived.lock().unwrap().insert(name.to_string());
+            }
+            Ok(())
         }
 
         fn turn_open(&self, name: &str) -> Option<bool> {
@@ -1550,6 +1643,12 @@ pub(crate) mod test_env {
                 return None;
             }
             self.turn_calls.fetch_add(1, Ordering::SeqCst);
+            // No leader answers for a retained member until it is revived.
+            if self.retained.lock().unwrap().contains(name)
+                && !self.revived.lock().unwrap().contains(name)
+            {
+                return None;
+            }
             next(&self.turn_answers, None)
         }
 
@@ -2463,6 +2562,101 @@ mod tests {
     }
 
     #[test]
+    fn test_run_workflow_revives_a_retained_grok_member_before_waiting_on_its_turn() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_retained_grok("audit");
+        // once revived: the replayed turn is still open, then closed
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(true), Some(false)]);
+        env.end_at(3, "ok");
+        let r = run_workflow(&env, &workflow("audit", Some("grok"), "t")).unwrap();
+        assert_eq!(r["status"], "completed", "{r:?}");
+        assert_eq!(r["reused"], true);
+        // revived once, before any wait
+        assert_eq!(*env.revives.lock().unwrap(), vec![("audit".to_string(), 0)]);
+        // dispatched once, only after the engine's own closed answer
+        let d = env.dispatches.lock().unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].sleeps, 1);
+        // the member kept its session: no retire, no spawn
+        assert!(env.retired.lock().unwrap().is_empty());
+        assert!(env.spawns.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_run_workflow_ends_with_an_error_when_the_revive_is_refused() {
+        // A retained member the hived cannot revive is not a dead row to
+        // replace: the run ends with the reason, dispatching nothing and
+        // leaving the member and its session as they were.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.revive_err = Some("not retained: the roster row names another session".into());
+        env.add_retained_grok("audit");
+        let err = run_workflow(&env, &workflow("audit", Some("grok"), "t")).unwrap_err();
+        assert!(err.0.contains("could not be revived"), "{err}");
+        assert!(err.0.contains("names another session"), "{err}");
+        assert_eq!(env.revives.lock().unwrap().len(), 1);
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert!(env.retired.lock().unwrap().is_empty());
+        assert!(env.spawns.lock().unwrap().is_empty());
+        assert!(env.alive("audit"));
+        assert!(read_record(&env.workspace_str(), "audit").is_none());
+    }
+
+    #[test]
+    fn test_run_workflow_takes_no_revive_for_a_closed_turn() {
+        // The hived said yes but the engine still answers nothing about
+        // its turn: the gate is the engine's own "closed", never the
+        // revive — the wait runs out with no dispatch.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.revive_noop = true;
+        env.add_retained_grok("audit");
+        let r = run_workflow(&env, &workflow("audit", Some("grok"), "t")).unwrap();
+        assert_eq!(r["status"], "member_busy");
+        assert_eq!(r["reason"], "turn still open after 600s");
+        assert_eq!(env.revives.lock().unwrap().len(), 1);
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert!(env.retired.lock().unwrap().is_empty());
+        assert!(env.spawns.lock().unwrap().is_empty());
+        // asked every poll, answered never: the idle answer was not taken
+        assert_eq!(
+            env.turn_calls.load(Ordering::SeqCst),
+            (IDLE_WAIT_SECONDS / POLL_SECONDS) as u32
+        );
+        assert_eq!(env.turn_answers.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_run_workflow_does_not_revive_a_member_that_is_not_retained() {
+        let tmp = TempDir::new().unwrap();
+        let env = fake_env(tmp.path());
+        env.add_live("audit");
+        *env.member_cli.lock().unwrap() = "grok".to_string();
+        env.end_at(1, "ok");
+        let r = run_workflow(&env, &workflow("audit", Some("grok"), "t")).unwrap();
+        assert_eq!(r["status"], "completed");
+        assert!(env.revives.lock().unwrap().is_empty());
+        assert_eq!(env.dispatches.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_revive_op_relays_the_env_and_keeps_the_reason() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.add_retained_grok("audit");
+        let op = WorkflowOp::Revive {
+            name: "audit".into(),
+        };
+        assert!(run_op(&env, &op).unwrap().is_empty());
+        assert_eq!(*env.revives.lock().unwrap(), vec![("audit".to_string(), 0)]);
+        env.revive_err = Some("handshake failed: session/load timed out".into());
+        let err = run_op(&env, &op).unwrap_err();
+        assert!(err.0.contains("session/load timed out"), "{err}");
+        assert!(err.0.contains("nothing was dispatched"), "{err}");
+    }
+
+    #[test]
     fn test_run_workflow_is_busy_when_the_idle_wait_expires() {
         // A reused member that never closes its turn: no dispatch, no
         // record, and the member is left as it was.
@@ -2807,6 +3001,19 @@ mod tests {
             gl_turn_open_for_key: Some(Arc::new(move |key| {
                 (key == format!("m-{team}.g")).then_some(Some(true))
             })),
+            // The grok row has no leader: its record still names it, so
+            // the team runtime reports it retained, and `revive` raises it.
+            gl_runtime_for_key: Some(Arc::new(|_key| None)),
+            gl_read_session_key: Some(Arc::new(|_key| None)),
+            gl_retained: Some(Arc::new(move |key| key == format!("m-{team}.g"))),
+            gl_revive_key: Some(Arc::new(move |key| {
+                assert_eq!(key, format!("m-{team}.g"));
+                Ok(crate::adapters::grok_leader::Revival {
+                    raised: true,
+                    input_state: "ready".to_string(),
+                    turn_open: Some(false),
+                })
+            })),
             agent_dispatch_turn: Some(Arc::new(move |_agent, text| {
                 handed_sink.lock().unwrap().push(text.to_string());
                 Ok(TurnHandle::Codex {
@@ -2856,9 +3063,24 @@ mod tests {
             Some(MemberInfo {
                 pane_id: String::new(),
                 cli: "codex".to_string(),
+                retained: false,
             })
         );
         assert_eq!(env.member("nobody"), None);
+        // The grok row is alive as retained, and one admitted request to
+        // the hived revives it; a codex row is not a revive's to take.
+        assert_eq!(
+            env.member("g"),
+            Some(MemberInfo {
+                pane_id: String::new(),
+                cli: "grok".to_string(),
+                retained: true,
+            })
+        );
+        assert!(env.alive("g"));
+        assert_eq!(env.revive("g"), Ok(()));
+        let err = env.revive("b").unwrap_err();
+        assert!(err.contains("runs codex"), "{err}");
         // Every row's turn is one question to the hived over the socket:
         // the codex row's thread is asked of the app-server, the grok row's
         // of the leader pool, both behind the hived's seams above.
