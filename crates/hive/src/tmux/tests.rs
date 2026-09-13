@@ -264,6 +264,38 @@ fn test_client_window_helpers_resolve_most_recent_client() {
     );
 }
 
+/// `-t <name>` falls back to prefix matching when no session has that
+/// exact name: every client query pins the name, or names the id.
+#[test]
+fn test_client_queries_pin_the_session_target() {
+    let calls: Calls = Rc::new(RefCell::new(Vec::new()));
+    let recorded = Rc::clone(&calls);
+    set_run_override(move |args, check, timeout| {
+        recorded.borrow_mut().push((args.to_vec(), check, timeout));
+        if args[0] == "list-clients" {
+            return Ok(ok_run(0, "1\n1\n", ""));
+        }
+        Ok(ok_run(0, "dev:5\n", ""))
+    });
+    assert_eq!(watching_clients("fern"), Some(0), "control clients count 0");
+    assert_eq!(watching_clients("$3"), Some(0));
+    assert_eq!(watching_clients("=fern"), Some(0));
+    assert_eq!(watching_clients(""), None);
+    assert_eq!(get_most_recent_client_window(Some("fern")), None);
+    assert_eq!(get_most_recent_client_tty(Some("$3")), None);
+    let targets: Vec<String> = calls
+        .borrow()
+        .iter()
+        .filter(|(args, _, _)| args[0] == "list-clients")
+        .map(|(args, _, _)| args[2].clone())
+        .collect();
+    assert_eq!(targets, vec!["=fern", "$3", "=fern", "=fern", "$3"]);
+    assert!(calls
+        .borrow()
+        .iter()
+        .all(|(args, _, _)| args[0] != "list-clients" || args[1] == "-t"));
+}
+
 #[test]
 fn test_client_helpers_ignore_control_mode_clients() {
     set_run_override(|args, _check, _timeout| {
@@ -1052,34 +1084,6 @@ fn test_team_window_scan_parses_pr_and_tolerates_short_lines() {
 // --- facade-hygiene helpers (exact command contracts) ---------------------
 
 #[test]
-fn test_window_exists_requires_exact_id_echo() {
-    let calls = capture_run(0, "@7\n");
-    assert!(window_exists("@7"));
-    let calls = calls.borrow();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(
-        calls[0],
-        (
-            v(&["display-message", "-t", "@7", "-p", "#{window_id}"]),
-            false,
-            5
-        )
-    );
-}
-
-#[test]
-fn test_window_exists_false_paths() {
-    let calls = capture_run(0, "@8\n");
-    assert!(!window_exists("")); // no subprocess for empty id
-    assert!(calls.borrow().is_empty());
-    assert!(!window_exists("@7")); // mismatched id
-    capture_run(1, "@7\n");
-    assert!(!window_exists("@7")); // nonzero exit
-    raising_run();
-    assert!(!window_exists("@7")); // missing binary never raises
-}
-
-#[test]
 fn test_run_shell_detached_passes_command_byte_for_byte() {
     let calls = capture_run(0, "");
     let cmd = "sleep 0.2 && tmux send-keys -t '%9' Escape";
@@ -1238,9 +1242,48 @@ fn test_parse_all_tty_processes_groups_by_tty_and_drops_ttyless_rows() {
 }
 
 #[test]
-fn test_parse_window_option_all_keeps_only_windows_with_a_value() {
-    let map = parse_window_option_all("dev:1\ttok-1\ndev:2\t\nlane:0\ttok-2\n");
-    assert_eq!(map.len(), 2);
-    assert_eq!(map["dev:1"], "tok-1");
-    assert_eq!(map["lane:0"], "tok-2");
+fn test_parse_windows_snapshot_reads_every_window_with_its_instance_tags() {
+    let windows = parse_windows_snapshot(
+        "dev:1\t@3\t$0\tdev\tfern\t/ws/fern\t1700000000.5\ttok-1\n\
+         lane:0\t@7\t$4\tlane\t\t\t\t\n\
+         \t@9\t$4\tlane\tfern\t/ws\t1\t\n",
+    );
+    assert_eq!(windows.len(), 2, "{windows:?}");
+    let fern = &windows["dev:1"];
+    assert_eq!(fern.window_id, "@3");
+    assert_eq!(fern.session_id, "$0");
+    assert_eq!(fern.session_name, "dev");
+    assert_eq!(fern.team, "fern");
+    assert_eq!(fern.workspace, "/ws/fern");
+    assert_eq!(fern.created, "1700000000.5");
+    assert_eq!(fern.token, "tok-1");
+    let plain = &windows["lane:0"];
+    assert_eq!(plain.window_id, "@7");
+    assert_eq!(plain.team, "");
+    assert_eq!(plain.token, "");
+}
+
+#[test]
+fn test_windows_snapshot_lists_the_instance_tags_and_the_token_in_one_read() {
+    let calls = capture_run(0, "dev:1\t@3\t$0\tdev\tfern\t/ws\t1\ttok\n");
+    let (windows, status) = list_windows_snapshot_status("hive-notify-token");
+    assert_eq!(status, "ok");
+    assert_eq!(windows.unwrap()["dev:1"].token, "tok");
+    let calls = calls.borrow();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0[..3], v(&["list-windows", "-a", "-F"])[..]);
+    let fmt = &calls[0].0[3];
+    assert!(fmt.contains(WINDOW_TEAM_FMT), "{fmt}");
+    assert!(fmt.contains("#{session_id}"), "{fmt}");
+    assert!(fmt.ends_with("#{@hive-notify-token}"), "{fmt}");
+    capture_run(1, "");
+    assert_eq!(
+        list_windows_snapshot_status("hive-notify-token").1,
+        "unknown"
+    );
+    raising_run();
+    assert_eq!(
+        list_windows_snapshot_status("hive-notify-token").1,
+        "unknown"
+    );
 }

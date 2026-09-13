@@ -12,7 +12,7 @@ use std::process::{Command, Output, Stdio};
 use serde_json::Value;
 
 mod common;
-use common::require_tmux;
+use common::{kill_session, private_server, require_tmux, run_tmux};
 
 /// Env markers that would give the binary an engine or tmux identity — or,
 /// for a fixture registered as a desktop session, the developer's real
@@ -526,6 +526,65 @@ fn session_alive(rig: &Rig, session: &str) -> bool {
         .success()
 }
 
+/// `(session_name, control_mode)` of every client on the private server.
+fn clients(rig: &Rig) -> Vec<(String, bool)> {
+    let out = rig.tmux(&[
+        "list-clients",
+        "-F",
+        "#{session_name}\t#{client_control_mode}",
+    ]);
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (session, control) = line.split_once('\t')?;
+            Some((session.to_string(), control == "1"))
+        })
+        .collect()
+}
+
+/// The control clients the team's hived has on record, `(pid, session
+/// target)`, from the ledger `hive doctor` locates under the run dir.
+fn control_client_ledger(path: &std::path::Path) -> Vec<(i64, String)> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|doc| doc.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|row| {
+            (
+                row["pid"].as_i64().unwrap_or_default(),
+                row["session"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// *hold* must stay true for three of the hived's ticks.
+fn hold_for_ticks(what: &str, mut hold: impl FnMut() -> bool) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < until {
+        assert!(hold(), "{what} did not hold");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 #[test]
 fn test_create_outside_tmux_then_delete_closes_the_team_session() {
     let rig = Rig::new("create");
@@ -598,6 +657,161 @@ fn test_attach_inside_tmux_rebuilds_a_missing_window_in_the_team_session() {
         pane,
         "the human's own pane is untouched"
     );
+}
+
+/// A team with no window, queried from a pane of another session: its
+/// hived is born there with no display and attaches its monitor to nothing
+/// — never to the caller's session. Once `hive attach` rebuilds the
+/// window, the same hived follows its display: into the team session, then
+/// with the window into another session, and through that session's
+/// rename without a restart. The control client on record is always the
+/// session the live window's tags sit in.
+#[test]
+fn test_windowless_team_queried_from_a_foreign_pane_tracks_only_its_own_display() {
+    let rig = Rig::new("foreign-query");
+    let first_window = rig.create_outside_tmux();
+    let other = format!("other-{}", std::process::id());
+    let pane = rig.tmux_ok(&["new-session", "-d", "-s", &other, "-P", "-F", "#{pane_id}"]);
+    let socket = rig.tmux_ok(&["display-message", "-p", "#{socket_path}"]);
+    rig.tmux_ok(&["kill-window", "-t", &first_window]);
+    assert!(!session_alive(&rig, &rig.team));
+    assert!(!rig.hived_socket_exists(), "no hived before the query");
+
+    // The explicit team query from the foreign pane starts the hived.
+    let stdout = rig.hive_ok(&["team", "-t", &rig.team], Some((&socket, &pane)));
+    let payload: Value = serde_json::from_str(&stdout).expect("team payload");
+    assert_eq!(payload["name"], Value::String(rig.team.clone()));
+    assert!(
+        rig.hived_socket_exists(),
+        "the query started the team's hived"
+    );
+    let owner_path = rig.ws().join("run").join("hived.owner.json");
+    let owner = |path: &PathBuf| -> Value {
+        serde_json::from_str(&std::fs::read_to_string(path).expect("owner file"))
+            .expect("owner json")
+    };
+    let born = owner(&owner_path);
+
+    // No display: no control client, on the caller's session or any other.
+    hold_for_ticks("no control client for a windowless team", || {
+        clients(&rig).iter().all(|(_, control)| !control)
+    });
+
+    // The rebuilt window in the team session is where the monitor goes.
+    rig.hive_ok(&["attach", &rig.team], Some((&socket, &pane)));
+    let windows = rig.team_windows();
+    assert_eq!(windows.len(), 1, "{windows:?}");
+    let (session, window_id) = windows.into_iter().next().unwrap();
+    assert_eq!(session, rig.team);
+    let team_session = rig.session_id(&rig.team);
+    // The ledger of control clients, where `hive doctor` says the run dir
+    // is — run from the rebuilt window's shell pane, bound to the team the
+    // way a human's shell pane in a team window is.
+    let team_pane = rig.panes(&window_id)[0].0.clone();
+    rig.tmux_ok(&[
+        "set-option",
+        "-p",
+        "-t",
+        &team_pane,
+        "@hive-team",
+        &rig.team,
+    ]);
+    rig.tmux_ok(&["set-option", "-p", "-t", &team_pane, "@hive-role", "shell"]);
+    let doctor = rig.hive(&["doctor"], Some((&socket, &team_pane)));
+    let report: Value = serde_json::from_str(&String::from_utf8_lossy(&doctor.stdout))
+        .unwrap_or_else(|err| {
+            panic!(
+                "doctor json ({err}): stdout={} stderr={}",
+                String::from_utf8_lossy(&doctor.stdout),
+                String::from_utf8_lossy(&doctor.stderr)
+            )
+        });
+    let run_dir = PathBuf::from(
+        report["runDir"]
+            .as_str()
+            .unwrap_or_else(|| panic!("runDir in the doctor report: {report}")),
+    );
+    assert_eq!(run_dir, rig.ws().join("run"));
+    let ledger = run_dir.join("control-clients.json");
+    wait_until("the monitor on the team session", || {
+        control_client_ledger(&ledger)
+            .iter()
+            .any(|(_, target)| *target == team_session)
+            && clients(&rig).contains(&(rig.team.clone(), true))
+    });
+    assert_eq!(control_client_ledger(&ledger).len(), 1);
+    assert!(
+        !clients(&rig)
+            .iter()
+            .any(|(s, control)| *control && *s == other),
+        "nothing watches the caller's session: {:?}",
+        clients(&rig)
+    );
+    assert_eq!(owner(&owner_path), born, "the same hived generation");
+
+    // The window moves whole into the other session: the monitor follows.
+    rig.tmux_ok(&["move-window", "-s", &window_id, "-t", &format!("={other}:")]);
+    assert!(!session_alive(&rig, &rig.team));
+    let other_session = rig.session_id(&other);
+    assert_ne!(other_session, team_session);
+    wait_until("the monitor on the session the window moved to", || {
+        control_client_ledger(&ledger)
+            .iter()
+            .all(|(_, target)| *target == other_session)
+            && !control_client_ledger(&ledger).is_empty()
+            && clients(&rig).contains(&(other.clone(), true))
+    });
+    let followed = control_client_ledger(&ledger);
+    assert_eq!(followed.len(), 1, "{followed:?}");
+    assert_eq!(
+        rig.tmux_ok(&["display-message", "-p", "-t", &window_id, "#{session_id}"]),
+        followed[0].1,
+        "the control client targets the session the live window's tags sit in"
+    );
+    assert_eq!(owner(&owner_path), born);
+
+    // A rename keeps the session: the same client, no restart.
+    let renamed = format!("renamed-{}", std::process::id());
+    rig.tmux_ok(&["rename-session", "-t", &format!("={other}"), &renamed]);
+    hold_for_ticks("the monitor through a rename", || {
+        control_client_ledger(&ledger) == followed
+            && clients(&rig).contains(&(renamed.clone(), true))
+    });
+    assert_eq!(rig.session_id(&renamed), other_session);
+    assert_eq!(owner(&owner_path), born);
+
+    rig.delete();
+    assert!(session_alive(&rig, &renamed), "the lent session stays");
+}
+
+/// The viewer count is asked by exact session: a `fern-dev` on the server
+/// lends `fern` nothing, where a bare `-t fern` would have prefix-matched.
+#[test]
+fn test_viewer_count_never_borrows_a_prefix_matched_session() {
+    require_tmux();
+    let _server = private_server();
+    let lookalike = format!("fern-dev-{}", std::process::id());
+    let team = format!("fern-{}", std::process::id());
+    let sibling = format!("{team}-dev");
+    run_tmux(&["new-session", "-d", "-s", &sibling]);
+    run_tmux(&["new-session", "-d", "-s", &lookalike]);
+    let sibling_id = run_tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        &format!("={sibling}:"),
+        "#{session_id}",
+    ]);
+    assert_eq!(
+        hive::tmux::watching_clients(&team),
+        None,
+        "a session that does not exist has no count to give"
+    );
+    assert_eq!(hive::tmux::watching_clients(&sibling), Some(0));
+    assert_eq!(hive::tmux::watching_clients(&sibling_id), Some(0));
+    assert_eq!(hive::tmux::get_most_recent_client_window(Some(&team)), None);
+    kill_session(&sibling);
+    kill_session(&lookalike);
 }
 
 #[test]
