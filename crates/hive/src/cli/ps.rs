@@ -146,6 +146,24 @@ fn hived_args(process: &Process, entries: &[Map<String, Value>]) -> Option<(Stri
     }
 }
 
+/// The reason the last desk in *workspace* recorded when it retired, or
+/// null when there is no readable one.
+///
+/// Reported beside the state, never folded into it: the marker is what a
+/// retiring desk wrote (`hived/sleep.rs`), it outlives that retirement
+/// until the next generation starts, and only `unwatched` is a reason the
+/// session hooks act on. Which of those is true here is not ps's to say.
+fn marker_reason(workspace: &str) -> Value {
+    if workspace == UNKNOWN {
+        return Value::Null;
+    }
+    fs::read_to_string(hived::asleep_marker_path(workspace))
+        .ok()
+        .and_then(|marker| hived::asleep_reason(&marker))
+        .map(Value::from)
+        .unwrap_or(Value::Null)
+}
+
 fn hash_matches(reply: Option<&Map<String, Value>>, pid: i64, hash: &str) -> Value {
     let Some(reply) = reply else {
         return json!(UNKNOWN);
@@ -501,6 +519,7 @@ fn collect() -> Result<Vec<Value>, String> {
     for entry in &entries {
         let team = string(entry, "team");
         let workspace = string(entry, "workspace");
+        let reason = marker_reason(&workspace);
         let mut item = row("team", json!(team), None);
         item["team"] = json!(team);
         item["workspace"] = json!(workspace);
@@ -516,16 +535,22 @@ fn collect() -> Result<Vec<Value>, String> {
         };
         item["displayPresent"] = display_present(panes.as_deref(), server, &team);
         item["state"] = json!(team_state(&item["hivedPresent"]));
+        item["asleepReason"] = reason;
         item["orchSession"] = json!(orch_state(entry));
         rows.push(item);
     }
     Ok(rows)
 }
 
-/// A team runs while its hived is up; without one it is asleep whether or
+/// A team runs while a `hive --hived` line for exactly its team and
+/// workspace is in the process table; without one it is asleep whether or
 /// not its window is still on screen — a window nobody watches is a
 /// picture, and the desk retires under it (`hived.sleep unwatched`). The
 /// window is reported beside it as `displayPresent`.
+///
+/// The process line is presence, not health: a desk still tearing down or
+/// running a superseded build reads as running here, and its own row
+/// carries the `buildMatches` and `socketExists` evidence for that.
 fn team_state(hived: &Value) -> &'static str {
     match hived.as_bool() {
         Some(true) => "running",
