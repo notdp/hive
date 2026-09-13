@@ -783,4 +783,250 @@ mod tests {
         );
         assert_eq!(trace.lines().count(), 3);
     }
+
+    /// An isolated home with a stubbed `ps`/`claude`/`tmux`/`hive` on PATH.
+    /// Every call is appended to `$PS_TEST_TRACE`, so a test can assert both
+    /// what was run and what was not.
+    fn fixture(root: &Path, ps_lines: &[String]) -> crate::testenv::EnvGuard {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::testenv::EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
+        let homes = root.join("homes");
+        env.set("HOME", &homes);
+        env.set("HIVE_HOME", homes.join("hive"));
+        env.set("CODEX_HOME", homes.join("codex"));
+        env.set("GROK_HOME", homes.join("grok"));
+        env.set("CLAUDE_HOME", homes.join("claude"));
+        env.set("CLAUDE_CONFIG_DIR", homes.join("claude"));
+        let bin = root.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        env.set("PATH", &bin);
+        env.set("PS_TEST_TRACE", root.join("trace"));
+        // Only shell builtins: PATH holds the stubs and nothing else.
+        let table = ps_lines
+            .iter()
+            .map(|l| format!("'{l}'"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for (name, body) in [
+            ("ps", format!("printf '%s\\n' {table}")),
+            ("claude", "printf '%s\\n' '[]'".to_string()),
+            (
+                "tmux",
+                "printf '%s\\n' 'no server running on fixture' >&2\nexit 1".to_string(),
+            ),
+            ("hive", "exit 1".to_string()),
+        ] {
+            let path = bin.join(name);
+            fs::write(
+                &path,
+                format!("#!/bin/sh\nprintf '{name} %s\\n' \"$*\" >> \"$PS_TEST_TRACE\"\n{body}\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env
+    }
+
+    fn register_team(root: &Path, team: &str, workspace: Option<&Path>) {
+        let dir = root.join("homes/hive/teams").join(team);
+        fs::create_dir_all(&dir).unwrap();
+        let mut entry = json!({"team": team, "members": [{"name": "worker", "cli": "codex"}]});
+        if let Some(workspace) = workspace {
+            entry["workspace"] = json!(workspace);
+        }
+        fs::write(dir.join("team.json"), entry.to_string()).unwrap();
+    }
+
+    fn ps_line(pid: i64, workspace: &Path, team: &str, window: &str) -> String {
+        format!(
+            "{pid} 1 Fri Sep 11 10:00:00 2026 /usr/bin/hive --hived {} {team} {window} @{pid}",
+            workspace.display()
+        )
+    }
+
+    fn rows_by_kind(rows: &[Value], kind: &str, key: &str) -> BTreeMap<String, Value> {
+        rows.iter()
+            .filter(|r| r["kind"] == kind)
+            .map(|r| (text(&r[key]), r.clone()))
+            .collect()
+    }
+
+    fn trace_of(root: &Path, program: &str) -> Vec<String> {
+        fs::read_to_string(root.join("trace"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with(&format!("{program} ")))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Every file under *root*, with its size and mtime: what a read-only
+    /// observation must leave exactly as it found it.
+    fn tree(root: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
+        let mut out = vec![];
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = fs::symlink_metadata(&path).unwrap();
+                if meta.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push((path, meta.len(), meta.modified().unwrap()));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    #[test]
+    fn test_collect_matches_real_hived_process_line_to_team_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        // A path whose repeated space only the roster can put back together.
+        let cedar = root.join("homes/ws/a  cedar");
+        let birch = root.join("homes/ws/birch");
+        let elm = root.join("homes/ws/elm");
+        let maple = root.join("homes/ws/maple");
+        let lines = [
+            ps_line(42, &cedar, "cedar", "cedar:0"),
+            // Right team, another workspace: a desk for a team of the same
+            // name in a different hive home.
+            ps_line(43, &root.join("homes/ws/elsewhere"), "birch", "birch:0"),
+            // Right workspace, another team.
+            ps_line(44, &elm, "maple", "elm:0"),
+        ];
+        let _env = fixture(root, &lines);
+        register_team(root, "cedar", Some(&cedar));
+        register_team(root, "birch", Some(&birch));
+        register_team(root, "elm", Some(&elm));
+        register_team(root, "maple", Some(&maple));
+        // No workspace to look in: neither the process table nor a marker
+        // under the team's default run dir can speak for this team.
+        register_team(root, "fir", None);
+        let fir_marker = root.join("homes/hive/teams/fir/run/desk.asleep");
+        fs::create_dir_all(fir_marker.parent().unwrap()).unwrap();
+        fs::write(&fir_marker, r#"{"reason":"unwatched","at":1}"#).unwrap();
+
+        let rows = collect().unwrap();
+        let hiveds = rows_by_kind(&rows, "hived", "pid");
+        assert_eq!(hiveds.len(), 3);
+        assert_eq!(hiveds["42"]["team"], "cedar");
+        assert_eq!(hiveds["42"]["workspace"], json!(cedar));
+        assert_eq!(
+            hiveds["43"]["workspace"],
+            json!(root.join("homes/ws/elsewhere"))
+        );
+        assert_eq!(hiveds["44"]["team"], "maple");
+
+        let teams = rows_by_kind(&rows, "team", "team");
+        assert_eq!(teams.len(), 5);
+        assert_eq!(teams["cedar"]["hivedPresent"], true);
+        assert_eq!(teams["cedar"]["state"], "running");
+        for team in ["birch", "elm", "maple"] {
+            assert_eq!(teams[team]["hivedPresent"], false, "{team}");
+            assert_eq!(teams[team]["state"], "asleep", "{team}");
+        }
+        assert_eq!(teams["fir"]["hivedPresent"], UNKNOWN);
+        assert_eq!(teams["fir"]["state"], UNKNOWN);
+        assert_eq!(teams["fir"].get("asleepReason"), Some(&Value::Null));
+        assert_eq!(
+            teams.values().filter(|t| t["state"] == "running").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_ps_reads_asleep_reason_without_waking() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let cedar = root.join("homes/ws/cedar");
+        let lines = [ps_line(42, &cedar, "cedar", "cedar:0")];
+        let _env = fixture(root, &lines);
+        let markers = [
+            // A running desk that has not cleared its last marker: the
+            // reason is reported, the state still comes from the process.
+            ("cedar", Some(r#"{"reason":"unwatched","at":1}"#)),
+            ("birch", Some(r#"{"reason":"window-gone","at":2}"#)),
+            ("elm", Some(r#"{"reason":"display-unreachable","at":3}"#)),
+            ("maple", None),
+            ("fir", Some("not json")),
+            ("oak", Some(r#"{"at":4}"#)),
+            ("pine", Some(r#"{"reason":5}"#)),
+        ];
+        let paths: Vec<PathBuf> = markers
+            .iter()
+            .map(|(team, marker)| {
+                let workspace = root.join("homes/ws").join(team);
+                register_team(root, team, Some(&workspace));
+                let path = hived::asleep_marker_path(&workspace.to_string_lossy());
+                if let Some(marker) = marker {
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(&path, marker).unwrap();
+                }
+                path
+            })
+            .collect();
+        let read_markers = || paths.iter().map(|p| fs::read(p).ok()).collect::<Vec<_>>();
+        let homes = root.join("homes");
+        let before = tree(&homes);
+        let bytes_before = read_markers();
+
+        let rows = collect().unwrap();
+
+        let teams = rows_by_kind(&rows, "team", "team");
+        assert_eq!(teams["cedar"]["asleepReason"], "unwatched");
+        assert_eq!(teams["cedar"]["state"], "running");
+        assert_eq!(teams["birch"]["asleepReason"], "window-gone");
+        assert_eq!(teams["elm"]["asleepReason"], "display-unreachable");
+        for team in ["maple", "fir", "oak", "pine"] {
+            assert_eq!(teams[team]["asleepReason"], Value::Null, "{team}");
+        }
+        for team in ["birch", "elm", "maple", "fir", "oak", "pine"] {
+            assert_eq!(teams[team]["state"], "asleep", "{team}");
+        }
+        // A recorded string beside the state, and nothing else: no second
+        // state, no claim about whether this desk comes back on its own.
+        for team in teams.values() {
+            assert_eq!(
+                team.as_object().unwrap().keys().collect::<Vec<_>>(),
+                [
+                    "kind",
+                    "logicalOwner",
+                    "pid",
+                    "ppid",
+                    "startedAt",
+                    "ageSeconds",
+                    "team",
+                    "workspace",
+                    "memberCount",
+                    "hivedPresent",
+                    "displayPresent",
+                    "state",
+                    "asleepReason",
+                    "orchSession",
+                ]
+            );
+        }
+        let table = render_table(&[teams["birch"].clone()]);
+        assert!(table.contains("asleepReason=window-gone"));
+
+        // Nothing was started and nothing was written: the children are the
+        // one process snapshot, the one ledger read and the one tmux query,
+        // and the tree is exactly what it was.
+        assert_eq!(trace_of(root, "ps"), ["ps -axo pid,ppid,lstart,command"]);
+        assert_eq!(trace_of(root, "claude"), ["claude agents --json --all"]);
+        assert_eq!(trace_of(root, "hive"), Vec::<String>::new());
+        assert_eq!(trace_of(root, "tmux").len(), 1);
+        assert_eq!(
+            fs::read_to_string(root.join("trace"))
+                .unwrap()
+                .lines()
+                .count(),
+            3
+        );
+        assert_eq!(tree(&homes), before);
+        assert_eq!(read_markers(), bytes_before);
+    }
 }
