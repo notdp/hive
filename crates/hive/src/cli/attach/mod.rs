@@ -108,7 +108,7 @@ pub(crate) fn mirror_cmd(mode: &str, window: &str) {
     }
 }
 
-/// `hive wake --session ID | --window TARGET`: the session hooks' way of
+/// `hive wake --session ID`: the session hooks' way of
 /// bringing a desk that retired unwatched back when a terminal arrives.
 /// The whole session is scanned, not the window the client happens to be
 /// on (a plain shell window in front never hides the team behind it):
@@ -118,18 +118,9 @@ pub(crate) fn mirror_cmd(mode: &str, window: &str) {
 /// `unwatched` marker. A window of another home's or an earlier instance
 /// of the same name, a team whose desk is up, or one that retired for
 /// another reason or never ran, is left alone; nothing is printed and the
-/// exit is 0 either way. `--window` is the older hook's form: its session
-/// is resolved and scanned the same way.
-pub(crate) fn wake_cmd(session: &str, window: &str) {
-    let session_id = if !session.is_empty() {
-        session.to_string()
-    } else {
-        match tmux::display_value(window, "#{session_id}") {
-            Some(id) => id,
-            None => return,
-        }
-    };
-    let Some(windows) = tmux::list_session_windows(&session_id, crate::hived::notify_token_key())
+/// exit is 0 either way.
+pub(crate) fn wake_cmd(session_id: &str) {
+    let Some(windows) = tmux::list_session_windows(session_id, crate::hived::notify_token_key())
     else {
         return;
     };

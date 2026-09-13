@@ -659,7 +659,7 @@ Commands:
 "#
         }
         ["wake"] => {
-            r#"Usage: hive wake (--session ID | --window TARGET)
+            r#"Usage: hive wake --session ID
 
   Bring back the hiveds of the teams a tmux session shows.
 
@@ -677,9 +677,8 @@ Commands:
   is missing or says otherwise). Prints nothing and exits 0 either way.
 
 Options:
-  --session ID     The session the client arrived at (`$3`)
-  --window TARGET  A window of it (`session:index`); its session is scanned
-  -h, --help       Show this message and exit.
+  --session ID  The session the client arrived at (`$3`)
+  -h, --help    Show this message and exit.
 "#
         }
         ["resume-hint"] => {

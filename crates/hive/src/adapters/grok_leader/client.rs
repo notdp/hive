@@ -373,20 +373,28 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
             apply_update(&mut state, &update);
             collect_prompt_text(&mut state, &update, params.get("_meta"));
         }
-        "_x.ai/session_notification" => {
-            let kind = params
-                .get("update")
-                .and_then(|update| update.get("sessionUpdate"))
-                .and_then(Value::as_str);
-            if kind == Some("turn_completed") {
-                state.runtime.busy = false;
-                state.runtime.turn_open = Some(false);
-                state.runtime.input_state = "ready".to_string();
-            }
-        }
         "_x.ai/queue/changed" => apply_queue(&mut state, params),
+        _ if is_turn_completed(method, params) => {
+            state.runtime.busy = false;
+            state.runtime.turn_open = Some(false);
+            state.runtime.input_state = "ready".to_string();
+        }
         _ => {}
     }
+}
+
+/// The leader's turn-end notification, `_x.ai/session/update` with
+/// `sessionUpdate: turn_completed` (grok 1.0.30), live and in the
+/// `session/load` replay alike. A desk that woke from sleep reloads the
+/// member's history through that replay; missing its last turn end there
+/// leaves `turn_open` true and every later dispatch `member_busy`.
+fn is_turn_completed(method: &str, params: &Value) -> bool {
+    method == "_x.ai/session/update"
+        && params
+            .get("update")
+            .and_then(|update| update.get("sessionUpdate"))
+            .and_then(Value::as_str)
+            == Some("turn_completed")
 }
 
 /// Fold `activity` — the leader's busy authority — into the runtime.
@@ -420,12 +428,10 @@ fn fold_replayed_turn(state: &mut ClientShared, method: &str, params: &Value) {
         .and_then(|update| update.get("sessionUpdate"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    match method {
-        "session/update" if update_opens_turn(kind) => state.runtime.turn_open = Some(true),
-        "_x.ai/session_notification" if kind == "turn_completed" => {
-            state.runtime.turn_open = Some(false)
-        }
-        _ => {}
+    if method == "session/update" && update_opens_turn(kind) {
+        state.runtime.turn_open = Some(true);
+    } else if is_turn_completed(method, params) {
+        state.runtime.turn_open = Some(false);
     }
 }
 

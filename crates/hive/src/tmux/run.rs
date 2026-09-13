@@ -4,6 +4,23 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// `TMUX_TMPDIR` when it names a directory that is gone. tmux then
+/// silently resolves the default socket under `/tmp` instead — another
+/// server's, the developer's on a machine where a test lane's directory
+/// was removed under a process still running — so hive refuses to run
+/// the command rather than reach a server it was not pointed at. A
+/// process inside tmux (`TMUX` set) names its server directly and is not
+/// affected.
+fn missing_tmux_tmpdir() -> Option<String> {
+    if std::env::var_os("TMUX").is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    let dir = std::env::var("TMUX_TMPDIR")
+        .ok()
+        .filter(|v| !v.is_empty())?;
+    (!std::path::Path::new(&dir).is_dir()).then_some(dir)
+}
+
 /// The character type a tmux client is started under. tmux writes command
 /// output through a client that is not UTF-8 sanitized: every control
 /// character, the tab hive separates format columns with included, comes
@@ -221,6 +238,11 @@ pub(crate) fn run_from(
         if let Some(res) = hit {
             return res;
         }
+    }
+    if let Some(missing) = missing_tmux_tmpdir() {
+        return Err(TmuxError::Os(format!(
+            "TMUX_TMPDIR names {missing}, which does not exist; tmux would fall back to the default server"
+        )));
     }
     let mut argv: Vec<String> = Vec::with_capacity(args.len() + 1);
     argv.push("tmux".to_string());

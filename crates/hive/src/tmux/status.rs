@@ -438,10 +438,8 @@ pub(crate) fn run_shell_body(command: &str) -> Option<String> {
 
 /// Whether a listed entry is this hive home's wake: one whose command
 /// starts with this home's `HIVE_HOME` assignment. The home an entry
-/// bakes is the only proof of whose it is — an older, home-less
-/// `wake --window` entry names a binary, and a binary is shared by every
-/// home installed from it, so such an entry is nobody's to claim, update
-/// or remove.
+/// bakes is the only proof of whose it is; any other entry — the user's,
+/// another home's — is nobody's to claim, update or remove.
 pub(crate) fn owned_wake_entry(entry: &HookEntry, home: &str) -> bool {
     run_shell_body(&entry.command)
         .is_some_and(|body| body.starts_with(&wake_home_token(home)) && body.contains(" wake --"))
@@ -588,30 +586,15 @@ pub fn install_wake_hooks(session_id: &str) -> anyhow::Result<()> {
     let entries = wake_hook_entries(session_id)?;
     for hook in WAKE_HOOKS {
         let of_hook: Vec<&HookEntry> = entries.iter().filter(|e| e.hook == hook).collect();
-        let mut own = of_hook
+        let index = of_hook
             .iter()
-            .filter(|e| owned_wake_entry(e, &home))
-            .map(|e| e.index);
-        let index = match own.next() {
-            Some(index) => index,
-            None => (0..)
-                .find(|i| of_hook.iter().all(|e| e.index != *i))
-                .unwrap_or(0),
-        };
-        // A second entry of this home's is an older install's leftover.
-        for extra in own {
-            run(
-                &[
-                    "set-hook",
-                    "-u",
-                    "-t",
-                    session_id,
-                    &format!("{hook}[{extra}]"),
-                ],
-                true,
-                5,
-            )?;
-        }
+            .find(|e| owned_wake_entry(e, &home))
+            .map(|e| e.index)
+            .unwrap_or_else(|| {
+                (0..)
+                    .find(|i| of_hook.iter().all(|e| e.index != *i))
+                    .unwrap_or(0)
+            });
         run(
             &[
                 "set-hook",

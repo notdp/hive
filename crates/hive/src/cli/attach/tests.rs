@@ -933,7 +933,7 @@ fn test_wake_requires_matching_instance_and_unwatched_marker() {
     // The full match behind an unwatched marker: one desk, told its window.
     let _tmux = wake_tmux(vec![honey("honey:1", "@7", &ws, "100")]);
     write_marker(&ws, "{\"reason\":\"unwatched\",\"at\":1}\n");
-    wake_cmd("$1", "");
+    wake_cmd("$1");
     let argv = spawns.lock().unwrap().clone();
     assert_eq!(argv.len(), 1);
     assert_eq!(
@@ -946,7 +946,7 @@ fn test_wake_requires_matching_instance_and_unwatched_marker() {
         honey("honey:1", "@7", &ws, "100"),
         honey("main:4", "@7", &ws, "100.0"),
     ]);
-    wake_cmd("$1", "");
+    wake_cmd("$1");
     assert_eq!(spawns.lock().unwrap().len(), 1);
 
     // Everything short of the full match starts nothing and writes
@@ -1018,7 +1018,7 @@ fn test_wake_requires_matching_instance_and_unwatched_marker() {
     for (what, marker, windows) in cases {
         let before = reset(marker);
         let _tmux = wake_tmux(windows);
-        wake_cmd("$1", "");
+        wake_cmd("$1");
         assert!(spawns.lock().unwrap().is_empty(), "{what} spawned a hived");
         assert_eq!(
             (read_marker(&ws), entry_bytes(&env, "honey")),
@@ -1029,7 +1029,7 @@ fn test_wake_requires_matching_instance_and_unwatched_marker() {
     // No marker at all: a desk that never ran, or left for good.
     std::fs::remove_file(crate::hived::asleep_marker_path(&ws)).unwrap();
     let _tmux = wake_tmux(vec![honey("honey:1", "@7", &ws, "100")]);
-    wake_cmd("$1", "");
+    wake_cmd("$1");
     assert!(
         spawns.lock().unwrap().is_empty(),
         "no marker spawned a hived"
@@ -1049,7 +1049,7 @@ fn test_wake_requires_matching_instance_and_unwatched_marker() {
     let closing = entry_bytes(&env, "honey");
     assert_ne!(closing, before.1);
     let _tmux = wake_tmux(vec![honey("honey:1", "@7", &ws, "100")]);
-    wake_cmd("$1", "");
+    wake_cmd("$1");
     assert!(
         spawns.lock().unwrap().is_empty(),
         "a closing team spawned a hived"
@@ -1059,7 +1059,7 @@ fn test_wake_requires_matching_instance_and_unwatched_marker() {
     // No registry entry: nothing to wake, nothing written.
     crate::registry::delete_team("honey").unwrap();
     let _tmux = wake_tmux(vec![honey("honey:1", "@7", &ws, "100")]);
-    wake_cmd("$1", "");
+    wake_cmd("$1");
     assert!(spawns.lock().unwrap().is_empty());
     assert_eq!(entry_bytes(&env, "honey"), None);
 
@@ -1069,7 +1069,7 @@ fn test_wake_requires_matching_instance_and_unwatched_marker() {
     let (_hived, spawns) = hived_seams(&[&ws]);
     write_marker(&ws, unwatched);
     let _tmux = wake_tmux(vec![honey("honey:1", "@7", &ws, "100")]);
-    wake_cmd("$1", "");
+    wake_cmd("$1");
     assert!(
         spawns.lock().unwrap().is_empty(),
         "a matching desk was replaced"
@@ -1103,7 +1103,7 @@ fn test_session_wake_finds_team_behind_plain_current_window() {
 
     let (_hived, spawns) = hived_seams(&[]);
     let _tmux = wake_tmux(windows());
-    wake_cmd("$1", "");
+    wake_cmd("$1");
     assert_eq!(
         spawned_workspaces(&spawns),
         vec![honey_ws.clone(), comb_ws.clone()]
@@ -1112,45 +1112,24 @@ fn test_session_wake_finds_team_behind_plain_current_window() {
     assert_eq!(argv[0][3..], ["honey", "dev:2", "@7"].map(str::to_string));
     assert_eq!(argv[1][3..], ["comb", "dev:3", "@8"].map(str::to_string));
 
-    // `--window` on the shell window: its session, the same scan.
+    // A session tmux does not know: nothing scanned, nothing started.
     let (_hived, spawns) = hived_seams(&[]);
-    let tmux = wake_tmux(windows());
-    wake_cmd("", "dev:1");
-    assert_eq!(
-        spawned_workspaces(&spawns),
-        vec![honey_ws.clone(), comb_ws.clone()]
-    );
-    assert!(has_row(
-        &tmux,
-        &["display-message", "-t", "dev:1", "-p", "#{session_id}"]
-    ));
-    assert!(tmux
-        .borrow()
-        .iter()
-        .any(|a| a[..3] == ["list-windows", "-t", "$1"].map(str::to_string)));
-
-    // A window tmux does not know: nothing scanned, nothing started.
-    let (_hived, spawns) = hived_seams(&[]);
-    let tmux = wake_tmux(windows());
-    wake_cmd("", "gone:9");
+    let _tmux = wake_tmux(windows());
+    wake_cmd("$9");
     assert!(spawns.lock().unwrap().is_empty());
-    assert!(tmux.borrow().iter().all(|a| a[0] != "list-windows"));
 
-    // The verb takes exactly one of the two, and has its help text.
+    // The verb takes the session and nothing else, and has its help text.
     let cli = || crate::cli::build_cli();
     assert!(cli().try_get_matches_from(["hive", "wake"]).is_err());
     assert!(cli()
-        .try_get_matches_from(["hive", "wake", "--session", "$1", "--window", "dev:1"])
+        .try_get_matches_from(["hive", "wake", "--window", "dev:1"])
         .is_err());
     assert!(cli()
         .try_get_matches_from(["hive", "wake", "--session", "$1"])
         .is_ok());
-    assert!(cli()
-        .try_get_matches_from(["hive", "wake", "--window", "dev:1"])
-        .is_ok());
     let help = crate::cli::help_text::help_for(&["wake"]).expect("help for the hidden verb");
     assert!(
-        help.contains("--session") && help.contains("--window"),
+        help.contains("--session") && !help.contains("--window"),
         "{help}"
     );
 }

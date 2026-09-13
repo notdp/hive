@@ -66,6 +66,8 @@ struct Lane {
     root: tempfile::TempDir,
     /// The developer's PATH, what the shim runs the real tmux from.
     real_path: String,
+    /// Every actor spawned, killed before the lane's directory goes.
+    actors: std::cell::RefCell<Vec<u32>>,
 }
 
 impl Lane {
@@ -74,10 +76,14 @@ impl Lane {
         let real_path = std::env::var("PATH").unwrap_or_default();
         let bin = root.path().join("bin");
         std::fs::create_dir_all(&bin).expect("bin dir");
-        // The shim: the real tmux, then — for `show-hooks` from the actor
-        // the rig holds — a `read` marker and a wait for its `go`.
+        // The shim: the real tmux on the lane's socket, named explicitly
+        // (`-S`) — tmux falls back to the default server, the developer's,
+        // when `TMUX_TMPDIR` names a directory that is gone, and a parked
+        // actor released while the lane is being torn down would otherwise
+        // write its hooks there — then, for `show-hooks` from the actor the
+        // rig holds, a `read` marker and a wait for its `go`.
         let shim = format!(
-            "#!/bin/sh\nout=$(PATH={} tmux \"$@\")\nrc=$?\nif [ \"$1\" = show-hooks ] && [ -n \"$HIVE_RIG_GATE\" ]; then\n  : > \"$HIVE_RIG_GATE/read.$HIVE_RIG_ACTOR\"\n  while [ ! -e \"$HIVE_RIG_GATE/go.$HIVE_RIG_ACTOR\" ]; do sleep 0.02; done\nfi\n[ -n \"$out\" ] && printf '%s\\n' \"$out\"\nexit $rc\n",
+            "#!/bin/sh\nout=$(PATH={} tmux -S \"$HIVE_RIG_SOCKET\" \"$@\")\nrc=$?\nif [ \"$1\" = show-hooks ] && [ -n \"$HIVE_RIG_GATE\" ]; then\n  : > \"$HIVE_RIG_GATE/read.$HIVE_RIG_ACTOR\"\n  while [ ! -e \"$HIVE_RIG_GATE/go.$HIVE_RIG_ACTOR\" ]; do sleep 0.02; done\nfi\n[ -n \"$out\" ] && printf '%s\\n' \"$out\"\nexit $rc\n",
             shell_quote(&real_path)
         );
         let shim_path = bin.join("tmux");
@@ -98,7 +104,11 @@ impl Lane {
                     .join(format!("tmux-{}", unsafe { libc::getuid() })),
             )
             .expect("socket dir");
-        Lane { root, real_path }
+        Lane {
+            root,
+            real_path,
+            actors: std::cell::RefCell::new(Vec::new()),
+        }
     }
 
     fn socket(&self) -> PathBuf {
@@ -173,6 +183,7 @@ impl Lane {
             .env("HOME", self.root.path().join("home"))
             .env("HIVE_HOME", self.home(actor))
             .env("TMUX_TMPDIR", self.root.path())
+            .env("HIVE_RIG_SOCKET", self.socket())
             .env("HIVE_RIG_GATE", self.gate())
             .env("HIVE_RIG_ACTOR", actor);
         for key in [
@@ -189,7 +200,9 @@ impl Lane {
         ] {
             cmd.env_remove(key);
         }
-        cmd.spawn().expect("the actor runs")
+        let child = cmd.spawn().expect("the actor runs");
+        self.actors.borrow_mut().push(child.id());
+        child
     }
 
     fn read_marker(&self, actor: &str) -> PathBuf {
@@ -209,11 +222,14 @@ impl Lane {
 }
 
 impl Drop for Lane {
-    // Panic or not: a parked actor is released so it can exit, then the
-    // private server goes with everything on it.
+    // Panic or not: every actor is killed first — a parked one released
+    // now would run its writes against a lane that is going away — then
+    // the private server goes with everything on it.
     fn drop(&mut self) {
-        for actor in ["a", "b"] {
-            self.release(actor);
+        for pid in self.actors.borrow().iter() {
+            unsafe {
+                libc::kill(*pid as libc::pid_t, libc::SIGKILL);
+            }
         }
         let _ = Command::new("tmux")
             .arg("-S")
