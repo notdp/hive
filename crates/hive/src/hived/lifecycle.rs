@@ -294,26 +294,38 @@ pub fn ensure_hived(
 
 /// The identity ping and what it says, asked again while the desk answers
 /// busy: a shut gate is a retirement it may cancel or a drain that ends,
-/// not a generation to replace. The whole exchange fits the identity
-/// budget; a desk still busy at its end is an error, not a restart.
+/// not a generation to replace. One identity budget covers the whole
+/// exchange — the first ping gets all of it, each later one what is left
+/// — so a busy desk is an error at the budget's end, not a restart. A
+/// desk that answered busy and then nothing by that end is still busy,
+/// not gone: only an empty answer that came back before the budget ran
+/// out reads as no desk.
 fn identity_ping(
     workspace: &str,
     team: &str,
 ) -> Result<(Option<Map<String, Value>>, HivedIdentity)> {
     let deadline = monotonic() + IDENTITY_PING_TIMEOUT;
+    let mut budget = IDENTITY_PING_TIMEOUT;
+    let mut was_busy = false;
     loop {
-        let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
+        let response = hooked_request_ping(workspace, budget);
         let identity = hived_identity(response.as_ref(), team);
-        if identity != HivedIdentity::Busy {
-            return Ok((response, identity));
+        let spent = monotonic() >= deadline;
+        match identity {
+            HivedIdentity::Busy => was_busy = true,
+            HivedIdentity::Restart if was_busy && response.is_none() && spent => {}
+            _ => return Ok((response, identity)),
         }
-        if monotonic() >= deadline {
+        if !spent {
+            thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
+        }
+        budget = deadline - monotonic();
+        if budget <= 0.0 {
             bail!(
                 "hived for team '{team}' is busy (retiring or draining) and did not admit a ping \
                  within {IDENTITY_PING_TIMEOUT}s; retry"
             );
         }
-        thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
     }
 }
 

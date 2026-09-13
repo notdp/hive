@@ -53,6 +53,8 @@ pub struct Hook {
     pub after_admit: Option<F0<()>>,
     pub before_handler: Option<F0<()>>,
     pub before_reply: Option<F0<()>>,
+    /// Every frame a client wrote on a hived connection, as it went out.
+    pub client_wrote: Option<S1<()>>,
     // adapters / gate
     pub adapters_get: Option<S1<Option<AdapterHandle>>>,
     pub check_input_gate: Option<P1<GateResult>>,

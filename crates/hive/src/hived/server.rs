@@ -271,18 +271,100 @@ pub(crate) const ADMIT_ACTION: &str = "admit";
 const NOT_ADMITTED_REPLY: &[u8] =
     b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining; request not admitted; retry later\"}\n";
 
-/// One newline-terminated JSON line, or none when the peer closed, the
-/// read timed out or the line was no object. A frame without its newline
-/// still counts at EOF.
-fn read_line_object(reader: &mut std::io::BufReader<&UnixStream>) -> Option<Map<String, Value>> {
-    use std::io::BufRead;
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(0) | Err(_) => None,
-        Ok(_) => match serde_json::from_str::<Value>(&line) {
+/// Newline-framed lines off a connection, each read under one monotonic
+/// budget. Every underlying read gets what is left of the frame's budget,
+/// so a peer that drips a byte at a time below the socket timeout still
+/// ends at the deadline; a whole frame that arrives within it is taken
+/// however large. Bytes past a line stay for the next read, so a body
+/// sent on the heels of its preflight is not lost.
+pub(super) struct FrameReader<'a> {
+    conn: &'a UnixStream,
+    pending: Vec<u8>,
+}
+
+impl<'a> FrameReader<'a> {
+    pub(super) fn new(conn: &'a UnixStream) -> Self {
+        FrameReader {
+            conn,
+            pending: Vec::new(),
+        }
+    }
+
+    /// One read once the socket is readable, waited for with `poll` under
+    /// what is left of the deadline — not a socket timeout, which Darwin
+    /// refuses to set (EINVAL) on a socket shut in both directions, the
+    /// state a peer that answered and closed leaves behind.
+    fn read_more(&mut self, deadline: std::time::Instant) -> std::io::Result<usize> {
+        use std::os::fd::AsRawFd;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "read budget exhausted",
+                ));
+            }
+            let wait = remaining
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128) as i32;
+            let mut fds = libc::pollfd {
+                fd: self.conn.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            match unsafe { libc::poll(&mut fds, 1, wait) } {
+                0 => continue,
+                -1 => {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(err);
+                    }
+                }
+                _ => break,
+            }
+        }
+        let mut chunk = [0u8; 65536];
+        let n = self.conn.read(&mut chunk)?;
+        self.pending.extend_from_slice(&chunk[..n]);
+        Ok(n)
+    }
+
+    /// One newline-terminated line within `budget`, or `None` when the
+    /// peer closed with nothing pending. A line without its newline still
+    /// counts at EOF; a budget that runs out is an error, whatever was
+    /// pending.
+    pub(super) fn read_line(&mut self, budget: Duration) -> std::io::Result<Option<Vec<u8>>> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            if let Some(at) = self.pending.iter().position(|b| *b == b'\n') {
+                let rest = self.pending.split_off(at + 1);
+                return Ok(Some(std::mem::replace(&mut self.pending, rest)));
+            }
+            if self.read_more(deadline)? == 0 {
+                return Ok((!self.pending.is_empty()).then(|| std::mem::take(&mut self.pending)));
+            }
+        }
+    }
+
+    /// Everything up to EOF within `budget`, pending bytes first.
+    pub(super) fn read_to_end(&mut self, budget: Duration) -> std::io::Result<Vec<u8>> {
+        let deadline = std::time::Instant::now() + budget;
+        while self.read_more(deadline)? > 0 {}
+        Ok(std::mem::take(&mut self.pending))
+    }
+}
+
+/// One JSON line within the read budget, or none when the peer closed
+/// with nothing, the budget ran out or the read failed. A line that is no
+/// object is an empty map: answered, never served.
+fn read_line_object(reader: &mut FrameReader<'_>, budget: Duration) -> Option<Map<String, Value>> {
+    match reader.read_line(budget) {
+        Ok(Some(line)) => match serde_json::from_slice::<Value>(&line) {
             Ok(Value::Object(map)) => Some(map),
             _ => Some(Map::new()),
         },
+        Ok(None) | Err(_) => None,
     }
 }
 
@@ -303,10 +385,15 @@ fn serve_connection(
     read_timeout: f64,
     mut lease: RequestLease,
 ) {
-    let _ = conn.set_read_timeout(Some(Duration::from_secs_f64(read_timeout.max(0.001))));
-    let _ = conn.set_write_timeout(Some(Duration::from_secs_f64(read_timeout.max(0.001))));
-    let mut reader = std::io::BufReader::new(&conn);
-    let first = read_line_object(&mut reader).unwrap_or_default();
+    // The read budget bounds each frame — the first line, and the body
+    // after an admission — from its first byte; a peer that never
+    // completes one is dropped unserved, whatever pace it drips at.
+    let budget = Duration::from_secs_f64(read_timeout.max(0.001));
+    let _ = conn.set_write_timeout(Some(budget));
+    let mut reader = FrameReader::new(&conn);
+    let Some(first) = read_line_object(&mut reader, budget) else {
+        return;
+    };
     let first_action = first
         .get("action")
         .and_then(Value::as_str)
@@ -332,7 +419,7 @@ fn serve_connection(
         if let Some(f) = hookget(|h| h.after_admit.clone()).flatten() {
             f();
         }
-        let Some(body) = read_line_object(&mut reader) else {
+        let Some(body) = read_line_object(&mut reader, budget) else {
             return;
         };
         let action = body.get("action").and_then(Value::as_str).unwrap_or("");

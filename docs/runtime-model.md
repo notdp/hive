@@ -833,7 +833,10 @@ write the real payload. The lease spans the preflight, the body and the
 reply, so closing the gate under an admitted request cannot retire the desk
 out from under it, and a client that goes quiet after the handshake releases
 it with nothing served. A body whose action is not the one admitted is not
-served either.
+served either. Each frame — the preflight, the body — is read under one
+deadline from its first byte, so a client that drips a line it never finishes
+is dropped at the budget's end however slowly it drips; the client reads the
+admission line and the answer the same way.
 
 The point is where the retry boundary sits. A refusal, an EOF or a timeout
 *before* the business payload is written is `NotAdmitted` / `NotSent` /
