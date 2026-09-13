@@ -452,7 +452,10 @@ impl Agent {
         self.engine_alive()
     }
 
-    /// A pane-less member is alive iff its engine answers for it.
+    /// A pane-less member is alive iff its engine answers for it — or,
+    /// for grok, its leader has exited but the member is retained: its
+    /// session record still names it and a submission revives it
+    /// (`grok_leader::retained`).
     fn engine_alive(&self) -> bool {
         if self.cli == "claude" {
             let job_id = self.session_id.clone().unwrap_or_default();
@@ -481,7 +484,7 @@ impl Agent {
             let key = crate::adapters::grok_leader::member_key(&self.team_name, &self.name);
             return hooked_grok_probe_socket(&crate::adapters::grok_leader::socket_path_for_key(
                 &key,
-            ));
+            )) || hooked_grok_retained(&key);
         }
         false
     }

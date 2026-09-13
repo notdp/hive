@@ -1349,6 +1349,49 @@ fn test_member_alive_hived_answer_is_authoritative() {
 }
 
 #[test]
+fn test_member_liveness_admits_a_retained_member_as_alive() {
+    let (_tmp, _guard) = configure_hive_home(true, "%0");
+    let team = team_with_pane_member("");
+
+    stub_team_runtime(
+        json!({"ok": true, "members": {"worker": {"cliAlive": false, "retained": true}}}),
+    );
+    assert_eq!(
+        team.member_liveness("worker"),
+        MemberLiveness {
+            alive: true,
+            retained: true,
+        }
+    );
+    assert!(team.member_alive("worker"));
+
+    stub_team_runtime(
+        json!({"ok": true, "members": {"worker": {"cliAlive": true, "retained": false}}}),
+    );
+    assert_eq!(
+        team.member_liveness("worker"),
+        MemberLiveness {
+            alive: true,
+            retained: false,
+        }
+    );
+
+    stub_team_runtime(json!({"ok": true, "members": {"worker": {"cliAlive": false}}}));
+    assert_eq!(team.member_liveness("worker"), MemberLiveness::default());
+    assert_eq!(team.member_liveness("nobody"), MemberLiveness::default());
+
+    // no usable hived answer: a pane stands in, and nothing is retained
+    stub_team_runtime(json!({"ok": false, "error": "load failed"}));
+    assert_eq!(
+        team_with_pane_member("%1").member_liveness("worker"),
+        MemberLiveness {
+            alive: true,
+            retained: false,
+        }
+    );
+}
+
+#[test]
 fn test_member_alive_no_hived_uses_pane_liveness() {
     let (_tmp, _guard) = configure_hive_home(true, "%0");
     // No hived answers: pin the seam instead of probing a real socket path.

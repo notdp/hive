@@ -13,7 +13,7 @@ use anyhow::bail;
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
 use crate::adapters::codex_app_server::TurnStartFailure;
-use crate::adapters::grok_leader::PromptId;
+use crate::adapters::grok_leader::{PromptId, RecordBinding};
 
 use super::support::{wait_codex_attached, wait_grok_session_ready, AGENT_STARTUP_TIMEOUT};
 #[cfg(test)]
@@ -711,6 +711,7 @@ pub(super) fn hooked_grok_spawn_member_daemon(team: &str, member: &str) -> bool 
 /// The engine-first mint: leader + `session/new` + record, all by identity.
 pub(super) fn hooked_grok_create_member_session(
     team: &str,
+    created_at: &str,
     member: &str,
     session_id: &str,
     cwd: &str,
@@ -721,6 +722,7 @@ pub(super) fn hooked_grok_create_member_session(
             .push(format!("mint:{team}.{member}:{session_id}:{cwd}"));
         h.grok_minted.push((
             team.to_string(),
+            created_at.to_string(),
             member.to_string(),
             session_id.to_string(),
             cwd.to_string(),
@@ -729,27 +731,32 @@ pub(super) fn hooked_grok_create_member_session(
     }) {
         return v;
     }
-    crate::adapters::grok_leader::create_member_session(team, member, session_id, cwd)
+    crate::adapters::grok_leader::create_member_session(team, created_at, member, session_id, cwd)
 }
 
 /// The session record on a daemon key (resume/fork lanes, where the TUI —
-/// not `session/new` — materializes the session).
+/// not `session/new` — materializes the session), bound to the member.
 pub(super) fn hooked_grok_write_session_key(
     key: &str,
     session_id: &str,
     cwd: &str,
+    binding: &RecordBinding,
 ) -> anyhow::Result<()> {
     #[cfg(test)]
     if testhook::with(|h| {
         h.event_order.push(format!("record:{key}:{session_id}"));
-        h.grok_sessions
-            .push((key.to_string(), session_id.to_string(), cwd.to_string()))
+        h.grok_sessions.push((
+            key.to_string(),
+            session_id.to_string(),
+            cwd.to_string(),
+            binding.clone(),
+        ))
     })
     .is_some()
     {
         return Ok(());
     }
-    crate::adapters::grok_leader::write_session_key(key, session_id, cwd)
+    crate::adapters::grok_leader::write_session_key(key, session_id, cwd, Some(binding))
 }
 
 pub(super) fn hooked_grok_send_to_pane(pane_id: &str, text: &str) -> Option<&'static str> {
@@ -850,6 +857,16 @@ pub(super) fn hooked_grok_probe_socket(socket_path: &std::path::Path) -> bool {
         return v;
     }
     crate::adapters::grok_leader::probe_socket(socket_path)
+}
+
+/// `grok_leader::retained`: the member's record still names it and no
+/// leader listens.
+pub(super) fn hooked_grok_retained(key: &str) -> bool {
+    #[cfg(test)]
+    if let Some(Some(v)) = testhook::with(|h| h.grok_retained) {
+        return v;
+    }
+    crate::adapters::grok_leader::retained(key)
 }
 
 // --- hived seams -----------------------------------------------------------

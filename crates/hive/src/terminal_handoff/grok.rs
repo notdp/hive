@@ -42,6 +42,7 @@ pub(crate) fn bind(session: &Session, target: &Target) -> Result<()> {
         &session.id,
         &session.cwd,
         &target.team,
+        &target.created_at,
         &target.member,
         &target.pane,
     )
@@ -92,7 +93,7 @@ mod tests {
         env.set("GROK_HOME", tmp.path().join("g"));
         env.set("HIVE_HOME", tmp.path().join("h"));
         let s = Session::grok("l-ab12", "sid-1", "/w");
-        grok_leader::write_session_key("l-ab12", "sid-1", "/w").unwrap();
+        grok_leader::write_session_key("l-ab12", "sid-1", "/w", None).unwrap();
         let alias = grok_leader::alias_path_for_key("m-honey.rex");
         std::fs::write(&alias, "l-ab12").unwrap();
         let target = Target {

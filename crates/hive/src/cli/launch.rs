@@ -1015,7 +1015,7 @@ fn run_outside_grok(args: &[String]) -> ! {
         eprintln!("hive: grok leader did not start; launching plain grok");
         grok_raw(args);
     }
-    if let Err(error) = grok_leader::write_session_key(&key, &session_id, &cwd) {
+    if let Err(error) = grok_leader::write_session_key(&key, &session_id, &cwd, None) {
         grok_leader::stop_launch(&key, "");
         eprintln!("hive: {error}; launching plain grok");
         grok_raw(args);

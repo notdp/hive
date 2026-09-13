@@ -19,8 +19,8 @@ use std::os::unix::io::AsRawFd;
 use anyhow::{bail, Result};
 
 use super::{
-    alias_path_for_key, alias_target, is_launch_key, kill_daemon_key, member_key, probe_socket,
-    read_session_key, write_session_key,
+    alias_path_for_key, alias_target, bind_session_key, is_launch_key, kill_daemon_key, member_key,
+    probe_socket, read_session_key, write_session_key, RecordBinding,
 };
 
 /// A fresh launch key for a leader a launcher is about to raise.
@@ -38,18 +38,25 @@ fn check_launch(key: &str, session: &str) -> Result<()> {
     Ok(())
 }
 
-/// Bind the launch leader on *key*, serving *session*, to *team*.*member*.
+/// Bind the launch leader on *key*, serving *session*, to *team*.*member*
+/// of the team instance *created_at* (a `team::created_at_key`).
 ///
 /// The leader must be listening and its session record must name
 /// *session* (a record missing after a launcher restart is rewritten from
-/// the arguments, never guessed). A member already aliased to another
-/// launch, or with a leader of its own, is refused: nothing here replaces
-/// an engine. *pane* is display and takes no part.
+/// the arguments, never guessed). The record then takes the member's
+/// binding — the same fields a mint writes, so a revival after the leader
+/// has exited checks this member against the registry the way it checks a
+/// spawned one — and only then is the alias published; an alias refused
+/// puts the record's previous binding back, so a failed bind leaves no
+/// half-bound record. A member already aliased to another launch, or with
+/// a leader of its own, is refused: nothing here replaces an engine.
+/// *pane* is display and takes no part.
 pub fn bind_launch(
     key: &str,
     session: &str,
     cwd: &str,
     team: &str,
+    created_at: &str,
     member: &str,
     _pane: &str,
 ) -> Result<()> {
@@ -58,23 +65,40 @@ pub fn bind_launch(
     if !probe_socket(&launch_sock) {
         bail!("launch leader {key} is not listening");
     }
-    match read_session_key(key) {
+    let binding = RecordBinding {
+        team: team.to_string(),
+        created_at: created_at.to_string(),
+        member: member.to_string(),
+    };
+    let prior = match read_session_key(key) {
         Some(record) if record.session_id != session => bail!(
             "launch {key} serves session {}, not {session}",
             record.session_id
         ),
-        Some(_) => {}
-        None => write_session_key(key, session, cwd)?,
-    }
+        Some(record) => {
+            bind_session_key(key, Some(&binding))?;
+            record.binding
+        }
+        None => {
+            write_session_key(key, session, cwd, Some(&binding))?;
+            None
+        }
+    };
     let member_key = member_key(team, member);
-    let _lock = alias_lock(&member_key)?;
-    let own_sock = super::grok_home()
-        .join("hive")
-        .join(format!("{member_key}.sock"));
-    if own_sock.exists() {
-        bail!("{member_key} already has a leader of its own");
+    let published = (|| {
+        let _lock = alias_lock(&member_key)?;
+        let own_sock = super::grok_home()
+            .join("hive")
+            .join(format!("{member_key}.sock"));
+        if own_sock.exists() {
+            bail!("{member_key} already has a leader of its own");
+        }
+        publish_alias(&member_key, key)
+    })();
+    if published.is_err() {
+        let _ = bind_session_key(key, prior.as_ref());
     }
-    publish_alias(&member_key, key)
+    published
 }
 
 /// The member's alias lock, held across every alias read-then-write: a
@@ -128,8 +152,10 @@ fn publish_alias(member_key: &str, key: &str) -> Result<()> {
     }
 }
 
-/// Undo `bind_launch`: the member's alias goes when it names *key*. The
-/// leader and its session record stay the launcher's, untouched.
+/// Undo `bind_launch`: the member's alias goes when it names *key*, and
+/// with it the binding the record took for this member — only that one;
+/// a record since bound to another member keeps that binding. The leader
+/// and its session record stay the launcher's, untouched otherwise.
 pub fn rollback_launch(
     key: &str,
     session: &str,
@@ -142,6 +168,14 @@ pub fn rollback_launch(
     let _lock = alias_lock(&member_key)?;
     if alias_target(&member_key).as_deref() == Some(key) {
         fs::remove_file(alias_path_for_key(&member_key))?;
+    }
+    let bound_here = read_session_key(key).is_some_and(|record| {
+        record
+            .binding
+            .is_some_and(|binding| binding.team == team && binding.member == member)
+    });
+    if bound_here {
+        bind_session_key(key, None)?;
     }
     Ok(())
 }

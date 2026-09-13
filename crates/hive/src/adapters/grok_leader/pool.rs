@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
+use super::binding::binding_holds;
 use super::client::{GrokStdioClient, PromptResult, SessionRuntime};
 use super::daemon::{kill_daemon_key, probe_socket, spawn_member_daemon};
 use super::keys::{
     member_from_key, member_key, read_pane_session, read_session_key, resolve_pane_key,
-    socket_path_for_key, write_session_key,
+    socket_path_for_key, write_session_key, RecordBinding,
 };
 use super::{CANCEL_SENT, CONNECT_COOLDOWN, PROMPT_QUEUED};
 
@@ -22,6 +24,39 @@ use super::{CANCEL_SENT, CONNECT_COOLDOWN, PROMPT_QUEUED};
 pub struct PromptId {
     pub generation: u64,
     pub rid: u64,
+}
+
+/// What a revival left: whether it raised the leader (`false` for a member
+/// that was online — a no-op, not a failure) and the session's state as the
+/// handshake's `session/load` replayed it. The state is a snapshot the
+/// caller's own gate reads for itself; nothing here says the turn is
+/// closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Revival {
+    pub raised: bool,
+    pub input_state: String,
+    pub turn_open: Option<bool>,
+}
+
+/// Why a revival did not end with a client on the member's session. Told
+/// apart because a caller may act on them differently: a binding that does
+/// not hold is a dead member, a leader that did not start or answer the
+/// handshake is one to report, never to retire on this evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviveFailure {
+    NotRetained(String),
+    LeaderStart(String),
+    Handshake(String),
+}
+
+impl fmt::Display for ReviveFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReviveFailure::NotRetained(reason) => write!(f, "not retained: {reason}"),
+            ReviveFailure::LeaderStart(reason) => write!(f, "leader did not start: {reason}"),
+            ReviveFailure::Handshake(reason) => write!(f, "handshake failed: {reason}"),
+        }
+    }
 }
 
 /// What the pool's delivery paths need from a client. GrokStdioClient is the
@@ -113,8 +148,11 @@ fn key_is_rostered(key: &str) -> bool {
 
 #[derive(Default)]
 pub(super) struct PoolState {
-    clients: HashMap<String, Arc<GrokStdioClient>>,
+    pub(super) clients: HashMap<String, Arc<GrokStdioClient>>,
     pub(super) cooldown: HashMap<String, Instant>,
+    /// The client generation the last `revive_key` confirmed per key: a
+    /// submission on a revived key goes out on that client or not at all.
+    confirmed: HashMap<String, u64>,
 }
 
 /// One persistent stdio client per daemon key.
@@ -187,9 +225,10 @@ impl GrokClientPool {
     /// None: no daemon, no session record, an rpc error, or an ack timeout.
     /// A busy session is not bounced — the leader queues the prompt FIFO and
     /// runs it when the current turn ends, the same as typing into the TUI.
+    /// A leader that is gone is not raised here: that is `revive_key`, run
+    /// by the submission's entry before its gate.
     pub fn send_to_key(&self, key: &str, text: &str) -> Option<&'static str> {
-        self.wake_for_submission(key);
-        let client = self.acting_client(key)?;
+        let client = self.submission_client(key)?;
         match client.prompt(text) {
             Ok(true) => Some(PROMPT_QUEUED),
             _ => None,
@@ -200,9 +239,8 @@ impl GrokClientPool {
     /// the connection and request ids let `prompt_result_for_key` read the
     /// turn's outcome. `Err` covers no daemon and no session record too.
     pub fn dispatch_to_key(&self, key: &str, text: &str) -> Result<PromptId, String> {
-        self.wake_for_submission(key);
         let client = self
-            .acting_client(key)
+            .submission_client(key)
             .ok_or_else(|| format!("no grok leader client on {key}"))?;
         let rid = client.prompt_tracked(text).map_err(|e| e.to_string())?;
         Ok(PromptId {
@@ -302,19 +340,91 @@ impl GrokClientPool {
         Some(client)
     }
 
-    /// Only a new submission wakes a parked member; runtime reads keep their
-    /// existing probe-only path. Load the retained session instead of minting one.
-    fn wake_for_submission(&self, key: &str) {
-        let Some((team, member)) = member_from_key(key) else {
-            return;
-        };
-        if read_session_key(key).is_some()
-            && key_is_rostered(key)
-            && !probe_socket(&socket_path_for_key(key))
-            && spawn_member_daemon(&team, &member)
+    /// The client a submission goes out on.
+    ///
+    /// A key this pool has revived (`revive_key`) submits only on the
+    /// client that revival confirmed — the same connection, alive, still
+    /// on the session the record names. The binding is not reinterpreted
+    /// down here: a client rebound since (another generation), a record
+    /// that names another session, or a leader that is gone fails the
+    /// submission, and nothing on this path loads the new session or
+    /// raises a leader; a stale client is closed. A key this pool never
+    /// revived (a spawning or joining CLI's own pool) binds once to a
+    /// leader already listening — `client_for_key` never spawns.
+    fn submission_client(&self, key: &str) -> Option<Arc<dyn LeaderClient>> {
+        #[cfg(test)]
         {
-            self.state.lock().unwrap().cooldown.remove(key);
+            if let Some(factory) = self.client_override.lock().unwrap().as_ref() {
+                return factory(key);
+            }
         }
+        let (held, confirmed) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.clients.get(key).cloned(),
+                state.confirmed.get(key).copied(),
+            )
+        };
+        let Some(generation) = confirmed else {
+            return self
+                .client_for_key(key)
+                .map(|client| client as Arc<dyn LeaderClient>);
+        };
+        let client = held?;
+        if client.generation() != generation {
+            return None;
+        }
+        let on_record = read_session_key(key).is_some_and(|record| {
+            client.session_id().as_deref() == Some(record.session_id.as_str())
+        });
+        if client.is_alive() && on_record {
+            return Some(client);
+        }
+        client.close();
+        self.state.lock().unwrap().clients.remove(key);
+        None
+    }
+
+    /// Bring a member's session back under a client before a submission:
+    /// the one path that raises a leader for a member.
+    ///
+    /// Only for a member whose record still names it (`binding_holds`,
+    /// checked here and now — a runtime's `retained` is a snapshot). A
+    /// leader already listening is reused, so an online member is a
+    /// no-op that reports `raised: false`; otherwise the member daemon is
+    /// raised on the record's key. Either way the connect cooldown a cold
+    /// runtime read may have left is cleared before the handshake, which
+    /// `session/load`s the recorded session. No prompt goes out and no
+    /// bus row is written: the caller's gate reads the loaded state next.
+    pub fn revive_key(&self, key: &str) -> Result<Revival, ReviveFailure> {
+        let binding = binding_holds(key).map_err(ReviveFailure::NotRetained)?;
+        let raised = if probe_socket(&socket_path_for_key(key)) {
+            false
+        } else {
+            if !spawn_member_daemon(&binding.team, &binding.member) {
+                return Err(ReviveFailure::LeaderStart(format!(
+                    "the leader for {key} did not come up"
+                )));
+            }
+            true
+        };
+        self.state.lock().unwrap().cooldown.remove(key);
+        let client = self.acting_client(key).ok_or_else(|| {
+            ReviveFailure::Handshake(format!("no client came up on {key} after the handshake"))
+        })?;
+        self.state
+            .lock()
+            .unwrap()
+            .confirmed
+            .insert(key.to_string(), client.generation());
+        Ok(Revival {
+            raised,
+            input_state: client
+                .runtime()
+                .map(|runtime| runtime.input_state)
+                .unwrap_or_else(|| "unknown".to_string()),
+            turn_open: client.turn_open(),
+        })
     }
 
     fn set_cooldown(&self, key: &str) {
@@ -435,15 +545,29 @@ pub fn session_id_for_pane(pane: &str) -> Option<String> {
 /// Raises the member daemon by identity, asks it for `session/new` with
 /// hive's minted id, and records the session beside the socket on success,
 /// all before any pane exists: a pane attaching later (`hive grok --resume
-/// <sid>`) is one more client of this engine. The creating client stays in
-/// the pool, already bound and folding the session's notifications.
+/// <sid>`) is one more client of this engine. The record carries the
+/// member and the team instance (*created_at*, a `team::created_at_key`)
+/// it was minted for, which is what a later revival checks it against.
+/// The creating client stays in the pool, already bound and folding the
+/// session's notifications.
 ///
 /// A failure after the daemon came up takes a leader this mint raised down
 /// with it: the spawn gives the pane back, and a leader with no record and
 /// no roster row would otherwise sit unaddressable until the hived's orphan
 /// reap. A leader that was already listening is reused, never killed.
-pub fn create_member_session(team: &str, member: &str, session_id: &str, cwd: &str) -> bool {
+pub fn create_member_session(
+    team: &str,
+    created_at: &str,
+    member: &str,
+    session_id: &str,
+    cwd: &str,
+) -> bool {
     let key = member_key(team, member);
+    let binding = RecordBinding {
+        team: team.to_string(),
+        created_at: created_at.to_string(),
+        member: member.to_string(),
+    };
     let raised_here = !probe_socket(&socket_path_for_key(&key));
     if !spawn_member_daemon(team, member) {
         return false;
@@ -464,7 +588,7 @@ pub fn create_member_session(team: &str, member: &str, session_id: &str, cwd: &s
     if !client.new_session(session_id, cwd) {
         return undo(Some(&client));
     }
-    if write_session_key(&key, session_id, cwd).is_err() {
+    if write_session_key(&key, session_id, cwd, Some(&binding)).is_err() {
         return undo(Some(&client));
     }
     pool().adopt_client(&key, client);

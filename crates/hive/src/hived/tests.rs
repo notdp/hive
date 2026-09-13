@@ -5892,6 +5892,7 @@ fn test_headless_member_runtime_grok() {
             Some(SessionRecord {
                 session_id: "sid-g".to_string(),
                 cwd: "/repo".to_string(),
+                binding: None,
             })
         })),
         ..Default::default()
