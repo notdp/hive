@@ -2001,6 +2001,55 @@ fn test_write_pane_session_on_an_aliased_member_keeps_the_launch_binding() {
 }
 
 #[test]
+fn test_write_pane_session_does_not_follow_an_alias_published_after_its_resolve() {
+    let mut bed = setup();
+    retained_member(&mut bed, "m-cedar.worker");
+    tag_cedar_worker();
+    let _old_listener = bind_leader_socket(&bed.tmp.path().join("hive/m-cedar.worker.sock"));
+    let _new_listener = bind_leader_socket(&bed.tmp.path().join("hive/l-cd34.sock"));
+    assert_eq!(canonical_key("m-cedar.worker"), "m-cedar.worker");
+    assert!(binding_holds("m-cedar.worker").is_ok());
+    set_pane_write_interleave(|| {
+        kill_daemon_key("m-cedar.worker");
+        bind_launch(
+            "l-cd34",
+            "new-session",
+            "/new-cwd",
+            "cedar",
+            "456",
+            "worker",
+            "%9",
+        )
+        .unwrap();
+        record_cedar("456", Some("new-session"));
+        assert!(binding_holds("m-cedar.worker").is_ok());
+    });
+    let err = write_pane_session("%9", SID, "/old-pane").unwrap_err();
+    assert!(err.to_string().contains("no session record"), "{err}");
+    assert_eq!(
+        read_session_key("l-cd34").unwrap(),
+        SessionRecord {
+            session_id: "new-session".to_string(),
+            cwd: "/new-cwd".to_string(),
+            binding: Some(binding("cedar", "456", "worker")),
+        }
+    );
+    assert!(!bed.tmp.path().join("hive/m-cedar.worker.session").exists());
+    assert!(binding_holds("m-cedar.worker").is_ok());
+}
+
+#[test]
+fn test_write_pane_session_creates_a_pane_record_but_not_a_member_one() {
+    let bed = setup();
+    write_pane_session("%7", "sid-3", "/w").unwrap();
+    assert_eq!(read_session_key("p7").unwrap().session_id, "sid-3");
+    tag_cedar_worker();
+    let err = write_pane_session("%9", SID, CWD).unwrap_err();
+    assert!(err.to_string().contains("no session record"), "{err}");
+    assert!(!bed.tmp.path().join("hive/m-cedar.worker.session").exists());
+}
+
+#[test]
 fn test_list_daemon_keys_filters_to_daemon_sockets() {
     let bed = setup();
     let hive_dir = bed.tmp.path().join("hive");
