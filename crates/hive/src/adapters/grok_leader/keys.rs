@@ -226,12 +226,35 @@ pub fn bind_session_key(key: &str, binding: Option<&RecordBinding>) -> Result<()
 /// that binding stays when the TUI carries the same session, so the record
 /// the mint bound is not unbound by the launch that follows it. Another
 /// session on the key is a record the mint did not write; it starts unbound.
+///
+/// A member aliased to a launch writes the launch's record, under the
+/// launch's lock like every other read-then-write of it (`handoff`): a
+/// rollback or a rebind landing between the resolve and the write would
+/// otherwise have this write carry a stale session and binding onto
+/// whatever record the member resolves to by then. The alias is resolved
+/// again under the lock; a member no longer naming the locked launch is
+/// refused rather than re-targeted.
 pub fn write_pane_session(pane: &str, session_id: &str, cwd: &str) -> Result<()> {
     let key = resolve_pane_key(pane);
-    let binding = read_session_key(&key)
+    let target = canonical_key(&key);
+    if !is_launch_key(&target) {
+        return write_session_keeping_binding(&key, session_id, cwd);
+    }
+    #[cfg(test)]
+    super::tests::pane_write_interleave();
+    let _lock = super::handoff::launch_lock(&target)?;
+    anyhow::ensure!(
+        canonical_key(&key) == target,
+        "{key} no longer resolves to launch {target}"
+    );
+    write_session_keeping_binding(&target, session_id, cwd)
+}
+
+fn write_session_keeping_binding(key: &str, session_id: &str, cwd: &str) -> Result<()> {
+    let binding = read_session_key(key)
         .filter(|record| record.session_id == session_id)
         .and_then(|record| record.binding);
-    write_session_key(&key, session_id, cwd, binding.as_ref())
+    write_session_key(key, session_id, cwd, binding.as_ref())
 }
 
 /// The session hive minted for a key, with the cwd recorded at spawn and
