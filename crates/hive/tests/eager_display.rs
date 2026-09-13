@@ -12,7 +12,7 @@ use std::process::{Command, Output, Stdio};
 use serde_json::Value;
 
 mod common;
-use common::{kill_session, private_server, require_tmux, run_tmux};
+use common::{kill_session, private_server, require_tmux, run_tmux, PtyClient};
 
 /// Env markers that would give the binary an engine or tmux identity — or,
 /// for a fixture registered as a desktop session, the developer's real
@@ -28,6 +28,10 @@ const IDENTITY_VARS: &[&str] = &[
 
 struct Rig {
     tmp: tempfile::TempDir,
+    /// Where the rig's hive home, workspace and `bin/hive` live: the temp
+    /// dir itself, or a directory under it whose name is the point of the
+    /// test (a path with shell-special characters).
+    root: PathBuf,
     team: String,
     /// The rig's private bin dir first, then the developer's PATH: the
     /// built `hive` under test and every stub CLI live there. tmux gives a
@@ -42,10 +46,21 @@ struct Rig {
 
 impl Rig {
     fn new(tag: &str) -> Self {
+        Rig::new_under(tag, "")
+    }
+
+    /// A rig whose home, workspace and `bin/hive` sit under *sub* of the
+    /// temp dir ("" for the temp dir itself).
+    fn new_under(tag: &str, sub: &str) -> Self {
         require_tmux();
         let tmp = tempfile::tempdir().expect("temp dir");
-        std::fs::create_dir_all(tmp.path().join("ws")).expect("workspace dir");
-        let bin = tmp.path().join("bin");
+        let root = if sub.is_empty() {
+            tmp.path().to_path_buf()
+        } else {
+            tmp.path().join(sub)
+        };
+        std::fs::create_dir_all(root.join("ws")).expect("workspace dir");
+        let bin = root.join("bin");
         std::fs::create_dir_all(&bin).expect("bin dir");
         // A pane command is `hive <cli> --resume …`, resolved by the pane
         // shell: this link, not the developer's installed binary, is what
@@ -60,16 +75,24 @@ impl Rig {
         Rig {
             path,
             tmp,
+            root,
             team: format!("hivetest-{tag}-{}", std::process::id()),
         }
     }
 
     fn home(&self) -> PathBuf {
-        self.tmp.path().join(".hive")
+        self.root.join(".hive")
     }
 
     fn ws(&self) -> PathBuf {
-        self.tmp.path().join("ws")
+        self.root.join("ws")
+    }
+
+    /// The `hive` the rig's hooks name: the link under its root when that
+    /// is not the temp dir (the binary path is then part of the test), else
+    /// the built binary itself.
+    fn hive_bin(&self) -> Option<PathBuf> {
+        (self.root != self.tmp.path()).then(|| self.root.join("bin").join("hive"))
     }
 
     /// Where tmux keeps the private server's socket (created on first use).
@@ -90,6 +113,11 @@ impl Rig {
     /// (the tab separators below would come back as `_`); the binary under
     /// test fixes its own locale up in `main`, this client has to ask.
     fn tmux(&self, args: &[&str]) -> Output {
+        self.tmux_cmd(args).output().expect("tmux runs")
+    }
+
+    /// A tmux client command on the private server, env set, not yet run.
+    fn tmux_cmd(&self, args: &[&str]) -> Command {
         // `-S`: by explicit socket, so a client outliving the temp dir can
         // never fall through to the developer's default server (tmux does
         // that silently when TMUX_TMPDIR names a missing directory).
@@ -113,7 +141,38 @@ impl Rig {
         for key in IDENTITY_VARS {
             cmd.env_remove(key);
         }
-        cmd.output().expect("tmux runs")
+        cmd
+    }
+
+    /// A terminal arriving at the team session: `tmux attach` on a pty,
+    /// the way a human's terminal attaches — what fires the session's
+    /// `client-attached` hook. *env* is the human's shell environment on
+    /// top of the rig's; the hook runs under the server's, not this.
+    fn attach_client(&self, env: &[(&str, &str)]) -> PtyClient {
+        let mut cmd = self.tmux_cmd(&["attach", "-t", &format!("={}", self.team)]);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let client = PtyClient::spawn(cmd);
+        let pid = client.pid().to_string();
+        wait_until("the terminal client to attach", || {
+            self.tmux_ok(&["list-clients", "-F", "#{client_pid}"])
+                .lines()
+                .any(|line| line == pid)
+        });
+        client
+    }
+
+    /// The team session's wake hook entries as tmux lists them, one line
+    /// each — asked by session id, the target the hooks were set on.
+    fn wake_hooks(&self) -> Vec<String> {
+        self.tmux_ok(&["show-hooks", "-t", &self.session_id(&self.team)])
+            .lines()
+            .filter(|line| {
+                line.starts_with("client-attached") || line.starts_with("client-session-changed")
+            })
+            .map(str::to_string)
+            .collect()
     }
 
     fn tmux_ok(&self, args: &[&str]) -> String {
@@ -175,6 +234,9 @@ impl Rig {
             .env("HIVE_VIEW_THEME", "light");
         for key in IDENTITY_VARS {
             cmd.env_remove(key);
+        }
+        if let Some(bin) = self.hive_bin() {
+            cmd.env("HIVE_BIN", bin);
         }
         if let Some((socket, pane)) = inside {
             cmd.env("TMUX", format!("{socket},{},0", std::process::id()));
@@ -1585,4 +1647,331 @@ fn test_attach_restores_the_dragged_arrangement_of_a_rebuilt_window() {
     assert!(doc.get("drag").is_none(), "{doc}");
     rig.delete();
     assert!(session_alive(&rig, "human"));
+}
+
+// --- wake hooks -------------------------------------------------------------
+
+fn owner(ws: &std::path::Path) -> Option<Value> {
+    let text = std::fs::read_to_string(ws.join("run").join("hived.owner.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// `pid` and command line of every `--hived <ws>` process on the machine.
+fn hived_processes(ws: &std::path::Path) -> Vec<(i64, String)> {
+    let out = Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .expect("ps runs");
+    let needle = format!("--hived {} ", ws.display());
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let (pid, command) = line.split_once(' ')?;
+            if !command.contains(&needle) {
+                return None;
+            }
+            Some((pid.parse().ok()?, command.trim().to_string()))
+        })
+        .collect()
+}
+
+/// The desk on *ws* answers a ping as *team* under *home*: the identity
+/// the CLI accepts, not just a socket file.
+fn matching_ping(ws: &std::path::Path, team: &str, home: &std::path::Path) -> bool {
+    hive::hived::request_ping(ws.to_str().unwrap()).is_some_and(|identity| {
+        identity["ok"] == Value::Bool(true)
+            && identity["team"] == Value::String(team.to_string())
+            && identity["hiveHome"] == Value::String(home.to_string_lossy().into_owned())
+            && identity["apiVersion"] == hive::hived::HIVED_API_VERSION
+    })
+}
+
+/// The `hive wake` jobs still running: both session hooks fire on an
+/// attach, and the second one waits on the startup lock until the first
+/// has the desk up — a straggler that a delete must not race.
+fn wake_jobs() -> usize {
+    let out = Command::new("ps")
+        .args(["-axo", "command="])
+        .output()
+        .expect("ps runs");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| line.contains(" wake --session "))
+        .count()
+}
+
+fn marker_path(ws: &std::path::Path) -> PathBuf {
+    hive::hived::asleep_marker_path(ws.to_str().unwrap())
+}
+
+fn marker(ws: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(marker_path(ws)).ok()
+}
+
+/// The desk retires and leaves the marker a desk that nobody watched
+/// leaves — the state a session hook finds after `hived.sleep unwatched`.
+fn retire_unwatched(ws: &std::path::Path) {
+    hive::hived::stop_hived(ws.to_str().unwrap());
+    wait_until("the desk to leave", || {
+        owner(ws).is_none() && hived_processes(ws).is_empty()
+    });
+    std::fs::create_dir_all(marker_path(ws).parent().unwrap()).unwrap();
+    std::fs::write(marker_path(ws), "{\"reason\":\"unwatched\",\"at\":1}\n").unwrap();
+}
+
+/// The desk of *team* is up on *ws* under *home*: a live `--hived` process
+/// whose pid the owner file names, answering a matching ping.
+fn wait_for_desk(ws: &std::path::Path, team: &str, home: &std::path::Path) -> i64 {
+    wait_until("a matching desk", || {
+        owner(ws).is_some() && matching_ping(ws, team, home)
+    });
+    let pid = owner(ws).unwrap()["pid"].as_i64().expect("owner pid");
+    let processes = hived_processes(ws);
+    assert!(
+        processes.iter().any(|(p, _)| *p == pid),
+        "owner pid {pid} is not a live hived of {}: {processes:?}",
+        ws.display()
+    );
+    pid
+}
+
+/// Two hive homes on one tmux server, the server's own environment naming
+/// the wrong one: the hook home B installed on the shared session wakes
+/// B's desk and B's alone, the same-named team of home A — a window in
+/// the very same session, an unwatched marker of its own — untouched. A
+/// window of B's team from an earlier instance wakes nothing.
+#[test]
+fn test_wake_hook_from_a_real_attach_wakes_only_the_baked_homes_instance() {
+    let rig = Rig::new_under("wake-home", "home-b");
+    let home_a = rig.tmp.path().join("home-a");
+    let ws_a = rig.tmp.path().join("ws-a");
+    std::fs::create_dir_all(&ws_a).unwrap();
+    // The server is born from a client whose HIVE_HOME is home A: what
+    // the hook would resolve if it carried no home of its own.
+    let out = rig
+        .tmux_cmd(&["new-session", "-d", "-s", "seed"])
+        .env("HIVE_HOME", &home_a)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        rig.tmux_ok(&["show-environment", "-g", "HIVE_HOME"]),
+        format!("HIVE_HOME={}", home_a.display())
+    );
+
+    // Home B's team, built with its hooks; its desk up, then retired unwatched.
+    let window_b = rig.create_outside_tmux();
+    let hooks = rig.wake_hooks();
+    assert_eq!(hooks.len(), 2, "{hooks:?}");
+    assert!(
+        hooks
+            .iter()
+            .all(|h| h.contains(&format!("HIVE_HOME={}", rig.home().display()))),
+        "{hooks:?}"
+    );
+    rig.hive_ok(&["team", "-t", &rig.team], None);
+    wait_for_desk(&rig.ws(), &rig.team, &rig.home());
+    retire_unwatched(&rig.ws());
+
+    // Home A's same-named team, its window in the same session (a shell
+    // pane there ran `hive create`), with an unwatched marker of its own.
+    let pane = rig.tmux_ok(&[
+        "new-window",
+        "-d",
+        "-t",
+        &format!("={}:", rig.team),
+        "-P",
+        "-F",
+        "#{pane_id}",
+    ]);
+    let socket = rig.socket_path();
+    let out = rig
+        .hive_cmd(
+            &["create", &rig.team, "--workspace", ws_a.to_str().unwrap()],
+            Some((&socket, &pane)),
+        )
+        .env("HIVE_HOME", &home_a)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "create under home A: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let windows = rig.team_windows();
+    assert_eq!(windows.len(), 2, "{windows:?}");
+    std::fs::create_dir_all(marker_path(&ws_a).parent().unwrap()).unwrap();
+    std::fs::write(marker_path(&ws_a), "{\"reason\":\"unwatched\",\"at\":1}\n").unwrap();
+    let marker_a = marker(&ws_a);
+    assert!(owner(&ws_a).is_none());
+    // The create from a shell pane installed nothing: still B's two entries.
+    assert_eq!(rig.wake_hooks(), hooks);
+
+    // A terminal arrives: the session hook wakes B's desk.
+    let client = rig.attach_client(&[("HIVE_HOME", home_a.to_str().unwrap())]);
+    let pid = wait_for_desk(&rig.ws(), &rig.team, &rig.home());
+    assert!(
+        marker(&rig.ws()).is_none(),
+        "the woken desk clears its marker"
+    );
+    // Home A: no desk, no owner, no socket, the marker byte for byte.
+    hold_for_ticks("home A untouched", || {
+        owner(&ws_a).is_none()
+            && hived_processes(&ws_a).is_empty()
+            && !hive::hived::socket_path(ws_a.to_str().unwrap()).exists()
+            && marker(&ws_a) == marker_a
+    });
+    let (_, argv) = hived_processes(&rig.ws())
+        .into_iter()
+        .find(|(p, _)| *p == pid)
+        .unwrap();
+    eprintln!("woken hived: pid {pid} argv {argv}");
+    assert!(argv.contains(&format!("--hived {} {}", rig.ws().display(), rig.team)));
+    // The woken desk reinstalled its hooks in place: still one entry each.
+    assert_eq!(rig.wake_hooks(), hooks);
+    drop(client);
+
+    // The same window retagged as an earlier instance of B's team: the
+    // hook fires again and starts nothing.
+    retire_unwatched(&rig.ws());
+    let marker_b = marker(&rig.ws());
+    rig.tmux_ok(&["set-option", "-w", "-t", &window_b, "@hive-created", "1"]);
+    let _client = rig.attach_client(&[]);
+    hold_for_ticks("a stale instance stays asleep", || {
+        owner(&rig.ws()).is_none()
+            && hived_processes(&rig.ws()).is_empty()
+            && marker(&rig.ws()) == marker_b
+            && owner(&ws_a).is_none()
+            && marker(&ws_a) == marker_a
+    });
+}
+
+/// The rig's binary, hive home and workspace all sit on a path with a
+/// space, `$`, a single and a double quote: the hook tmux stores runs
+/// that path and wakes the desk on that workspace.
+#[test]
+fn test_wake_hook_executes_from_special_character_paths() {
+    let rig = Rig::new_under("wake-quote", "we ird$'\"x");
+    assert!(rig.home().to_str().unwrap().contains("$'\""));
+    let bin = rig.hive_bin().unwrap();
+    assert!(bin.exists());
+
+    rig.create_outside_tmux();
+    let hooks = rig.wake_hooks();
+    assert_eq!(hooks.len(), 2, "{hooks:?}");
+    eprintln!("stored hook: {}", hooks[0]);
+    // tmux prints the stored command with its own escapes on top; undone,
+    // the stored line carries the path shell-quoted, quote and dollar
+    // intact — the space, `$`, `'` and `"` all went in escaped for tmux.
+    let stored = hive::shell::tmux_dquote_unescape(&hooks[0]);
+    let quoted_home = hive::shell::shlex_quote(rig.home().to_str().unwrap());
+    assert!(
+        stored.contains(&format!("HIVE_HOME={quoted_home} ")),
+        "{stored}"
+    );
+    assert!(
+        stored.contains(&format!(
+            "{} wake --session #{{q:session_id}}",
+            hive::shell::shlex_quote(bin.to_str().unwrap())
+        )),
+        "{stored}"
+    );
+    rig.hive_ok(&["team", "-t", &rig.team], None);
+    wait_for_desk(&rig.ws(), &rig.team, &rig.home());
+    retire_unwatched(&rig.ws());
+
+    let _client = rig.attach_client(&[]);
+    let pid = wait_for_desk(&rig.ws(), &rig.team, &rig.home());
+    let (_, argv) = hived_processes(&rig.ws())
+        .into_iter()
+        .find(|(p, _)| *p == pid)
+        .unwrap();
+    eprintln!("woken hived: pid {pid} argv {argv}");
+    // The desk was started by the hook's binary on the special-path
+    // workspace: its argv names both, unmangled.
+    assert!(
+        argv.contains(&format!("--hived {} {}", rig.ws().display(), rig.team)),
+        "{argv}"
+    );
+    assert!(argv.starts_with(bin.to_str().unwrap()), "{argv}");
+    assert!(marker(&rig.ws()).is_none());
+}
+
+/// A wake whose desk cannot bind its socket leaves the unwatched marker
+/// as it was, so the next terminal's arrival tries again; once the bind
+/// can succeed the desk comes up and the marker goes.
+#[test]
+fn test_wake_after_a_failed_bind_keeps_the_marker_then_succeeds() {
+    let rig = Rig::new("wake-bind");
+    let window = rig.create_outside_tmux();
+    rig.hive_ok(&["team", "-t", &rig.team], None);
+    wait_for_desk(&rig.ws(), &rig.team, &rig.home());
+    // Where this workspace's notify log is, from `hive doctor` while the
+    // desk is up (a shell pane of the team window, bound to the team).
+    let socket = rig.socket_path();
+    let team_pane = rig.panes(&window)[0].0.clone();
+    rig.tmux_ok(&[
+        "set-option",
+        "-p",
+        "-t",
+        &team_pane,
+        "@hive-team",
+        &rig.team,
+    ]);
+    rig.tmux_ok(&["set-option", "-p", "-t", &team_pane, "@hive-role", "shell"]);
+    let doctor = rig.hive(&["doctor"], Some((&socket, &team_pane)));
+    let report: Value = serde_json::from_str(&String::from_utf8_lossy(&doctor.stdout))
+        .unwrap_or_else(|err| {
+            panic!(
+                "doctor json ({err}): stdout={} stderr={}",
+                String::from_utf8_lossy(&doctor.stdout),
+                String::from_utf8_lossy(&doctor.stderr)
+            )
+        });
+    let notify_log = PathBuf::from(
+        report["logs"]["notify"]
+            .as_str()
+            .unwrap_or_else(|| panic!("logs.notify in the doctor report: {report}")),
+    );
+    retire_unwatched(&rig.ws());
+    let marker_before = marker(&rig.ws()).unwrap();
+
+    // The socket path is taken by a directory: the spawned desk cannot
+    // bind, reports it, and leaves the marker byte for byte.
+    let socket_path = hive::hived::socket_path(rig.ws().to_str().unwrap());
+    std::fs::create_dir_all(&socket_path).unwrap();
+    let events = |name: &str| -> usize {
+        std::fs::read_to_string(&notify_log)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(name))
+            .count()
+    };
+    let starts_before = events("hived.start");
+    let client = rig.attach_client(&[]);
+    wait_until("the bind failure to be reported", || {
+        events("hived.socket_bind_failed") >= 1
+    });
+    hold_for_ticks("the marker kept and no desk up", || {
+        marker(&rig.ws()).as_deref() == Some(marker_before.as_str())
+            && owner(&rig.ws()).is_none()
+            && hived_processes(&rig.ws()).is_empty()
+    });
+    assert!(
+        events("hived.start") > starts_before,
+        "the hook did start a desk"
+    );
+    drop(client);
+
+    // The obstacle gone, the next arrival wakes the desk for real.
+    std::fs::remove_dir(&socket_path).unwrap();
+    let _client = rig.attach_client(&[]);
+    wait_for_desk(&rig.ws(), &rig.team, &rig.home());
+    assert!(
+        marker(&rig.ws()).is_none(),
+        "the ready desk cleared the marker"
+    );
+    wait_until("the wake jobs to finish", || wake_jobs() == 0);
+    rig.delete();
 }

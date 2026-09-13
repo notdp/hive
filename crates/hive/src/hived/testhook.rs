@@ -72,7 +72,8 @@ pub struct Hook {
     #[allow(clippy::type_complexity)]
     pub list_windows_snapshot: Option<F0<(Option<Vec<crate::tmux::WindowExtra>>, &'static str)>>,
     pub watching_clients: Option<S1<Option<usize>>>,
-    pub install_wake_hooks: Option<S2<()>>,
+    pub install_wake_hooks: Option<S1<Result<(), String>>>,
+    pub remove_wake_hooks: Option<S1<()>>,
     // agent_cli
     pub detect_cli_process_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
     pub detect_profile_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,

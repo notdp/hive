@@ -127,12 +127,17 @@ fn absent_display(
 impl SleepState {
     /// One idle check against this tick's display (*snap*, None while
     /// tmux does not answer) and the display's current location on it.
+    /// *wake_armed* says whether the display's session carries this home's
+    /// wake hooks: a desk nobody watches retires only behind hooks that
+    /// can bring it back, else it keeps its idle clock and waits for them.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn tick(
         &mut self,
         workspace: &str,
         team: &str,
         snap: Option<&TickSnapshot>,
         location: Option<&DisplayLocation>,
+        wake_armed: bool,
         owner_token: &str,
         now: f64,
     ) -> bool {
@@ -171,6 +176,11 @@ impl SleepState {
         if now - since < HIVED_SLEEP_AFTER_SECONDS || requests_in_flight() {
             // A read, or a request whose action is still unread, holds a
             // lease through its reply but does not renew the desk.
+            return false;
+        }
+        if reason == "unwatched" && !wake_armed {
+            // Only a session hook brings an unwatched desk back: without
+            // one installed this would be a desk nothing can wake.
             return false;
         }
         // A cancelled attempt keeps the clock: what cancelled it was an

@@ -483,6 +483,12 @@ fn hooked_make_busy_monitor(
 struct DisplayTrack {
     location: Option<DisplayLocation>,
     monitor: Option<Arc<dyn OutputMonitor>>,
+    /// Whether this home's wake hooks are on the display's session: what a
+    /// retirement for want of a viewer needs, since nothing else brings
+    /// such a desk back. False until an install succeeds; a failed one is
+    /// retried at `wake_retry_at`.
+    wake_armed: bool,
+    wake_retry_at: f64,
 }
 
 impl DisplayTrack {
@@ -498,10 +504,46 @@ impl DisplayTrack {
         self.location.as_ref().map_or("", |l| l.session_id.as_str())
     }
 
+    /// Put this home's wake hooks on the display's session, or record the
+    /// failure for `hived.wake_hooks_failed` and a retry.
+    fn arm_wake(&mut self, workspace: &str, team: &str, now: f64) {
+        let session = self.session_id().to_string();
+        if session.is_empty() {
+            self.wake_armed = false;
+            return;
+        }
+        match hooked_install_wake_hooks(&session) {
+            Ok(()) => self.wake_armed = true,
+            Err(err) => {
+                self.wake_armed = false;
+                self.wake_retry_at = now + WAKE_HOOK_RETRY_SECONDS;
+                hooked_notify_debug_emit(
+                    workspace,
+                    "hived.wake_hooks_failed",
+                    &[
+                        ("team", Value::from(team)),
+                        ("session", Value::from(session.as_str())),
+                        ("error", Value::from(err)),
+                        ("retryInSeconds", Value::from(WAKE_HOOK_RETRY_SECONDS)),
+                    ],
+                );
+            }
+        }
+    }
+
     /// Take this tick's resolution. A change of session stops the monitor
     /// on the old one and starts one on the new, which also gets the wake
-    /// hooks; the same location again changes nothing.
-    fn follow(&mut self, workspace: &str, team: &str, next: Option<DisplayLocation>) {
+    /// hooks; the session left behind loses this home's hooks once no team
+    /// of this home shows there (*snap* says; without one nothing is
+    /// removed); the same location again changes nothing.
+    fn follow(
+        &mut self,
+        workspace: &str,
+        team: &str,
+        next: Option<DisplayLocation>,
+        snap: Option<&TickSnapshot>,
+        now: f64,
+    ) {
         if next == self.location {
             return;
         }
@@ -544,6 +586,10 @@ impl DisplayTrack {
                 monitor.stop();
             }
             set_output_busy_monitor(None);
+            let left = self.session_id().to_string();
+            if !left.is_empty() && snap.is_some_and(|snap| !snap.home_displays_in(&left)) {
+                hooked_remove_wake_hooks(&left);
+            }
             if !next_session.is_empty() {
                 let monitor = hooked_make_busy_monitor(next_session, workspace);
                 if let Some(monitor) = monitor.as_ref() {
@@ -551,8 +597,10 @@ impl DisplayTrack {
                 }
                 set_output_busy_monitor(monitor.clone());
                 self.monitor = monitor;
-                hooked_install_wake_hooks(team, next_session);
             }
+            self.location = next;
+            self.arm_wake(workspace, team, now);
+            return;
         }
         self.location = next;
     }
@@ -575,6 +623,8 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     let mut track = DisplayTrack {
         location: None,
         monitor: None,
+        wake_armed: false,
+        wake_retry_at: f64::NEG_INFINITY,
     };
     // `monotonic()` starts near zero, so a 0.0 seed would skip the first
     // periodic checks; negative infinity makes every one run on the first tick.
@@ -754,10 +804,21 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
                             .map(str::to_owned)
                     })
                 };
-                track.follow(workspace, team, snap.display_location(&instance, preferred));
+                track.follow(
+                    workspace,
+                    team,
+                    snap.display_location(&instance, preferred),
+                    Some(snap),
+                    now,
+                );
             }
-            (None, Some("no-server")) => track.follow(workspace, team, None),
+            (None, Some("no-server")) => track.follow(workspace, team, None, None, now),
             _ => {}
+        }
+        // A session whose hooks would not install is asked again, so a
+        // desk is never left where an attach could not wake it.
+        if !track.wake_armed && !track.session_id().is_empty() && now >= track.wake_retry_at {
+            track.arm_wake(workspace, team, now);
         }
 
         if now - last_window_check >= 30.0 {
@@ -824,6 +885,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             team,
             snap.as_ref(),
             track.location.as_ref(),
+            track.wake_armed,
             &owner_token,
             monotonic(),
         ) {

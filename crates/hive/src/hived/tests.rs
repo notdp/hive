@@ -7178,14 +7178,153 @@ fn test_a_starting_hived_installs_the_wake_hooks_on_its_team_session() {
     let installed = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&installed);
     testhook::update(|h| {
-        h.install_wake_hooks = Some(Arc::new(move |team, session| {
-            sink.lock().unwrap().push(format!("{team} {session}"))
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(session.to_string());
+            Ok(())
         }));
         h.wait_tick = Some(Arc::new(|| false));
     });
     hived_loop(&env.workspace, "probe", "probe:1", "@1");
     // Installed where the display was found, by session id.
-    assert_eq!(*installed.lock().unwrap(), vec!["probe $1".to_string()]);
+    assert_eq!(*installed.lock().unwrap(), vec!["$1".to_string()]);
+}
+
+/// An unwatched desk retires only behind wake hooks that installed: while
+/// tmux refuses the install the idle clock keeps running, the failure is
+/// reported and the install retried, and the first success lets the
+/// desk go.
+#[test]
+fn test_install_failure_blocks_unwatched_sleep_until_it_succeeds() {
+    let env = unwatched_probe_env(Some(0));
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    let installs = Arc::new(AtomicUsize::new(0));
+    let attempts = Arc::clone(&installs);
+    testhook::update(|h| {
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            assert_eq!(session, "$1");
+            if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err("set-hook refused".to_string())
+            } else {
+                Ok(())
+            }
+        }));
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.wait_tick = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(*n <= 3, "a desk whose hooks installed failed to sleep");
+            true
+        }));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+
+    assert_eq!(installs.load(Ordering::SeqCst), 3);
+    let failed = display_events(&env, "hived.wake_hooks_failed");
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert_eq!(failed[0]["session"], "$1");
+    assert_eq!(failed[0]["error"], "set-hook refused");
+    assert_eq!(failed[0]["retryInSeconds"], WAKE_HOOK_RETRY_SECONDS);
+    let slept = display_events(&env, "hived.sleep");
+    assert_eq!(slept.len(), 1, "{slept:?}");
+    assert_eq!(slept[0]["reason"], "unwatched");
+    // The clock was never reset by the refusals: idle since the first tick.
+    assert_eq!(slept[0]["idleSeconds"], 2.0 * HIVED_SLEEP_AFTER_SECONDS);
+    let order: Vec<String> = env
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(event, _)| event.clone())
+        .filter(|event| event == "hived.sleep" || event == "hived.wake_hooks_failed")
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            "hived.wake_hooks_failed",
+            "hived.wake_hooks_failed",
+            "hived.sleep"
+        ]
+    );
+    let marker = fs::read_to_string(asleep_marker_path(&env.workspace)).unwrap();
+    assert_eq!(asleep_reason(&marker).as_deref(), Some("unwatched"));
+}
+
+/// This home's wake hooks follow the display from session to session,
+/// and leave a session behind only when no team of this home shows there
+/// any more; the same location again installs nothing.
+#[test]
+fn test_wake_hooks_follow_display_and_remove_only_owned_entries() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    // Another team of this home, whose window sits in `$2` from tick 2 on.
+    let other_ws = env
+        ._tmp
+        .path()
+        .join("other-ws")
+        .to_string_lossy()
+        .into_owned();
+    crate::registry::record_team("other", &other_ws, "50", &[], "").unwrap();
+    let mut other = probe_window("main:4", "@5", "$2", &other_ws);
+    other.team = "other".to_string();
+    other.created = "50".to_string();
+    // A same-named window of another instance in `$3`: not this home's.
+    let mut stale = probe_window("work:2", "@6", "$3", &ws);
+    stale.created = "99".to_string();
+    let listings: Vec<Vec<WindowExtra>> = vec![
+        vec![probe_window("probe:1", "@1", "$1", &ws)],
+        vec![probe_window("main:3", "@1", "$2", &ws)],
+        vec![probe_window("main:3", "@1", "$2", &ws), other.clone()],
+        vec![
+            probe_window("work:3", "@1", "$3", &ws),
+            other.clone(),
+            stale.clone(),
+        ],
+        vec![other.clone(), stale.clone()],
+        vec![probe_window("probe:1", "@9", "$1", &ws), other.clone()],
+        vec![probe_window("probe:1", "@9", "$1", &ws), other.clone()],
+    ];
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    testhook::update(|h| {
+        let sink = Arc::clone(&log);
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("install {session}"));
+            Ok(())
+        }));
+        let sink = Arc::clone(&log);
+        h.remove_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("remove {session}"));
+        }));
+        let tick = Arc::clone(&ticks);
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let listing = listings[tick.load(Ordering::SeqCst).min(listings.len() - 1)].clone();
+            (Some(listing), "ok")
+        }));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            tick.fetch_add(1, Ordering::SeqCst) + 1 < 7
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            "install $1", // born
+            "remove $1",  // moved: nothing of this home's left in $1
+            "install $2",
+            // `other` arrives in $2: the same location, nothing to do
+            "install $3", // moved again: $2 still shows `other`, kept
+            "remove $3",  // windowless: the stale instance in $3 is not this home's
+            "install $1", // rebuilt; the repeated snapshot installs nothing
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -7312,18 +7451,18 @@ fn test_sleep_drops_owned_clients_without_parking_leaders() {
     let mut state = SleepState::default();
     // A member mid-turn is not idle: no sleep, however long the desk sits.
     gl::tests::feed_turn_open(&alpha_proc, alpha, true);
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
     // A key whose alias rebound it elsewhere is evidence nobody can read.
     gl::tests::feed_turn_open(&alpha_proc, alpha, false);
     fs::write(gl::alias_path_for_key(beta), "l-rebound").unwrap();
     assert_eq!(gl::pool().idle_owned_keys("probe"), None);
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1202.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1202.0));
     fs::remove_file(gl::alias_path_for_key(beta)).unwrap();
     assert!(!alpha_proc.terminated() && !beta_proc.terminated());
 
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1800.0));
-    assert!(state.tick(&env.workspace, "probe", None, None, "", 2401.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1800.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 2401.0));
 
     assert_eq!(display_events(&env, "hived.sleep").len(), 1);
     // The commit names the clients; they go only once the loop's teardown
@@ -7375,7 +7514,7 @@ fn test_sleep_timer_resets_when_display_returns() {
         session_id: "$1".into(),
         sessions: vec!["$1".into()],
     };
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
     assert_eq!(state.idle_since(), Some(0.0));
     // The display comes back: the clock is dropped.
     assert!(!state.tick(
@@ -7383,13 +7522,14 @@ fn test_sleep_timer_resets_when_display_returns() {
         "probe",
         Some(&snap),
         Some(&location),
+        true,
         "",
         599.0
     ));
     assert_eq!(state.idle_since(), None);
-    assert!(!state.tick(&env.workspace, "probe", Some(&snap), None, "", 601.0));
-    assert!(!state.tick(&env.workspace, "probe", Some(&snap), None, "", 1200.0));
-    assert!(state.tick(&env.workspace, "probe", Some(&snap), None, "", 1201.0));
+    assert!(!state.tick(&env.workspace, "probe", Some(&snap), None, true, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", Some(&snap), None, true, "", 1200.0));
+    assert!(state.tick(&env.workspace, "probe", Some(&snap), None, true, "", 1201.0));
     assert_eq!(
         display_events(&env, "hived.sleep")[0]["reason"],
         "window-gone"
@@ -7400,12 +7540,12 @@ fn test_sleep_timer_resets_when_display_returns() {
 fn test_sleep_obligations_reset_the_timer() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
     let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
     lease.classify("send");
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 600.0));
     drop(lease);
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1200.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1200.0));
     let path = prepare_operation(
         &env.workspace,
         "probe",
@@ -7415,21 +7555,21 @@ fn test_sleep_obligations_reset_the_timer() {
         "node",
     )
     .unwrap();
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1800.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1800.0));
     operation_terminal(&path, Map::new()).unwrap();
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 2400.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 2400.0));
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| None)));
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 3000.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 3000.0));
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 3600.0));
-    assert!(state.tick(&env.workspace, "probe", None, None, "", 4200.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 3600.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 4200.0));
 }
 
 #[test]
 fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
     for action in [
         "ping",
         "doctor",
@@ -7440,19 +7580,19 @@ fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
     ] {
         let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
         lease.classify(action);
-        assert!(!state.tick(&env.workspace, "probe", None, None, "", 599.0));
+        assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 599.0));
         drop(lease);
     }
     let mut usage = RequestLease::reserve(&mut admission().lock().unwrap());
     usage.classify("send");
     drop(usage);
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 600.0));
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
     let mut reader = RequestLease::reserve(&mut admission().lock().unwrap());
     reader.classify("ping");
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1201.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1201.0));
     drop(reader);
-    assert!(state.tick(&env.workspace, "probe", None, None, "", 1201.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 1201.0));
 }
 
 #[test]
@@ -7481,8 +7621,8 @@ fn test_sleep_drain_new_connection_cancels_retirement() {
         }));
     });
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 600.0));
     assert!(!admission().lock().unwrap().closed);
     assert!(display_events(&env, "hived.sleep").is_empty());
     assert!(
@@ -7505,7 +7645,7 @@ fn test_sleep_drain_new_connection_cancels_retirement() {
     assert_eq!(ping["ok"], true);
     settle_leases();
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
-    assert!(state.tick(&env.workspace, "probe", None, None, "", 601.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
     assert_eq!(display_events(&env, "hived.sleep").len(), 1);
     let retirement = state.take_retirement().expect("the commit holds the lock");
     server.close();
@@ -7618,8 +7758,8 @@ fn test_sleep_drain_new_node_cancels_without_interrupting_it() {
         }));
     });
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 600.0));
     assert!(!admission().lock().unwrap().closed);
     assert_eq!(pending_operations(&env.workspace), 1);
     let record = saved_operation(Path::new(&env.workspace), "nd-late");
@@ -8207,13 +8347,13 @@ fn test_busy_identity_waits_out_a_sleep_rejection_on_a_real_socket() {
 fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
     assert_eq!(state.idle_since(), Some(0.0));
     // Accepted, action not yet read: the clock runs on, the exit waits.
     let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 599.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 599.0));
     assert_eq!(state.idle_since(), Some(0.0));
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
     assert_eq!(
         state.idle_since(),
         Some(0.0),
@@ -8222,7 +8362,7 @@ fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
     assert_eq!(admission().lock().unwrap().usage, 0);
     // Classified as a read: still no renewal, still delays the exit.
     lease.classify("ping");
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
     assert_eq!(state.idle_since(), Some(0.0));
     assert_eq!(admission().lock().unwrap().usage, 0);
     drop(lease);
@@ -8237,7 +8377,7 @@ fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
             Some(Vec::new())
         }));
     });
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
     assert_eq!(arrived.load(Ordering::SeqCst), 1);
     assert_eq!(
         state.idle_since(),
@@ -8246,7 +8386,7 @@ fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
     );
     assert!(!admission().lock().unwrap().closed);
     // The next tick retires on the original deadline.
-    assert!(state.tick(&env.workspace, "probe", None, None, "", 602.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 602.0));
     assert_eq!(display_events(&env, "hived.sleep")[0]["idleSeconds"], 602.0);
     let retirement = state.take_retirement().unwrap();
     release_reexec_lock_fd_impl(Some(retirement.lock_fd));
@@ -8255,17 +8395,17 @@ fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
 
     // A classified send is use: the clock resets and runs the full 600s.
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1000.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1000.0));
     let mut send = RequestLease::reserve(&mut admission().lock().unwrap());
     send.classify("send");
     assert_eq!(admission().lock().unwrap().usage, 1);
     drop(send);
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1601.0));
     assert_eq!(state.idle_since(), None, "use resets the clock");
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1602.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1602.0));
     assert_eq!(state.idle_since(), Some(1602.0));
-    assert!(!state.tick(&env.workspace, "probe", None, None, "", 2201.0));
-    assert!(state.tick(&env.workspace, "probe", None, None, "", 2202.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 2201.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 2202.0));
     assert_eq!(display_events(&env, "hived.sleep")[1]["idleSeconds"], 600.0);
     let retirement = state.take_retirement().unwrap();
     release_reexec_lock_fd_impl(Some(retirement.lock_fd));
@@ -9323,8 +9463,9 @@ fn test_display_location_tracks_move_rename_and_rebuild() {
         h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
         h.make_busy_monitor = Some(tracked_monitors(&monitors));
         let sink = Arc::clone(&hooks);
-        h.install_wake_hooks = Some(Arc::new(move |team, session| {
-            sink.lock().unwrap().push(format!("{team} {session}"))
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(session.to_string());
+            Ok(())
         }));
         let sink = Arc::clone(&viewers_asked);
         h.watching_clients = Some(Arc::new(move |session| {
@@ -9379,7 +9520,7 @@ fn test_display_location_tracks_move_rename_and_rebuild() {
     );
     assert_eq!(
         *hooks.lock().unwrap(),
-        vec!["probe $1", "probe $2", "probe $3"]
+        vec!["$1", "$2", "$3"]
             .into_iter()
             .map(str::to_string)
             .collect::<Vec<_>>(),
@@ -9554,6 +9695,7 @@ fn test_viewers_use_exact_current_sessions() {
             "probe",
             Some(&snap),
             Some(&location),
+            true,
             "",
             now,
         )

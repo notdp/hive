@@ -59,6 +59,9 @@ pub const NOTIFY_DEBUG_HEARTBEAT_SECONDS: f64 = 30.0;
 pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_SLEEP_AFTER_SECONDS: f64 = 600.0;
+/// How long a desk waits before asking tmux again to install the wake
+/// hooks a failed install left off its session.
+pub const WAKE_HOOK_RETRY_SECONDS: f64 = 30.0;
 // The display (tmux server) is probed every tick while it answers — that
 // listing is the pane snapshot the status and view ticks read — and on a
 // doubling schedule capped here while it does not. A dead server must not

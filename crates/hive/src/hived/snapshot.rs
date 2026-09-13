@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::agent_cli::CLIProfile;
 use crate::tmux::{PaneExtra, PaneInfo, TTYProcessInfo, WindowExtra};
@@ -48,18 +48,29 @@ impl TeamInstance {
     /// the hived's whole generation.
     pub(crate) fn from_registry(team: &str, workspace: &str) -> TeamInstance {
         let created = crate::registry::load(team)
-            .and_then(|entry| {
-                entry.get("createdAt").map(|created| match created {
-                    Value::String(text) => text.clone(),
-                    other => other.to_string(),
-                })
+            .map(|entry| TeamInstance::from_entry(&entry).created)
+            .unwrap_or_default();
+        TeamInstance {
+            team: team.to_string(),
+            workspace: workspace.to_string(),
+            created,
+        }
+    }
+
+    /// The instance a registry *entry* names.
+    pub(crate) fn from_entry(entry: &Map<String, Value>) -> TeamInstance {
+        let created = entry
+            .get("createdAt")
+            .map(|created| match created {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
             })
             .and_then(|text| text.trim().parse::<f64>().ok())
             .map(crate::team::created_at_key)
             .unwrap_or_default();
         TeamInstance {
-            team: team.to_string(),
-            workspace: workspace.to_string(),
+            team: crate::json_fields::map_str(entry, "team"),
+            workspace: crate::json_fields::map_str(entry, "workspace"),
             created,
         }
     }
@@ -70,6 +81,30 @@ impl TeamInstance {
             && same_workspace(&window.workspace, &self.workspace)
             && same_created(&window.created, &self.created)
     }
+}
+
+/// Whether *window* is the display of a team this hive home holds: its
+/// tags name a registered instance — the same team, workspace and
+/// `createdAt` — under the current `HIVE_HOME`. A window of the same team
+/// name from another home or an earlier instance is not.
+pub(crate) fn window_of_this_home(window: &WindowExtra) -> bool {
+    if window.team.is_empty() {
+        return false;
+    }
+    crate::registry::load(&window.team)
+        .is_some_and(|entry| TeamInstance::from_entry(&entry).owns(window))
+}
+
+/// Whether any of *windows* in session *session_id* is a display of this
+/// hive home's: what decides whether the home's wake hooks stay on that
+/// session once one team's display leaves it.
+pub(crate) fn home_displays_in<'a>(
+    session_id: &str,
+    windows: impl IntoIterator<Item = &'a WindowExtra>,
+) -> bool {
+    windows
+        .into_iter()
+        .any(|window| window.session_id == session_id && window_of_this_home(window))
 }
 
 /// Two workspace spellings name the same directory: the tag was written
@@ -222,6 +257,16 @@ impl TickSnapshot {
                 .map(|w| w.token.clone())
                 .filter(|token| !token.is_empty()),
             None => hooked_get_window_option(window, notify_token_key()),
+        }
+    }
+
+    /// Whether a display of this hive home's is still in *session_id* on
+    /// this tick; an unanswered window listing reads as "still there", so
+    /// no hook is removed on a read that might be wrong.
+    pub(crate) fn home_displays_in(&self, session_id: &str) -> bool {
+        match self.windows.as_ref() {
+            Some(windows) => home_displays_in(session_id, windows.values()),
+            None => true,
         }
     }
 

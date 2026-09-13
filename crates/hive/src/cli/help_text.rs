@@ -647,20 +647,26 @@ Commands:
 "#
         }
         ["wake"] => {
-            r#"Usage: hive wake --window TARGET
+            r#"Usage: hive wake (--session ID | --window TARGET)
 
-  Bring the team window's hived back.
+  Bring back the hiveds of the teams a tmux session shows.
 
-  Run by the two hooks the team session carries (`client-attached`,
-  `client-session-changed`) with the session's current window as TARGET:
-  a desk that retired because no terminal was attached to its window
-  (`hived.sleep unwatched`) is started again the moment someone looks, so
-  the status bar and the pane colours are live without a hive verb being
-  typed. A window that is not a team window, or a team whose hived is
-  already up, is left alone; prints nothing and exits 0 either way.
+  Hidden: run by the two hooks hive installs on a session showing a team
+  window (`client-attached`, `client-session-changed`), which name the
+  client's session by id. Every window of that session carrying a full
+  instance tag set (team, workspace, createdAt) that names a team of this
+  hive home is looked at, once per team: a desk that retired because no
+  terminal was attached (`hived.sleep unwatched`, the `run/desk.asleep`
+  marker) is started again the moment someone looks, so the status bar
+  and the pane colours are live without a hive verb being typed. Left
+  alone: a window that is not a team window, a same-named window of
+  another hive home or an earlier instance, a team whose hived is up, and
+  a team whose desk never ran or retired for another reason (the marker
+  is missing or says otherwise). Prints nothing and exits 0 either way.
 
 Options:
-  --window TARGET  The window the client arrived at (`session:index`)
+  --session ID     The session the client arrived at (`$3`)
+  --window TARGET  A window of it (`session:index`); its session is scanned
   -h, --help       Show this message and exit.
 "#
         }
