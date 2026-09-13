@@ -149,7 +149,12 @@ impl Rig {
     /// `client-attached` hook. *env* is the human's shell environment on
     /// top of the rig's; the hook runs under the server's, not this.
     fn attach_client(&self, env: &[(&str, &str)]) -> PtyClient {
-        let mut cmd = self.tmux_cmd(&["attach", "-t", &format!("={}", self.team)]);
+        self.attach_session_client(&self.team, env)
+    }
+
+    /// `attach_client` at *session* (a name), not the team session.
+    fn attach_session_client(&self, session: &str, env: &[(&str, &str)]) -> PtyClient {
+        let mut cmd = self.tmux_cmd(&["attach", "-t", &format!("={session}")]);
         for (key, value) in env {
             cmd.env(key, value);
         }
@@ -166,10 +171,19 @@ impl Rig {
     /// The team session's wake hook entries as tmux lists them, one line
     /// each — asked by session id, the target the hooks were set on.
     fn wake_hooks(&self) -> Vec<String> {
-        self.tmux_ok(&["show-hooks", "-t", &self.session_id(&self.team)])
+        self.wake_hooks_on(&self.session_id(&self.team))
+    }
+
+    /// `wake_hooks` of the session with id *session_id*. An array every
+    /// entry has been unset from is listed as its bare name: no entry.
+    fn wake_hooks_on(&self, session_id: &str) -> Vec<String> {
+        self.tmux_ok(&["show-hooks", "-t", session_id])
             .lines()
             .filter(|line| {
-                line.starts_with("client-attached") || line.starts_with("client-session-changed")
+                line.split_once(' ').is_some_and(|(name, _)| {
+                    name.starts_with("client-attached[")
+                        || name.starts_with("client-session-changed[")
+                })
             })
             .map(str::to_string)
             .collect()
@@ -1973,5 +1987,100 @@ fn test_wake_after_a_failed_bind_keeps_the_marker_then_succeeds() {
         "the ready desk cleared the marker"
     );
     wait_until("the wake jobs to finish", || wake_jobs() == 0);
+    rig.delete();
+}
+
+/// The team window is linked into a second, human session while the desk
+/// is awake — the primary stays in the team session, and the human
+/// session's terminals count as viewers from then on. The desk arms that
+/// session too: after it retires unwatched, a terminal arriving at the
+/// human session alone brings it back. Unlinking the window takes this
+/// home's entries off that session again and leaves the team session's.
+#[test]
+fn test_wake_hook_on_a_second_session_of_the_display_wakes_the_desk() {
+    let rig = Rig::new("wake-second");
+    let window = rig.create_outside_tmux();
+    rig.hive_ok(&["team", "-t", &rig.team], None);
+    wait_for_desk(&rig.ws(), &rig.team, &rig.home());
+    let team_session = rig.session_id(&rig.team);
+    let hooks = rig.wake_hooks();
+    assert_eq!(hooks.len(), 2, "{hooks:?}");
+
+    // A human's own session, with nothing of hive's on it.
+    rig.tmux_ok(&["new-session", "-d", "-s", "human"]);
+    let human = rig.session_id("human");
+    assert_ne!(human, team_session);
+    assert!(rig.wake_hooks_on(&human).is_empty());
+    rig.tmux_ok(&["link-window", "-d", "-s", &window, "-t", "human:"]);
+    let linked: Vec<(String, String)> = rig
+        .tmux_ok(&[
+            "list-windows",
+            "-t",
+            "=human",
+            "-F",
+            "#{window_index}\t#{window_id}",
+        ])
+        .lines()
+        .filter_map(|line| {
+            let (index, id) = line.split_once('\t')?;
+            (id == window).then(|| (index.to_string(), id.to_string()))
+        })
+        .collect();
+    assert_eq!(linked.len(), 1, "{linked:?}");
+
+    // The awake desk sees the second session and arms it: one entry per
+    // hook there, the team session's untouched.
+    wait_until("the wake hooks to reach the human session", || {
+        rig.wake_hooks_on(&human).len() == 2
+    });
+    assert_eq!(rig.wake_hooks_on(&team_session), hooks);
+    assert!(
+        rig.wake_hooks_on(&human)
+            .iter()
+            .all(|h| h.contains(&format!("HIVE_HOME={}", rig.home().display()))),
+        "{:?}",
+        rig.wake_hooks_on(&human)
+    );
+    retire_unwatched(&rig.ws());
+
+    // A terminal at the human session only: its hook wakes the desk.
+    let client = rig.attach_session_client("human", &[]);
+    assert!(
+        !rig.tmux_ok(&[
+            "list-clients",
+            "-t",
+            &format!("={}", rig.team),
+            "-F",
+            "#{client_pid}"
+        ])
+        .lines()
+        .any(|line| !line.is_empty()),
+        "nothing attached to the team session"
+    );
+    let pid = wait_for_desk(&rig.ws(), &rig.team, &rig.home());
+    assert!(
+        marker(&rig.ws()).is_none(),
+        "the woken desk clears its marker"
+    );
+    let (_, argv) = hived_processes(&rig.ws())
+        .into_iter()
+        .find(|(p, _)| *p == pid)
+        .unwrap();
+    eprintln!("woken hived: pid {pid} argv {argv}");
+    assert!(argv.contains(&format!("--hived {} {}", rig.ws().display(), rig.team)));
+    // The woken desk reinstalled in place on both sessions: still one
+    // entry each.
+    assert_eq!(rig.wake_hooks_on(&team_session), hooks);
+    assert_eq!(rig.wake_hooks_on(&human).len(), 2);
+    wait_until("the wake jobs to finish", || wake_jobs() == 0);
+    drop(client);
+
+    // The window leaves the human session: this home's entries go with
+    // it; the team session keeps its own.
+    rig.tmux_ok(&["unlink-window", "-t", &format!("=human:{}", linked[0].0)]);
+    wait_until("the entries to leave the human session", || {
+        rig.wake_hooks_on(&human).is_empty()
+    });
+    assert_eq!(rig.wake_hooks_on(&team_session), hooks);
     rig.delete();
 }
