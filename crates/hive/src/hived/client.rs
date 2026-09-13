@@ -2,7 +2,7 @@
 // client side: request helpers
 // --------------------------------------------------------------------------
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -51,19 +51,16 @@ fn connect_hived(workspace: &str) -> Result<UnixStream, RequestFailure> {
     })
 }
 
-/// The reply to a request the hived took whole: every failure from here is
-/// a lost answer, not an unsent request.
-fn read_answer(mut reader: impl Read) -> Result<Map<String, Value>, RequestFailure> {
-    let lost = |e: std::io::Error| RequestFailure::AnswerLost(e.to_string());
-    let mut chunks = Vec::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = reader.read(&mut buf).map_err(lost)?;
-        if n == 0 {
-            break;
-        }
-        chunks.extend_from_slice(&buf[..n]);
-    }
+/// The reply to a request the hived took whole, read to EOF within
+/// `budget`: every failure from here is a lost answer, not an unsent
+/// request.
+fn read_answer(
+    reader: &mut FrameReader<'_>,
+    budget: Duration,
+) -> Result<Map<String, Value>, RequestFailure> {
+    let chunks = reader
+        .read_to_end(budget)
+        .map_err(|e| RequestFailure::AnswerLost(e.to_string()))?;
     if chunks.is_empty() {
         return Err(RequestFailure::AnswerLost("empty answer".to_string()));
     }
@@ -73,6 +70,17 @@ fn read_answer(mut reader: impl Read) -> Result<Map<String, Value>, RequestFailu
             "answer is not a JSON object".to_string(),
         )),
     }
+}
+
+/// Every frame a client puts on a hived connection goes through here: the
+/// one place a test can watch for a business payload written too early.
+fn write_frame(client: &UnixStream, frame: &str) -> std::io::Result<()> {
+    (&*client).write_all(frame.as_bytes())?;
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.client_wrote.clone()).flatten() {
+        f(frame);
+    }
+    Ok(())
 }
 
 fn json_line(payload: &Map<String, Value>) -> String {
@@ -90,19 +98,16 @@ pub(crate) fn request_hived_answer(
     payload: &Map<String, Value>,
     timeout: f64,
 ) -> Result<Map<String, Value>, RequestFailure> {
-    let dur = Some(Duration::from_secs_f64(timeout.max(0.001)));
+    let budget = Duration::from_secs_f64(timeout.max(0.001));
     let not_sent = |e: std::io::Error| RequestFailure::NotSent(e.to_string());
-    let mut client = connect_hived(workspace)?;
-    client.set_read_timeout(dur).map_err(not_sent)?;
-    client.set_write_timeout(dur).map_err(not_sent)?;
-    client
-        .write_all(json_line(payload).as_bytes())
-        .map_err(not_sent)?;
+    let client = connect_hived(workspace)?;
+    client.set_write_timeout(Some(budget)).map_err(not_sent)?;
+    write_frame(&client, &json_line(payload)).map_err(not_sent)?;
     // From here the whole request is with the hived: every failure is a
     // lost answer, not an unsent request.
     let lost = |e: std::io::Error| RequestFailure::AnswerLost(e.to_string());
     client.shutdown(std::net::Shutdown::Write).map_err(lost)?;
-    read_answer(&client)
+    read_answer(&mut FrameReader::new(&client), budget)
 }
 
 /// A request with a side effect on the line, sent only once the hived has
@@ -115,12 +120,15 @@ pub(crate) fn request_hived_answer(
 /// as a retiring desk closes its listener, a timeout — is `NotAdmitted`
 /// with nothing sent, and the caller may try again. From the payload write
 /// on, the conservative `AnswerLost` rule applies.
+///
+/// The admission line is read under the identity budget as a whole, the
+/// answer under the request's: a desk that drips an answer it never
+/// finishes releases the caller at the budget's end, not never.
 pub(crate) fn request_admitted(
     workspace: &str,
     payload: &Map<String, Value>,
     timeout: f64,
 ) -> Result<Map<String, Value>, RequestFailure> {
-    use std::io::BufRead;
     let not_sent = |e: std::io::Error| RequestFailure::NotSent(e.to_string());
     let action = payload
         .get("action")
@@ -128,32 +136,27 @@ pub(crate) fn request_admitted(
         .unwrap_or("")
         .to_string();
     let client = connect_hived(workspace)?;
-    let preflight_budget = Some(Duration::from_secs_f64(IDENTITY_PING_TIMEOUT));
+    let preflight_budget = Duration::from_secs_f64(IDENTITY_PING_TIMEOUT);
     client
-        .set_read_timeout(preflight_budget)
-        .map_err(not_sent)?;
-    client
-        .set_write_timeout(preflight_budget)
+        .set_write_timeout(Some(preflight_budget))
         .map_err(not_sent)?;
     let mut preflight = action_payload(ADMIT_ACTION);
     preflight.insert("forAction".to_string(), Value::from(action.clone()));
     let not_admitted =
         |what: &str, e: std::io::Error| RequestFailure::NotAdmitted(format!("{what}: {e}"));
-    (&client)
-        .write_all(json_line(&preflight).as_bytes())
+    write_frame(&client, &json_line(&preflight))
         .map_err(|e| not_admitted("preflight not sent", e))?;
-    let mut reader = std::io::BufReader::new(&client);
-    let mut line = String::new();
-    match reader.read_line(&mut line) {
-        Ok(0) => {
+    let mut reader = FrameReader::new(&client);
+    let line = match reader.read_line(preflight_budget) {
+        Ok(Some(line)) => line,
+        Ok(None) => {
             return Err(RequestFailure::NotAdmitted(
                 "hived closed the connection before admitting".to_string(),
             ))
         }
-        Ok(_) => {}
         Err(e) => return Err(not_admitted("preflight answer lost", e)),
-    }
-    let answer = match serde_json::from_str::<Value>(&line) {
+    };
+    let answer = match serde_json::from_slice::<Value>(&line) {
         Ok(Value::Object(map)) => map,
         _ => {
             return Err(RequestFailure::NotAdmitted(
@@ -179,16 +182,13 @@ pub(crate) fn request_admitted(
             api.map_or("unknown".to_string(), |v| v.to_string())
         )));
     }
-    let dur = Some(Duration::from_secs_f64(timeout.max(0.001)));
-    client.set_read_timeout(dur).map_err(not_sent)?;
-    client.set_write_timeout(dur).map_err(not_sent)?;
+    let budget = Duration::from_secs_f64(timeout.max(0.001));
+    client.set_write_timeout(Some(budget)).map_err(not_sent)?;
     // From the first payload byte the hived may have served it.
     let lost = |e: std::io::Error| RequestFailure::AnswerLost(e.to_string());
-    (&client)
-        .write_all(json_line(payload).as_bytes())
-        .map_err(lost)?;
+    write_frame(&client, &json_line(payload)).map_err(lost)?;
     client.shutdown(std::net::Shutdown::Write).map_err(lost)?;
-    read_answer(reader)
+    read_answer(&mut reader, budget)
 }
 
 pub(crate) fn request_hived(
@@ -411,6 +411,7 @@ pub fn request_runtime_snapshot(workspace: &str, pane_id: &str) -> Option<Map<St
 mod tests {
     use super::*;
     use crate::hived::testhook::{install, Hook};
+    use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::sync::Arc;
 
