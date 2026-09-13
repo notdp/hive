@@ -3491,6 +3491,125 @@ fn test_bind_and_rollback_write_nothing_before_they_hold_the_launch_lock() {
     assert_eq!(read_session_key("l-ab12").unwrap().binding, None);
 }
 
+/// A kill through the member's alias removes nothing of the launch —
+/// its session record above all, the file a bind reads and writes —
+/// before it holds the launch lock: with the lock held elsewhere, the
+/// reap runs (the process listing is where it spends its time) and the
+/// record and alias stay until the lock is released.
+#[test]
+fn test_a_member_kill_removes_the_launchs_files_only_under_the_launch_lock() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _listener = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "orch", "%3").unwrap();
+    let record_path = session_path_for_key("l-ab12");
+    let held = launch_lock("l-ab12").unwrap();
+    let (reaped_tx, reaped_rx) = std::sync::mpsc::channel();
+    let kill = thread::spawn(move || {
+        set_process_listing(move || {
+            let _ = reaped_tx.send(());
+            Vec::new()
+        });
+        kill_daemon_key("m-honey.orch");
+    });
+    reaped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while record_path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let record_survived_lock = record_path.exists();
+    let alias_during_lock = alias_target("m-honey.orch");
+    let kill_finished = kill.is_finished();
+    drop(held);
+    kill.join().unwrap();
+    assert!(
+        record_survived_lock,
+        "kill removed the session while another holder owned the launch lock; \
+         alias={alias_during_lock:?}, kill_finished={kill_finished}"
+    );
+    assert_eq!(alias_during_lock.as_deref(), Some("l-ab12"));
+    assert!(!kill_finished);
+    assert!(!record_path.exists());
+    assert!(!hive_dir.join("l-ab12.sock").exists());
+    assert!(alias_target("m-honey.orch").is_none());
+    assert!(hive_dir.join("l-ab12.bind-lock").exists());
+}
+
+/// The same boundary on the direct entry: a kill by launch key holds the
+/// launch lock before the socket and record go.
+#[test]
+fn test_a_launch_key_kill_removes_its_files_only_under_the_launch_lock() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _listener = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    write_session_key("l-ab12", "sid-1", "/w", None).unwrap();
+    let record_path = session_path_for_key("l-ab12");
+    let held = launch_lock("l-ab12").unwrap();
+    let (reaped_tx, reaped_rx) = std::sync::mpsc::channel();
+    let kill = thread::spawn(move || {
+        set_process_listing(move || {
+            let _ = reaped_tx.send(());
+            Vec::new()
+        });
+        kill_daemon_key("l-ab12");
+    });
+    reaped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    thread::sleep(Duration::from_millis(200));
+    assert!(record_path.exists(), "record removed under a held lock");
+    assert!(hive_dir.join("l-ab12.sock").exists());
+    assert!(!kill.is_finished(), "the kill did not wait for the lock");
+    drop(held);
+    kill.join().unwrap();
+    assert!(!record_path.exists());
+    assert!(!hive_dir.join("l-ab12.sock").exists());
+    assert!(hive_dir.join("l-ab12.bind-lock").exists());
+}
+
+/// The probe before the lock authorizes nothing: a bind that saw the
+/// leader, then waited for the lock while the leader went, fails once it
+/// holds the lock and publishes no alias.
+#[test]
+fn test_bind_fails_when_the_leader_vanishes_while_it_waits_for_the_launch_lock() {
+    let bed = setup();
+    let sock = bed.tmp.path().join("hive/l-ab12.sock");
+    let listener = bind_leader_socket(&sock);
+    listener.set_nonblocking(true).unwrap();
+    write_session_key("l-ab12", "sid-1", "/w", None).unwrap();
+    let held = launch_lock("l-ab12").unwrap();
+    let bind = thread::spawn(|| bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "orch", "%3"));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_probe = false;
+    while Instant::now() < deadline {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                drop(stream);
+                saw_probe = true;
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(5))
+            }
+            Err(e) => panic!("probe accept: {e}"),
+        }
+    }
+    // the probe before the lock saw a listener; it goes while the bind waits
+    drop(listener);
+    fs::remove_file(&sock).unwrap();
+    drop(held);
+    let result = bind.join().unwrap();
+    let alias = alias_target("m-honey.orch");
+    assert!(
+        saw_probe,
+        "the bind did not probe the socket before the lock"
+    );
+    let err = result.expect_err(&format!(
+        "bind succeeded after the leader disappeared while it waited; alias={alias:?}"
+    ));
+    assert!(err.to_string().contains("not listening"), "{err}");
+    assert!(alias.is_none());
+    assert_eq!(read_session_key("l-ab12").unwrap().binding, None);
+}
+
 #[test]
 fn test_stop_launch_steps_back_once_a_member_owns_the_leader() {
     let bed = setup();
@@ -3758,6 +3877,7 @@ fn override_confirmation(key: &str) -> Confirmation {
         key: key.to_string(),
         binding: binding("cedar", "123", "worker"),
         session_id: SID.to_string(),
+        socket_path: socket_path_for_key(key).to_string_lossy().into_owned(),
         generation: 0,
     }
 }
@@ -3953,10 +4073,8 @@ fn test_submission_does_not_raise_a_leader_for_a_retained_member() {
     // a confirmation this pool never made — another process's revive —
     // holds no client here and raises none
     let foreign = Confirmation {
-        key: key.to_string(),
-        binding: binding("cedar", "123", "worker"),
-        session_id: SID.to_string(),
         generation: 1,
+        ..override_confirmation(key)
     };
     assert_eq!(pool.send_confirmed(&foreign, "hello"), None);
     let err = pool.dispatch_confirmed(&foreign, "task").unwrap_err();
@@ -4350,6 +4468,94 @@ fn test_two_requests_revive_apart_and_the_earlier_confirmation_is_refused() {
     assert_eq!(*spawns.lock().unwrap(), 1);
     let client = pool.client_for_key(key).unwrap();
     teardown(&client, &proc);
+}
+
+/// The member's alias is rebound to another launch after the revive — a
+/// rollback and a bind of the same team, instance, member and session,
+/// so the record the key resolves to and the registry still agree with
+/// what was confirmed. The confirmation pinned the socket the revive
+/// resolved; the key resolves to another one now, and the submission on
+/// the earlier confirmation is refused before any prompt reaches the old
+/// leader. The client on the old socket is not the key's any more and is
+/// closed.
+#[test]
+fn test_submission_after_revive_refuses_a_member_alias_rebound_to_another_launch() {
+    let mut bed = setup();
+    let key = "m-cedar.worker";
+    retained_member(&mut bed, key);
+    let old_sock = bed.tmp.path().join("hive/l-ab12.sock");
+    let new_sock = bed.tmp.path().join("hive/l-cd34.sock");
+    let _old_listener = bind_leader_socket(&old_sock);
+    let _new_listener = bind_leader_socket(&new_sock);
+    bind_launch("l-ab12", SID, CWD, "cedar", "123", "worker", "%3").unwrap();
+    let (spawns, proc) = revivable_engine();
+    let pool = GrokClientPool::new();
+    let revival = pool.revive_key(key).unwrap();
+    assert!(!revival.raised);
+    assert_eq!(revival.confirmation.socket_path, old_sock.to_string_lossy());
+    let client = pool.client_for_key(key).unwrap();
+    assert_eq!(client.socket_path, old_sock.to_string_lossy());
+    rollback_launch("l-ab12", SID, "cedar", "123", "worker", "%3").unwrap();
+    bind_launch("l-cd34", SID, CWD, "cedar", "123", "worker", "%4").unwrap();
+    assert_eq!(canonical_key(key), "l-cd34");
+    assert_eq!(binding_holds(key).unwrap(), revival.confirmation.binding);
+    let result = pool.send_confirmed(&revival.confirmation, "review-old-launch");
+    let sent = methods(&proc);
+    assert_eq!(
+        result, None,
+        "old launch accepted a prompt after the alias moved to l-cd34: {sent:?}"
+    );
+    assert!(pool
+        .dispatch_confirmed(&revival.confirmation, "review-old-launch")
+        .is_err());
+    assert_eq!(sent, vec!["initialize", "session/load"]);
+    assert!(!client.is_alive(), "the client on the old socket is closed");
+    assert!(!pool.state.lock().unwrap().clients.contains_key(key));
+    assert_eq!(*spawns.lock().unwrap(), 0);
+    teardown(&client, &proc);
+}
+
+/// `client_for_key` on a key whose alias moved: the pooled client still
+/// connected to the old launch's socket is closed and replaced by one on
+/// the socket the key resolves to now, whichever session it serves; a
+/// revive then confirms the new socket.
+#[test]
+fn test_client_for_key_replaces_a_pooled_client_on_a_socket_the_key_no_longer_resolves_to() {
+    let mut bed = setup();
+    let key = "m-cedar.worker";
+    retained_member(&mut bed, key);
+    let old_sock = bed.tmp.path().join("hive/l-ab12.sock");
+    let new_sock = bed.tmp.path().join("hive/l-cd34.sock");
+    let _old_listener = bind_leader_socket(&old_sock);
+    let _new_listener = bind_leader_socket(&new_sock);
+    bind_launch("l-ab12", SID, CWD, "cedar", "123", "worker", "%3").unwrap();
+    let (_spawns, old_proc) = revivable_engine();
+    let pool = GrokClientPool::new();
+    let old_client = pool.client_for_key(key).unwrap();
+    assert_eq!(old_client.socket_path, old_sock.to_string_lossy());
+    assert!(Arc::ptr_eq(&old_client, &pool.client_for_key(key).unwrap()));
+    rollback_launch("l-ab12", SID, "cedar", "123", "worker", "%3").unwrap();
+    bind_launch("l-cd34", SID, CWD, "cedar", "123", "worker", "%4").unwrap();
+    let new_proc = FakeProc::new(Some(responder(Some(on_prompt_queue_echo()), vec![])));
+    let handed = Arc::clone(&new_proc);
+    set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
+    let new_client = pool.client_for_key(key).unwrap();
+    assert!(!Arc::ptr_eq(&old_client, &new_client));
+    assert_eq!(new_client.socket_path, new_sock.to_string_lossy());
+    assert!(!old_client.is_alive());
+    assert_eq!(methods(&old_proc), vec!["initialize", "session/load"]);
+    let again = pool.revive_key(key).unwrap();
+    assert!(!again.raised);
+    assert_eq!(again.confirmation.socket_path, new_sock.to_string_lossy());
+    assert_eq!(again.confirmation.generation, new_client.generation());
+    assert_eq!(
+        pool.send_confirmed(&again.confirmation, "on-the-new-launch"),
+        Some(PROMPT_QUEUED)
+    );
+    assert_eq!(prompts(&new_proc), vec!["on-the-new-launch"]);
+    assert!(prompts(&old_proc).is_empty());
+    teardown(&old_client, &old_proc);
+    teardown(&new_client, &new_proc);
 }
 
 #[test]

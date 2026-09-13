@@ -2331,6 +2331,7 @@ fn test_grok_dispatch_needs_a_revive_confirmation_and_rides_its_key() {
             member: "node".to_string(),
         },
         session_id: "sid-1".to_string(),
+        socket_path: "/grok/hive/m-team.node.sock".to_string(),
         generation: 3,
     };
     for pane in ["%1", ""] {

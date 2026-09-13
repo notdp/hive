@@ -29,17 +29,21 @@ pub struct PromptId {
 /// The identity a revival confirmed, handed to the caller that asked for
 /// it and checked again at the submission boundary: the member and the
 /// team instance (the record's binding, as the registry then agreed to
-/// it), the session the client loaded, and the connection itself (the
-/// client generation). The submission it was made for carries it to the
-/// prompt; a later revive on the same key hands its own caller another
-/// one and changes nothing about this one — a submission on a
+/// it), the session the client loaded, the leader socket the connection
+/// reaches (the key's canonical socket as the revive resolved it — the
+/// launch's, for a member bound from one), and the connection itself
+/// (the client generation). The submission it was made for carries it to
+/// the prompt; a later revive on the same key hands its own caller
+/// another one and changes nothing about this one — a submission on a
 /// confirmation whose identity is no longer the key's is refused, whether
-/// the binding stopped holding or a valid later binding replaced it.
+/// the binding stopped holding, a valid later binding replaced it, or the
+/// key resolves to another leader by now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Confirmation {
     pub key: String,
     pub binding: RecordBinding,
     pub session_id: String,
+    pub socket_path: String,
     pub generation: u64,
 }
 
@@ -88,6 +92,9 @@ pub trait LeaderClient: Send + Sync {
     fn session_id(&self) -> Option<String> {
         unreachable!("session_id not expected on this client")
     }
+    fn socket_path(&self) -> String {
+        unreachable!("socket_path not expected on this client")
+    }
     fn prompt(&self, _text: &str) -> Result<bool> {
         unreachable!("prompt not expected on this client")
     }
@@ -117,6 +124,9 @@ impl LeaderClient for GrokStdioClient {
     }
     fn session_id(&self) -> Option<String> {
         GrokStdioClient::session_id(self)
+    }
+    fn socket_path(&self) -> String {
+        self.socket_path.clone()
     }
     fn prompt(&self, text: &str) -> Result<bool> {
         Ok(GrokStdioClient::prompt(self, text))
@@ -334,14 +344,17 @@ impl GrokClientPool {
     }
 
     pub(crate) fn client_for_key(&self, key: &str) -> Option<Arc<GrokStdioClient>> {
-        // A relaunched grok on the same key mints a new session id, so the
-        // record — not just the client's liveness — decides whether the bound
-        // client is still the key's.
+        // A relaunched grok on the same key mints a new session id, and a
+        // member rebound to another launch resolves to another socket, so
+        // the record and the key's canonical socket — not just the client's
+        // liveness — decide whether the pooled client is still the key's.
         let record = read_session_key(key);
+        let sock = socket_path_for_key(key);
         {
             let mut state = self.state.lock().unwrap();
             if let Some(client) = state.clients.get(key).cloned() {
                 if client.is_alive()
+                    && client.socket_path == sock.to_string_lossy()
                     && record.is_some()
                     && client.session_id().as_deref()
                         == record.as_ref().map(|r| r.session_id.as_str())
@@ -358,7 +371,7 @@ impl GrokClientPool {
             }
         }
 
-        if record.is_none() || !probe_socket(&socket_path_for_key(key)) || !key_is_rostered(key) {
+        if record.is_none() || !probe_socket(&sock) || !key_is_rostered(key) {
             self.set_cooldown(key);
             return None;
         }
@@ -384,16 +397,20 @@ impl GrokClientPool {
 
     /// The client a confirmed submission goes out on: the connection the
     /// revive confirmed (the pooled client of that generation, alive, on
-    /// the confirmed session), and the key's identity here and now still
-    /// the confirmed one — the record naming that session and bound to
-    /// that member of that team instance, the registry agreeing
+    /// the confirmed session and the confirmed socket), and the key's
+    /// identity here and now still the confirmed one — the key resolving
+    /// to that socket, the record naming that session and bound to that
+    /// member of that team instance, the registry agreeing
     /// (`binding_holds`). Nothing is reinterpreted down here: a client
     /// rebound since (another generation) is the runtime's and is left
-    /// alone; a dead client, or one whose record names another session,
-    /// is closed; a binding that stopped holding, or a valid later binding
-    /// of the same key — the same name, another team instance — refuses
-    /// the submission while the client stays for whoever revives next.
-    /// Nothing on this path loads a session or raises a leader.
+    /// alone; a dead client, one whose record names another session, or
+    /// one on a socket the key no longer resolves to (the member's alias
+    /// rebound to another launch — the same team, instance and session
+    /// can all survive that) is closed; a binding that stopped holding,
+    /// or a valid later binding of the same key — the same name, another
+    /// team instance — refuses the submission while the client stays for
+    /// whoever revives next. Nothing on this path loads a session or
+    /// raises a leader.
     fn confirmed_client(&self, confirmation: &Confirmation) -> Option<Arc<dyn LeaderClient>> {
         #[cfg(test)]
         {
@@ -407,9 +424,11 @@ impl GrokClientPool {
             return None;
         }
         let on_session = client.session_id().as_deref() == Some(confirmation.session_id.as_str());
+        let on_socket = client.socket_path == confirmation.socket_path
+            && socket_path_for_key(key).to_string_lossy() == confirmation.socket_path;
         let on_record = read_session_key(key)
             .is_some_and(|record| record.session_id == confirmation.session_id);
-        if !client.is_alive() || !on_session || !on_record {
+        if !client.is_alive() || !on_session || !on_socket || !on_record {
             client.close();
             self.state.lock().unwrap().clients.remove(key);
             return None;
@@ -432,7 +451,10 @@ impl GrokClientPool {
     /// `session/load`s the recorded session. No prompt goes out and no
     /// bus row is written: the caller's gate reads the loaded state next,
     /// and its submission carries the `Confirmation` — the binding this
-    /// check passed, the session the client loaded, the client's
+    /// check passed, the session the client loaded, the socket the client
+    /// reaches (the key's canonical one when the client was taken — a
+    /// pooled client on a socket the key no longer resolves to is closed
+    /// and replaced by `client_for_key`, never confirmed), the client's
     /// generation — which is the caller's alone: nothing in the pool
     /// remembers it, so a second revive on the key confirms for its own
     /// caller and cannot replace what this one confirmed.
@@ -466,6 +488,7 @@ impl GrokClientPool {
                 key: key.to_string(),
                 binding,
                 session_id,
+                socket_path: client.socket_path(),
                 generation: client.generation(),
             },
         })

@@ -1366,11 +1366,21 @@ resume and fork lanes) or when a create/join binds a launch
 (`bind_launch`). A bind binds the record before it publishes the alias,
 and every write to a launch's record and to the aliases naming it — the
 bind's record write and alias publish, its restore of the binding it
-read when the alias is refused, a rollback, a kill's alias removal — runs
-under that launch's lock (`launch_lock`, `<launch>.bind-lock`): a bind
+read when the alias is refused, a rollback, a kill's removal of the
+launch's socket, pid and session files and of the alias — runs under
+that launch's lock (`launch_lock`, `<launch>.bind-lock`): a bind
 refused after another bind of the same launch succeeded puts back what
 it read under the lock, never the unbound record it would have read
-before, so the succeeded bind's record and alias survive. A rollback
+before, so the succeeded bind's record and alias survive. A kill holds
+the lock on both of its entries, the launch key itself and a member's
+alias to it; the reap of the processes precedes the lock (it takes
+seconds, signals only pids verified as that socket's leader and clients,
+and removes no file), the alias goes only while it still names the
+launch the kill reaped, and the lock file is never unlinked. A bind
+probes the leader before the lock only to fail fast: once it holds the
+lock it checks the leader and the record again, and a leader that went
+while it waited — a kill ahead of it — fails the bind before any write,
+so no alias names a launch nobody serves. A rollback
 carries the identity of its own bind — the launch, its session, and the
 team instance (`createdAt`) with the member — and undoes the alias and
 the record's binding only while nothing later owns them: a record since
@@ -1396,18 +1406,26 @@ state the load replayed: a session that loads mid-permission is
 fails is an explicit refusal, never a send into a session that did not
 load. The revive hands its caller a confirmation of the identity it
 revived — the team instance and member (the record's binding as the
-registry agreed to it), the session the client loaded, and the connection
-(the client generation) — and the submission carries that confirmation
-to the prompt. At the submission boundary the key's identity must still
-be the confirmed one, re-read there: the pooled client of that generation,
-alive, on that session; the record naming that session; the registry
-holding that binding (`binding_holds`) — and the binding must be the
-confirmed one, not merely a valid one: a record that names another
-session by then, a client rebound since, a leader gone, a team instance
-or roster row changed, or a later valid binding of the same key (the same
-name and session under another instance of the team) is a failed
-submission — nothing loads the new session or raises a leader on the
-pool's submission path, and nothing is sent twice. The confirmation is
+registry agreed to it), the session the client loaded, the leader socket
+the connection reaches (the key's canonical socket as the revive
+resolved it: the launch's, for a member bound from one), and the
+connection (the client generation) — and the submission carries that
+confirmation to the prompt. At the submission boundary the key's
+identity must still be the confirmed one, re-read there: the pooled
+client of that generation, alive, on that session and that socket; the
+key resolving to that socket; the record naming that session; the
+registry holding that binding (`binding_holds`) — and the binding must
+be the confirmed one, not merely a valid one: a record that names
+another session by then, a client rebound since, a leader gone, a team
+instance or roster row changed, a later valid binding of the same key
+(the same name and session under another instance of the team), or the
+member's alias rebound to another launch since (the same team, instance,
+member and session on another leader) is a failed submission — nothing
+loads the new session or raises a leader on the pool's submission path,
+and nothing is sent twice. The pool's own reuse of a client follows the
+same rule: a pooled client on a socket the key no longer resolves to is
+closed and replaced, never handed back as the member's, so a fresh revive
+confirms the leader the key names now. The confirmation is
 the requesting thread's own: the pool keeps no per-key record of what it
 last confirmed, so a second request's revive of the same member confirms
 for that request and can neither replace nor stand in for the first's. Where the row was already written (`bus::write_send_event`

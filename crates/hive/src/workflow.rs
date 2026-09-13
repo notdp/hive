@@ -3020,6 +3020,7 @@ mod tests {
                             member: "g".to_string(),
                         },
                         session_id: "sid-g".to_string(),
+                        socket_path: format!("/grok/hive/m-{team}.g.sock"),
                         generation: 1,
                     },
                 })

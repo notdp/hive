@@ -13,15 +13,17 @@
 //! stop and the team pane's TUI start, on either side (launcher or client),
 //! so every step is idempotent. Every write to a launch's record and to
 //! the aliases naming it — a bind's record write and alias publish, its
-//! restore when the alias is refused, a rollback, a kill's alias removal
-//! — runs under the launch's lock (`launch_lock`), so a bind that fails
-//! after another bind of the same launch succeeded restores what it read
-//! under the lock, never what it read before.
+//! restore when the alias is refused, a rollback, a kill's removal of the
+//! launch's files and of the alias — runs under the launch's lock
+//! (`launch_lock`), so a bind that fails after another bind of the same
+//! launch succeeded restores what it read under the lock, never what it
+//! read before, and a bind that waited behind a kill finds no leader once
+//! it holds the lock: what it saw before the lock authorizes nothing.
 
 use std::fs;
 use std::os::unix::io::AsRawFd;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
 
 use super::{
     alias_path_for_key, alias_target, bind_session_key, is_launch_key, kill_daemon_key, member_key,
@@ -48,15 +50,19 @@ fn check_launch(key: &str, session: &str) -> Result<()> {
 ///
 /// The leader must be listening and its session record must name
 /// *session* (a record missing after a launcher restart is rewritten from
-/// the arguments, never guessed). The record then takes the member's
-/// binding — the same fields a mint writes, so a revival after the leader
-/// has exited checks this member against the registry the way it checks a
-/// spawned one — and only then is the alias published; an alias refused
-/// puts back the binding the record held when this bind read it, under
-/// the same lock, so a failed bind leaves no half-bound record and
-/// overwrites no bind of the launch that landed since. A member already
-/// aliased to another launch, or with a leader of its own, is refused:
-/// nothing here replaces an engine. *pane* is display and takes no part.
+/// the arguments, never guessed). The leader is probed before the lock
+/// only to fail fast; every precondition is checked again under the
+/// lock, since a kill of the launch can run while the bind waits for it,
+/// and the probe before the lock authorizes no write. The record then
+/// takes the member's binding — the same fields a mint writes, so a
+/// revival after the leader has exited checks this member against the
+/// registry the way it checks a spawned one — and only then is the alias
+/// published; an alias refused puts back the binding the record held
+/// when this bind read it, under the same lock, so a failed bind leaves
+/// no half-bound record and overwrites no bind of the launch that landed
+/// since. A member already aliased to another launch, or with a leader
+/// of its own, is refused: nothing here replaces an engine. *pane* is
+/// display and takes no part.
 pub fn bind_launch(
     key: &str,
     session: &str,
@@ -68,9 +74,14 @@ pub fn bind_launch(
 ) -> Result<()> {
     check_launch(key, session)?;
     let launch_sock = super::grok_home().join("hive").join(format!("{key}.sock"));
-    if !probe_socket(&launch_sock) {
-        bail!("launch leader {key} is not listening");
-    }
+    let listening = || -> Result<()> {
+        ensure!(
+            probe_socket(&launch_sock),
+            "launch leader {key} is not listening"
+        );
+        Ok(())
+    };
+    listening()?;
     let binding = RecordBinding {
         team: team.to_string(),
         created_at: created_at.to_string(),
@@ -78,6 +89,7 @@ pub fn bind_launch(
     };
     let member_key = member_key(team, member);
     let _lock = launch_lock(key)?;
+    listening()?;
     let prior = match read_session_key(key) {
         Some(record) if record.session_id != session => bail!(
             "launch {key} serves session {}, not {session}",

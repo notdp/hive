@@ -5283,6 +5283,7 @@ fn confirmation_of(key: &str) -> Confirmation {
             member,
         },
         session_id: "sid-g".to_string(),
+        socket_path: format!("/grok/hive/{key}.sock"),
         generation: 1,
     }
 }
