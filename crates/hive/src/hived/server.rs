@@ -260,6 +260,38 @@ pub(crate) fn handle_request(
     }
 }
 
+/// The preflight a new-format client sends before a request with a side
+/// effect: one JSON line naming the action to come, answered on the same
+/// connection before any business payload is written.
+pub(crate) const ADMIT_ACTION: &str = "admit";
+
+/// The reply to a connection the shut gate refused, whichever line it
+/// carried: a preflight sees it as "not admitted", an old-format ping as a
+/// busy desk. Nothing of the request was served.
+const NOT_ADMITTED_REPLY: &[u8] =
+    b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining; request not admitted; retry later\"}\n";
+
+/// One newline-terminated JSON line, or none when the peer closed, the
+/// read timed out or the line was no object. A frame without its newline
+/// still counts at EOF.
+fn read_line_object(reader: &mut std::io::BufReader<&UnixStream>) -> Option<Map<String, Value>> {
+    use std::io::BufRead;
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => match serde_json::from_str::<Value>(&line) {
+            Ok(Value::Object(map)) => Some(map),
+            _ => Some(Map::new()),
+        },
+    }
+}
+
+fn write_line(conn: &UnixStream, response: Map<String, Value>) {
+    let mut body = serde_json::to_string(&Value::Object(response)).unwrap_or_default();
+    body.push('\n');
+    let _ = (&*conn).write_all(body.as_bytes());
+}
+
 #[allow(clippy::too_many_arguments)]
 fn serve_connection(
     conn: UnixStream,
@@ -272,23 +304,70 @@ fn serve_connection(
     mut lease: RequestLease,
 ) {
     let _ = conn.set_read_timeout(Some(Duration::from_secs_f64(read_timeout.max(0.001))));
-    let mut raw: Vec<u8> = Vec::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        match (&conn).read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => raw.extend_from_slice(&buf[..n]),
-            Err(_) => {
-                raw.clear();
-                break;
-            }
+    let _ = conn.set_write_timeout(Some(Duration::from_secs_f64(read_timeout.max(0.001))));
+    let mut reader = std::io::BufReader::new(&conn);
+    let first = read_line_object(&mut reader).unwrap_or_default();
+    let first_action = first
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let request = if first_action == ADMIT_ACTION {
+        // The lease reserved at accept spans the preflight, the body and
+        // the reply: closing the gate now cannot retire the desk under
+        // this request. A client that goes quiet after the handshake
+        // releases it with nothing served.
+        let for_action = map_get_str(&first, "forAction");
+        if for_action.is_empty() || for_action == ADMIT_ACTION {
+            write_line(&conn, err_response("admit needs the action it is for"));
+            let _ = conn.shutdown(std::net::Shutdown::Write);
+            return;
         }
-    }
-    let request = match serde_json::from_slice::<Value>(&raw) {
-        Ok(Value::Object(map)) => map,
-        _ => Map::new(),
+        let mut admitted = Map::new();
+        admitted.insert("ok".to_string(), Value::Bool(true));
+        admitted.insert("admitted".to_string(), Value::Bool(true));
+        admitted.insert("apiVersion".to_string(), Value::from(HIVED_API_VERSION));
+        write_line(&conn, admitted);
+        #[cfg(test)]
+        if let Some(f) = hookget(|h| h.after_admit.clone()).flatten() {
+            f();
+        }
+        let Some(body) = read_line_object(&mut reader) else {
+            return;
+        };
+        let action = body.get("action").and_then(Value::as_str).unwrap_or("");
+        if action != for_action {
+            write_line(
+                &conn,
+                err_response(format!(
+                    "admitted for '{for_action}', request carries '{action}'; not served"
+                )),
+            );
+            let _ = conn.shutdown(std::net::Shutdown::Write);
+            return;
+        }
+        body
+    } else if admission_required(&first_action) {
+        // An old-format side-effect request: the sender is a build that
+        // speaks an older api. Refused whole, so a payload the two builds
+        // may read differently never reaches a transport.
+        write_line(
+            &conn,
+            err_response(format!(
+                "'{first_action}' requires an admission preflight (hived api {HIVED_API_VERSION}); \
+                 the calling hive binary speaks an older api"
+            )),
+        );
+        let _ = conn.shutdown(std::net::Shutdown::Write);
+        return;
+    } else {
+        first
     };
     lease.classify(request.get("action").and_then(Value::as_str).unwrap_or(""));
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.before_handler.clone()).flatten() {
+        f();
+    }
     let (response, keep_running) = handle_request(
         workspace,
         team,
@@ -297,9 +376,11 @@ fn serve_connection(
         hived_started_at,
         &request,
     );
-    let mut body = serde_json::to_string(&Value::Object(response)).unwrap_or_default();
-    body.push('\n');
-    let _ = (&conn).write_all(body.as_bytes());
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.before_reply.clone()).flatten() {
+        f();
+    }
+    write_line(&conn, response);
     let _ = conn.shutdown(std::net::Shutdown::Write);
     // Answer first, then retire: the reply must be on the wire before the
     // loop tears the socket down.
@@ -308,8 +389,31 @@ fn serve_connection(
     }
 }
 
+/// Refuse a connection the shut gate accepted. Bounded: whatever the peer
+/// sent is drained for at most the read budget, then the reply goes out.
+/// No lease, no handler, no engine operation.
+fn reject_connection(mut conn: UnixStream) {
+    let timeout = Some(Duration::from_millis(100));
+    let _ = conn.set_read_timeout(timeout);
+    let _ = conn.set_write_timeout(timeout);
+    let mut buf = [0u8; 4096];
+    let deadline = std::time::Instant::now() + Duration::from_millis(100);
+    while std::time::Instant::now() < deadline {
+        match conn.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) if buf[..n].contains(&b'\n') => break,
+            Ok(_) => {}
+        }
+    }
+    let _ = conn.write_all(NOT_ADMITTED_REPLY);
+    let _ = conn.shutdown(std::net::Shutdown::Write);
+}
+
 /// Owns the accept worker with the socket generation. `close` joins it before
 /// the listener can be unlinked or re-executed; handlers retain their leases.
+/// The worker is the listener's only acceptor: with the gate open it hands
+/// each connection a lease and a handler thread, with it shut it refuses
+/// each one within a bounded budget, so the coordinator never accepts.
 pub(super) struct RequestServer {
     server: Arc<dyn HivedServerApi>,
     stopped: Arc<AtomicBool>,
@@ -340,13 +444,12 @@ impl RequestServer {
             .name("hived-accept".into())
             .spawn(move || {
                 while !worker_stopped.load(Ordering::SeqCst) {
-                    serve_until(worker_server.as_ref(), &context, 1.0, &worker_stopped);
-                    // Closed admission leaves queued arrivals for the coordinator's
-                    // synchronous rejection (which can cancel idle retirement).
-                    if SHUTDOWN.load(Ordering::SeqCst)
-                        || admission().lock().unwrap_or_else(|e| e.into_inner()).closed
-                    {
-                        thread::park_timeout(Duration::from_millis(100));
+                    if SHUTDOWN.load(Ordering::SeqCst) {
+                        // Retiring: every arrival is refused until the
+                        // listener closes, none is left to be reset.
+                        reject_until(worker_server.as_ref(), 0.1, &worker_stopped);
+                    } else {
+                        serve_until(worker_server.as_ref(), &context, 1.0, &worker_stopped);
                     }
                 }
             })?;
@@ -416,6 +519,53 @@ pub(crate) fn serve_requests(
     )
 }
 
+/// Accept one connection if the listener has one, under the admission
+/// lock: with the gate open the connection gets a lease and a handler,
+/// with it shut it is counted as an arrival and refused off-thread.
+/// Returns false when nothing was accepted.
+fn accept_one(server: &dyn HivedServerApi, context: &RequestContext, timeout: f64) -> bool {
+    let (conn, lease) = {
+        let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+        let Some(conn) = server.accept_timeout(0.0) else {
+            return false;
+        };
+        if state.closed {
+            state.arrivals = state.arrivals.wrapping_add(1);
+            drop(state);
+            let _ = thread::Builder::new()
+                .name("hived-reject".to_string())
+                .spawn(move || reject_connection(conn));
+            return true;
+        }
+        let lease = RequestLease::reserve(&mut state);
+        (conn, lease)
+    };
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.after_accept.clone()).flatten() {
+        f();
+    }
+    let workspace = context.workspace.clone();
+    let team = context.team.clone();
+    let tmux_window = context.tmux_window.clone();
+    let tmux_window_id = context.tmux_window_id.clone();
+    let hived_started_at = context.started_at.clone();
+    let _ = thread::Builder::new()
+        .name("hived-request".to_string())
+        .spawn(move || {
+            serve_connection(
+                conn,
+                &workspace,
+                &team,
+                &tmux_window,
+                &tmux_window_id,
+                &hived_started_at,
+                timeout,
+                lease,
+            );
+        });
+    true
+}
+
 fn serve_until(
     server: &dyn HivedServerApi,
     context: &RequestContext,
@@ -424,9 +574,6 @@ fn serve_until(
 ) -> bool {
     let end = std::time::Instant::now() + Duration::from_secs_f64(timeout);
     while !SHUTDOWN.load(Ordering::SeqCst) && !stopped.load(Ordering::SeqCst) {
-        if admission().lock().unwrap_or_else(|e| e.into_inner()).closed {
-            break;
-        }
         let remaining = end.saturating_duration_since(std::time::Instant::now());
         if remaining.is_zero() {
             break;
@@ -436,64 +583,34 @@ fn serve_until(
         if !server.wait_readable(remaining.as_secs_f64().min(0.1)) {
             continue;
         }
-        let (conn, lease) = {
-            let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
-            if state.closed || stopped.load(Ordering::SeqCst) {
-                break;
-            }
-            let Some(conn) = server.accept_timeout(0.0) else {
-                continue;
-            };
-            state.leases += 1;
-            (conn, RequestLease::default())
-        };
-        #[cfg(test)]
-        if let Some(f) = hookget(|h| h.after_accept.clone()).flatten() {
-            f();
-        }
-        let workspace = context.workspace.clone();
-        let team = context.team.clone();
-        let tmux_window = context.tmux_window.clone();
-        let tmux_window_id = context.tmux_window_id.clone();
-        let hived_started_at = context.started_at.clone();
-        let _ = thread::Builder::new()
-            .name("hived-request".to_string())
-            .spawn(move || {
-                serve_connection(
-                    conn,
-                    &workspace,
-                    &team,
-                    &tmux_window,
-                    &tmux_window_id,
-                    &hived_started_at,
-                    timeout,
-                    lease,
-                );
-            });
+        accept_one(server, context, timeout);
     }
     !SHUTDOWN.load(Ordering::SeqCst)
 }
 
-/// The coordinator owns this synchronous rejection while admission is shut.
-/// No handler or engine operation is started, and the reply is sent before
-/// the coordinator can proceed to teardown.
-pub(super) fn reject_draining_request(server: &dyn HivedServerApi) -> bool {
-    let Some(mut conn) = server.accept_timeout(0.1) else {
-        return false;
-    };
-    let timeout = Some(Duration::from_millis(100));
-    let _ = conn.set_read_timeout(timeout);
-    let _ = conn.set_write_timeout(timeout);
-    let mut buf = [0u8; 65536];
-    let deadline = std::time::Instant::now() + Duration::from_millis(100);
-    while std::time::Instant::now() < deadline {
-        match conn.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
+/// The worker's retiring mode: accept and refuse for up to `timeout`
+/// seconds. Nothing is admitted whatever the gate says — the shutdown that
+/// set the flag closed it — so no lease and no usage come out of it.
+fn reject_until(server: &dyn HivedServerApi, timeout: f64, stopped: &AtomicBool) {
+    let end = std::time::Instant::now() + Duration::from_secs_f64(timeout);
+    while !stopped.load(Ordering::SeqCst) && SHUTDOWN.load(Ordering::SeqCst) {
+        let remaining = end.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
         }
+        if !server.wait_readable(remaining.as_secs_f64().min(0.1)) {
+            continue;
+        }
+        let conn = {
+            let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+            let Some(conn) = server.accept_timeout(0.0) else {
+                continue;
+            };
+            state.arrivals = state.arrivals.wrapping_add(1);
+            conn
+        };
+        let _ = thread::Builder::new()
+            .name("hived-reject".to_string())
+            .spawn(move || reject_connection(conn));
     }
-    let reply = b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining; request not admitted; retry later\"}\n";
-    let _ = conn.write_all(reply);
-    let _ = conn.shutdown(std::net::Shutdown::Write);
-    true
 }

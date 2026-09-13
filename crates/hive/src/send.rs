@@ -31,16 +31,49 @@ pub(crate) fn request_send_payload(
     if warn_on_long_body {
         maybe_warn_long_body(body, command_name);
     }
-    ensure_team_hived(team, std::path::Path::new(workspace))?;
-    let payload = crate::hived::request_send(
-        workspace,
-        &team.name,
-        sender_agent,
-        target_agent,
-        body,
-        artifact,
-    );
+    let payload = admitted_request(workspace, team, || {
+        crate::hived::request_send(
+            workspace,
+            &team.name,
+            sender_agent,
+            target_agent,
+            body,
+            artifact,
+        )
+    })?;
     hived_send_result(workspace, payload, command_name)
+}
+
+/// How often a request the hived would not admit is tried again, and the
+/// pause between tries. A refusal at the preflight is a desk retiring or
+/// draining: the retry finds it back up (a cancelled sleep reopens within
+/// the tick), or finds no listener and starts the next generation through
+/// `ensure_team_hived`. Nothing was sent, so nothing repeats.
+const ADMISSION_ATTEMPTS: usize = 3;
+const ADMISSION_RETRY_GAP: f64 = 0.25;
+
+/// A request with a side effect, behind the hived's admission: the desk
+/// is ensured before every attempt, and only a failure from before the
+/// payload went out is tried again.
+fn admitted_request(
+    workspace: &str,
+    team: &Team,
+    mut request: impl FnMut() -> Result<Map<String, Value>, RequestFailure>,
+) -> Result<Result<Map<String, Value>, RequestFailure>> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        ensure_team_hived(team, std::path::Path::new(workspace))?;
+        let answer = request();
+        let retry = matches!(
+            answer,
+            Err(RequestFailure::NotAdmitted(_)) | Err(RequestFailure::NoListener)
+        );
+        if !retry || attempt >= ADMISSION_ATTEMPTS {
+            return Ok(answer);
+        }
+        std::thread::sleep(std::time::Duration::from_secs_f64(ADMISSION_RETRY_GAP));
+    }
 }
 
 /// Why a node dispatch has no seq. `Refused`: the hived answered `ok:false`
@@ -76,16 +109,17 @@ pub(crate) fn request_node_dispatch(
     artifact: &str,
     dispatch_id: &str,
 ) -> Result<Map<String, Value>, DispatchFailure> {
-    ensure_team_hived(team, std::path::Path::new(workspace))
-        .map_err(|err| DispatchFailure::Refused(err.to_string()))?;
-    let answer = crate::hived::request_node_dispatch(
-        workspace,
-        &team.name,
-        target_agent,
-        body,
-        artifact,
-        dispatch_id,
-    );
+    let answer = admitted_request(workspace, team, || {
+        crate::hived::request_node_dispatch(
+            workspace,
+            &team.name,
+            target_agent,
+            body,
+            artifact,
+            dispatch_id,
+        )
+    })
+    .map_err(|err| DispatchFailure::Refused(err.to_string()))?;
     hived_answer(workspace, answer, "node dispatch")
 }
 
@@ -102,9 +136,9 @@ fn hived_send_result(
     })
 }
 
-/// The hived's answer as a result: `ok:false` and an unsent request are
-/// `Refused`, a lost answer is `Unknown`, and `ok` is stripped from a
-/// success.
+/// The hived's answer as a result: `ok:false`, an unsent request and one
+/// the hived would not admit (nothing went out) are `Refused`, a lost
+/// answer is `Unknown`, and `ok` is stripped from a success.
 fn hived_answer(
     workspace: &str,
     answer: Result<Map<String, Value>, RequestFailure>,
@@ -126,6 +160,16 @@ fn hived_answer(
             return Err(DispatchFailure::Refused(
                 crate::devlog::hived_unavailable_message(std::path::Path::new(workspace)),
             ))
+        }
+        Err(RequestFailure::NotAdmitted(reason)) => {
+            return Err(DispatchFailure::Refused(format!(
+                "{command_name}: hived did not admit the request ({reason}); nothing was sent"
+            )))
+        }
+        Err(RequestFailure::Incompatible(reason)) => {
+            return Err(DispatchFailure::Refused(format!(
+                "{command_name}: {reason}"
+            )))
         }
     };
     if payload.get("ok") == Some(&Value::Bool(false)) {
@@ -434,6 +478,71 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("ambiguous delivery"));
         assert!(err.to_string().contains("do not resend automatically"));
+        // Refused at the preflight, or withheld from a hived of another
+        // api: nothing went out, so a plain refusal with the reason.
+        let err = hived_answer(
+            &ws,
+            Err(RequestFailure::NotAdmitted("hived is draining".into())),
+            "node dispatch",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, DispatchFailure::Refused(reason) if reason.contains("did not admit") && reason.contains("hived is draining")),
+            "{err:?}"
+        );
+        let err = hived_answer(
+            &ws,
+            Err(RequestFailure::Incompatible("hived speaks api 5".into())),
+            "node dispatch",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, DispatchFailure::Refused(reason) if reason.contains("api 5")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_admitted_request_retries_only_before_the_payload_went_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_string_lossy().to_string();
+        let _hived = crate::testkit::hived_answering_ping("t");
+        let team = Team {
+            name: "t".to_string(),
+            workspace: ws.clone(),
+            tmux_window: "dev:1".to_string(),
+            tmux_window_id: "@7".to_string(),
+            ..Default::default()
+        };
+        let attempts = |outcome: &dyn Fn() -> Result<Map<String, Value>, RequestFailure>| {
+            let mut calls = 0;
+            let answer = admitted_request(&ws, &team, || {
+                calls += 1;
+                outcome()
+            })
+            .unwrap();
+            (calls, answer)
+        };
+        // Refused at the preflight, or no listener: the desk is ensured
+        // again and the request tried again, a bounded number of times.
+        let (calls, answer) = attempts(&|| Err(RequestFailure::NotAdmitted("draining".into())));
+        assert_eq!(calls, ADMISSION_ATTEMPTS);
+        assert!(matches!(answer, Err(RequestFailure::NotAdmitted(_))));
+        let (calls, answer) = attempts(&|| Err(RequestFailure::NoListener));
+        assert_eq!(calls, ADMISSION_ATTEMPTS);
+        assert_eq!(answer, Err(RequestFailure::NoListener));
+        // The payload may have gone out: never tried again.
+        let (calls, answer) = attempts(&|| Err(RequestFailure::AnswerLost("EOF".into())));
+        assert_eq!(calls, 1);
+        assert!(matches!(answer, Err(RequestFailure::AnswerLost(_))));
+        // Withheld or unsent for a reason a retry does not change.
+        let (calls, _) = attempts(&|| Err(RequestFailure::Incompatible("api 5".into())));
+        assert_eq!(calls, 1);
+        let (calls, _) = attempts(&|| Err(RequestFailure::NotSent("perm".into())));
+        assert_eq!(calls, 1);
+        let (calls, answer) = attempts(&|| Ok(Map::new()));
+        assert_eq!(calls, 1);
+        assert_eq!(answer, Ok(Map::new()));
     }
 
     #[test]

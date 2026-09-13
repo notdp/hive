@@ -48,6 +48,11 @@ pub struct Hook {
     pub monotonic: Option<F0<f64>>,
     pub gl_idle_owned_keys: Option<S1<Option<Vec<String>>>>,
     pub after_accept: Option<F0<()>>,
+    /// Barriers inside a served connection: after the admission line went
+    /// out, before the handler runs, before the final reply goes out.
+    pub after_admit: Option<F0<()>>,
+    pub before_handler: Option<F0<()>>,
+    pub before_reply: Option<F0<()>>,
     // adapters / gate
     pub adapters_get: Option<S1<Option<AdapterHandle>>>,
     pub check_input_gate: Option<P1<GateResult>>,
