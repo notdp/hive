@@ -28,6 +28,11 @@ def opt(name):
 if argv[:2] == ['agent', 'leader']:
     path = opt('--leader-socket')
     Path(path).parent.mkdir(parents=True, exist_ok=True)
+    # as grok: the leader's flock on <key>.lock, its pid inside, held for
+    # its lifetime and taken before the socket is bound (hive's liveness)
+    lockfile = open(path[:-len('.sock')] + '.lock', 'w')
+    fcntl.flock(lockfile, fcntl.LOCK_EX)
+    lockfile.write(str(os.getpid())); lockfile.flush()
     sock = socket.socket(socket.AF_UNIX)
     sock.bind(path)
     sock.listen()

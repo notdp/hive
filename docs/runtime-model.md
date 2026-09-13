@@ -1360,6 +1360,21 @@ it either, and a TUI still open keeps it. Nothing hive does signals a
 leader on this path; `hive kill`, `hive delete --down` and the hived's
 orphan reap are the explicit ends, unchanged.
 
+Hive asks whether a leader lives without connecting to it. grok (1.0.30)
+takes every connection on the socket for a client and, until its first
+client has registered, stalls that registration about ten seconds for each
+bare connection it accepted — a connect-and-close probe in the window
+between a leader's spawn and its first client put the hived's revive
+handshake past its budget every time, while an established leader shrugs a
+probe off. The leader takes an flock on `<key>.lock` (its pid inside) before
+it binds the socket and holds it until it exits, so that lock is the
+liveness signal everywhere hive asks (`grok_leader::probe_socket`: the
+socket on disk and the lock held): the runtime's `cliAlive` and `retained`,
+`Agent::is_alive`, the pool's connect, a spawn's readiness, the collector,
+`hive ps` and `hive team`. A socket file alone is a leader that died, a
+pid in the file is not consulted, and nothing hive does is a client the
+leader has to serve.
+
 What the exit leaves is the session record — `{sessionId, cwd, team,
 createdAt, member}`, the binding written at the mint (`session/new`, the
 resume and fork lanes) or when a create/join binds a launch

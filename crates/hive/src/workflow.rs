@@ -874,6 +874,13 @@ pub fn run_workflow(
             "the workflow lock for '{name}' is held by another runner"
         )));
     };
+    // The hived's team runtime is the liveness authority (`Team::
+    // member_liveness`): a retained member reads alive only through it,
+    // and a hived that retired for want of a viewer answers nothing until
+    // the next command that needs it starts a generation — this one,
+    // before the first question it asks of a member, whose answer decides
+    // whether an earlier dispatch on the record is still that member's.
+    env.ensure_hived().map_err(WorkflowError)?;
     if let Some(mut record) = read_record(workspace, name) {
         if record.is_pending() && env.alive(name) {
             // Holding the lock means the previous waiter is gone, not that
@@ -1344,7 +1351,7 @@ impl WorkflowEnv for RealEnv {
 pub(crate) mod test_env {
     use super::*;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     #[derive(Debug)]
     pub(crate) struct SpawnCall {
@@ -1438,6 +1445,11 @@ pub(crate) mod test_env {
         pub send_calls: AtomicU32,
         pub sleeps: AtomicU32,
         pub agents: Mutex<Vec<String>>,
+        /// Answer liveness only once `ensure_hived` ran: the real
+        /// `member_liveness` reads the hived's runtime, and a hived that
+        /// retired answers nothing.
+        pub liveness_needs_hived: bool,
+        pub hived_up: AtomicBool,
         pub retired: Mutex<Vec<String>>,
     }
 
@@ -1475,6 +1487,8 @@ pub(crate) mod test_env {
             send_calls: AtomicU32::new(0),
             sleeps: AtomicU32::new(0),
             agents: Mutex::new(Vec::new()),
+            liveness_needs_hived: false,
+            hived_up: AtomicBool::new(false),
             retired: Mutex::new(Vec::new()),
         }
     }
@@ -1565,6 +1579,7 @@ pub(crate) mod test_env {
         }
 
         fn ensure_hived(&self) -> Result<(), String> {
+            self.hived_up.store(true, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1609,6 +1624,9 @@ pub(crate) mod test_env {
         }
 
         fn alive(&self, name: &str) -> bool {
+            if self.liveness_needs_hived && !self.hived_up.load(Ordering::SeqCst) {
+                return false;
+            }
             self.agents.lock().unwrap().iter().any(|a| a == name)
         }
 
@@ -2581,6 +2599,55 @@ mod tests {
         // the member kept its session: no retire, no spawn
         assert!(env.retired.lock().unwrap().is_empty());
         assert!(env.spawns.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_run_workflow_starts_the_hived_before_it_judges_a_retained_member() {
+        // A cold team: the hived retired, the member's leader exited on its
+        // own, the session record still names it. Liveness comes from the
+        // hived's runtime alone, so the run raises a hived first; judged
+        // without one the member reads dead and a fresh one is spawned in
+        // its place, its session discarded.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.liveness_needs_hived = true;
+        env.add_retained_grok("audit");
+        *env.turn_answers.lock().unwrap() = VecDeque::from([Some(false)]);
+        env.end_at(2, "ok");
+        let r = run_workflow(&env, &workflow("audit", Some("grok"), "t")).unwrap();
+        assert_eq!(r["status"], "completed", "{r:?}");
+        assert_eq!(r["reused"], true);
+        assert_eq!(env.revives.lock().unwrap().len(), 1);
+        assert!(env.retired.lock().unwrap().is_empty());
+        assert!(env.spawns.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_run_workflow_starts_the_hived_before_it_reads_an_old_dispatch_off_a_cold_member() {
+        // A cold team with a pending record: judged without a hived the
+        // member reads dead and its record is replaced, the old dispatch
+        // never asked after. With the hived raised first the retained
+        // member is alive, the old dispatch is asked once and, unresolved,
+        // keeps the name busy — nothing new is dispatched, the record stays.
+        let tmp = TempDir::new().unwrap();
+        let mut env = fake_env(tmp.path());
+        env.liveness_needs_hived = true;
+        env.add_retained_grok("audit");
+        let old = pending("nd-aaaaaaaaaaaa");
+        write_record(&env.workspace_str(), "audit", &old).unwrap();
+        *env.node_answers.lock().unwrap() =
+            VecDeque::from([Some(NodeResult::Unknown("no handle".into()))]);
+        *env.turn_answers.lock().unwrap() = VecDeque::from([None]);
+        let result = run_workflow(&env, &workflow("audit", Some("grok"), "t")).unwrap();
+        assert_eq!(result["status"], "member_busy", "{result:?}");
+        assert_eq!(result["dispatchId"], old.dispatch_id);
+        assert!(env.dispatches.lock().unwrap().is_empty());
+        assert!(env.spawns.lock().unwrap().is_empty());
+        assert_eq!(
+            *env.node_calls.lock().unwrap(),
+            vec![old.dispatch_id.clone()]
+        );
+        assert_eq!(read_record(&env.workspace_str(), "audit"), Some(old));
     }
 
     #[test]

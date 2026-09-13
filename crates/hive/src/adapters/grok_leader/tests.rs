@@ -230,9 +230,52 @@ fn stdio_args(sock: &std::path::Path) -> String {
 }
 
 /// A live listener on *sock*, dropped when the guard goes.
-fn bind_leader_socket(sock: &std::path::Path) -> UnixListener {
+/// A fake leader on *sock*: the listener and the flock a real leader holds
+/// on `<key>.lock` for its lifetime (`daemon::probe_socket`); dropping it
+/// releases both, the way a leader's exit does.
+struct FakeLeader {
+    listener: UnixListener,
+    _lock: fs::File,
+}
+
+impl std::ops::Deref for FakeLeader {
+    type Target = UnixListener;
+    fn deref(&self) -> &UnixListener {
+        &self.listener
+    }
+}
+
+fn bind_leader_socket(sock: &std::path::Path) -> FakeLeader {
     fs::create_dir_all(sock.parent().unwrap()).unwrap();
-    UnixListener::bind(sock).unwrap()
+    let listener = UnixListener::bind(sock).unwrap();
+    FakeLeader {
+        listener,
+        _lock: hold_leader_lock(sock),
+    }
+}
+
+/// Take the leader's flock on `<key>.lock` beside *sock*, the pid inside
+/// as grok writes it; held while the returned file lives.
+pub(crate) fn hold_leader_lock(sock: &std::path::Path) -> fs::File {
+    use std::os::unix::io::AsRawFd;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(sock.with_extension("lock"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    fs::write(sock.with_extension("lock"), std::process::id().to_string()).unwrap();
+    file
+}
+
+thread_local! {
+    /// Locks `touch_leader_socket` took, held for the rest of the test.
+    static TOUCHED_LOCKS: RefCell<Vec<fs::File>> = const { RefCell::new(Vec::new()) };
 }
 
 // ---- fixtures for tests outside this module --------------------------
@@ -2153,7 +2196,7 @@ fn test_probe_socket_needs_a_listener() {
     let listener = bind_leader_socket(&sock);
     assert!(probe_socket(&sock));
     drop(listener);
-    // the socket file outlives its listener: connect refuses, probe false
+    // the socket file outlives its leader; the lock it held does not
     assert!(sock.exists());
     assert!(!probe_socket(&sock));
 }
@@ -2180,6 +2223,8 @@ impl DaemonChild for FakeDaemonChild {
     }
 }
 
+/// What a spawned leader leaves on disk once it is up: the socket file
+/// and its held lock.
 fn touch_leader_socket(argv: &[String]) {
     let sock = &argv[argv
         .iter()
@@ -2187,6 +2232,33 @@ fn touch_leader_socket(argv: &[String]) {
         .unwrap()
         + 1];
     fs::write(sock, "").unwrap();
+    let lock = hold_leader_lock(std::path::Path::new(sock));
+    TOUCHED_LOCKS.with(|held| held.borrow_mut().push(lock));
+}
+
+#[test]
+fn test_probe_socket_is_the_leader_lock_not_a_connection() {
+    let bed = setup();
+    let sock = bed.tmp.path().join("hive/m-honey.rex.sock");
+    fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    // a bare listener accepting connections is no leader: nothing holds the lock
+    let listener = UnixListener::bind(&sock).unwrap();
+    assert!(!probe_socket(&sock));
+    assert_eq!(leader_holds_lock(&sock).unwrap(), false);
+    // a lock file nobody holds is a leader that exited
+    fs::write(sock.with_extension("lock"), "4242").unwrap();
+    assert!(!probe_socket(&sock));
+    // the held lock is the leader, socket on disk
+    let lock = hold_leader_lock(&sock);
+    assert!(probe_socket(&sock));
+    assert_eq!(leader_holds_lock(&sock).unwrap(), true);
+    // the lock alone, before the socket is bound, is not yet a leader to reach
+    drop(listener);
+    fs::remove_file(&sock).unwrap();
+    assert!(!probe_socket(&sock));
+    assert_eq!(leader_holds_lock(&sock).unwrap(), true);
+    drop(lock);
+    assert_eq!(leader_holds_lock(&sock).unwrap(), false);
 }
 
 #[test]
@@ -3053,7 +3125,7 @@ fn minting_responder() -> Responder {
 fn set_listening_daemon_spawn() -> Arc<Mutex<usize>> {
     let spawns: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let count = spawns.clone();
-    let listeners: Arc<Mutex<Vec<UnixListener>>> = Arc::new(Mutex::new(Vec::new()));
+    let listeners: Arc<Mutex<Vec<FakeLeader>>> = Arc::new(Mutex::new(Vec::new()));
     set_daemon_spawn(move |argv, _env| {
         *count.lock().unwrap() += 1;
         let sock = &argv[argv
@@ -3844,36 +3916,22 @@ fn test_a_launch_key_kill_removes_its_files_only_under_the_launch_lock() {
 fn test_bind_fails_when_the_leader_vanishes_while_it_waits_for_the_launch_lock() {
     let bed = setup();
     let sock = bed.tmp.path().join("hive/l-ab12.sock");
-    let listener = bind_leader_socket(&sock);
-    listener.set_nonblocking(true).unwrap();
+    let leader = bind_leader_socket(&sock);
     write_session_key("l-ab12", "sid-1", "/w", None).unwrap();
+    assert!(
+        probe_socket(&sock),
+        "the bind's probe before the lock sees the leader"
+    );
     let held = launch_lock("l-ab12").unwrap();
     let bind = thread::spawn(|| bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "orch", "%3"));
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut saw_probe = false;
-    while Instant::now() < deadline {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                drop(stream);
-                saw_probe = true;
-                break;
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5))
-            }
-            Err(e) => panic!("probe accept: {e}"),
-        }
-    }
-    // the probe before the lock saw a listener; it goes while the bind waits
-    drop(listener);
+    thread::sleep(Duration::from_millis(200));
+    assert!(!bind.is_finished(), "the bind did not wait for the lock");
+    // the leader goes while the bind waits: its lock released, its socket gone
+    drop(leader);
     fs::remove_file(&sock).unwrap();
     drop(held);
     let result = bind.join().unwrap();
     let alias = alias_target("m-honey.orch");
-    assert!(
-        saw_probe,
-        "the bind did not probe the socket before the lock"
-    );
     let err = result.expect_err(&format!(
         "bind succeeded after the leader disappeared while it waited; alias={alias:?}"
     ));
