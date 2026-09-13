@@ -383,9 +383,22 @@ pub fn request_turn_open(workspace: &str, team: &str, agent: &str) -> Option<Map
 /// answer's `state` is `running`, `ended` (with `status`, `text`, `error`)
 /// or `unknown` (with `reason`).
 pub fn request_node_result(workspace: &str, dispatch_id: &str) -> Option<Map<String, Value>> {
+    request_node_result_answer(workspace, dispatch_id).ok()
+}
+
+/// `request_node_result` keeping the failure apart. The read-only question
+/// has no side effect to lose, and one of its failures is recoverable:
+/// `NoListener` says no desk answers, and a desk that retired after the
+/// turn ended left the result in its journal, so the caller may start the
+/// next generation and ask it again. Every other failure is a desk that
+/// did answer, or one this hive must not touch.
+pub(crate) fn request_node_result_answer(
+    workspace: &str,
+    dispatch_id: &str,
+) -> Result<Map<String, Value>, RequestFailure> {
     let mut payload = action_payload("node-result");
     payload.insert("dispatchId".to_string(), Value::from(dispatch_id));
-    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
+    request_hived_answer(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 
 pub fn request_runtime_snapshot(workspace: &str, pane_id: &str) -> Option<Map<String, Value>> {

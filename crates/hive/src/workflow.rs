@@ -45,6 +45,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
+use crate::hived::RequestFailure;
 use crate::send::DispatchFailure;
 
 const POLL_SECONDS: f64 = 1.0;
@@ -1022,9 +1023,81 @@ fn hived_turn_open(answer: Option<Map<String, Value>>) -> Option<bool> {
     answer.get("open").and_then(Value::as_bool)
 }
 
+/// The instance the registry holds for `team` right now, spelled as a
+/// `team::created_at_key`; empty when no entry stands for the name.
+fn registry_instance(team: &str) -> String {
+    let Some(entry) = crate::registry::load(team) else {
+        return String::new();
+    };
+    let created = match entry.get("createdAt") {
+        Some(Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    crate::team::created_at_key(created)
+}
+
+/// Whether the team's name still holds the instance a run resolved
+/// against. An empty key names no instance: the operation journal is
+/// keyed by the incarnation, so a team the registry does not place holds
+/// no durable result to recover either.
+fn same_instance(team: &str, instance: &str) -> bool {
+    !instance.is_empty() && registry_instance(team) == instance
+}
+
+/// One `node-result` poll and the single failure it recovers from.
+///
+/// The hived's obligation for a node ends when the turn is terminal and
+/// its journal entry is on disk, not when the runner reads it: a desk
+/// whose last turn ended goes to sleep on its own clock, and a runner that
+/// polls after that finds nobody listening. The result outlives the desk,
+/// so `NoListener` — and only `NoListener` — starts the next generation
+/// and asks it for the same dispatch id. Every other failure came from a
+/// desk that was there, and a restart would answer nothing new; no failure
+/// ever dispatches the task again.
+///
+/// The instance is checked before anything is started: the journal is
+/// keyed by the team's incarnation, so a team that was deleted, or whose
+/// name now holds a newer instance, is not the team this run dispatched
+/// to. Its result cannot be read, its namesake's must not be, and neither
+/// a desk nor a team is created for it — the poll simply goes unanswered,
+/// and the runner's own bounded unanswered policy ends the wait.
+fn recover_node_result(
+    dispatch_id: &str,
+    ask: &mut dyn FnMut() -> Result<Map<String, Value>, RequestFailure>,
+    same_instance: &dyn Fn() -> bool,
+    ensure: &dyn Fn() -> Result<(), String>,
+) -> Option<NodeResult> {
+    match ask() {
+        Ok(answer) => return NodeResult::from_answer(&answer),
+        Err(RequestFailure::NoListener) => {}
+        Err(_) => return None,
+    }
+    if !same_instance() {
+        log(&format!(
+            "no hived answers for {dispatch_id}; the team instance it ran on is gone"
+        ));
+        return None;
+    }
+    if let Err(error) = ensure() {
+        log(&format!(
+            "no hived answers for {dispatch_id} and none could be started: {error}"
+        ));
+        return None;
+    }
+    match ask() {
+        Ok(answer) => NodeResult::from_answer(&answer),
+        Err(_) => None,
+    }
+}
+
 struct RealCtx {
     team_name: String,
     workspace: String,
+    /// The team instance this run resolved against (`created_at_key`):
+    /// the same name under a later instance is a different team, and
+    /// holds none of this run's results.
+    instance: String,
     team: crate::team::Team,
 }
 
@@ -1067,6 +1140,7 @@ impl RealEnv {
             *guard = Some(RealCtx {
                 team_name: team_name.unwrap_or_default(),
                 workspace,
+                instance: team.created_at_key(),
                 team,
             });
         }
@@ -1181,13 +1255,20 @@ impl WorkflowEnv for RealEnv {
     }
 
     /// One question to the hived (`node-result`): the turn it holds under
-    /// the dispatch id, as its adapter client saw it end.
+    /// the dispatch id, as its adapter client saw it end. A desk that
+    /// retired since the turn ended is started once more and asked for the
+    /// same dispatch id, which it serves from its journal
+    /// (`recover_node_result`); the task is never dispatched again.
     fn node_result(&self, dispatch_id: &str) -> Option<NodeResult> {
-        let ctx = self.context().ok()?;
-        NodeResult::from_answer(&crate::hived::request_node_result(
-            &ctx.workspace,
+        let (workspace, team_name, instance) = self
+            .with_ctx(|c| (c.workspace.clone(), c.team_name.clone(), c.instance.clone()))
+            .ok()?;
+        recover_node_result(
             dispatch_id,
-        )?)
+            &mut || crate::hived::request_node_result_answer(&workspace, dispatch_id),
+            &|| same_instance(&team_name, &instance),
+            &|| self.ensure_hived(),
+        )
     }
 
     fn retire(&self, name: &str) {
