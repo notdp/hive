@@ -690,6 +690,10 @@ mod tests {
     /// identity inherited from the shell, for the test's lifetime.
     fn isolated(tmp: &std::path::Path) -> EnvGuard {
         let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
+        // CLAUDE_HOME outranks CLAUDE_CONFIG_DIR in `claude_sessions::config_dir`:
+        // an ambient one (a dev lane's, a gate runner's) would steer the
+        // session lookup away from this fixture's tree.
+        env.remove("CLAUDE_HOME");
         env.set("HIVE_HOME", tmp.join(".hive"));
         env.set("CLAUDE_CONFIG_DIR", tmp.join(".claude"));
         env
