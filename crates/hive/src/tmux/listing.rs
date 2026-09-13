@@ -425,6 +425,26 @@ pub fn list_windows_snapshot_status(
     (None, "unknown")
 }
 
+/// The windows of one session (an id, or a name pinned by
+/// `exact_session_target`) with their instance tags, in window order:
+/// what `hive wake` scans for the teams a session shows. None when tmux
+/// does not answer or the session is gone. *token_key* as in
+/// `list_windows_snapshot_status`.
+pub fn list_session_windows(session: &str, token_key: &str) -> Option<Vec<WindowExtra>> {
+    if session.is_empty() {
+        return None;
+    }
+    let target = super::exact_session_target(session);
+    let fmt = window_snapshot_fmt(token_key);
+    let r = run(&["list-windows", "-t", &target, "-F", &fmt], false, 5).ok()?;
+    if r.returncode != 0 {
+        return None;
+    }
+    let mut windows: Vec<WindowExtra> = parse_windows_snapshot(&r.stdout).into_values().collect();
+    windows.sort_by(|a, b| a.window.cmp(&b.window));
+    Some(windows)
+}
+
 pub fn parse_windows_snapshot(stdout: &str) -> std::collections::HashMap<String, WindowExtra> {
     let mut windows = std::collections::HashMap::new();
     for line in stdout.lines() {

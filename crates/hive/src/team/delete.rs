@@ -200,9 +200,16 @@ pub(crate) fn delete_team(
     // Read before the tags go: a window hive built itself (`@hive-built`,
     // in the team session or the caller's) is hive's to close; a window
     // the human's session lent the team (in-tmux create) keeps their pane.
-    // The last window going drops the session with it.
+    // The last window going drops the session with it. The session's id
+    // is read now too: once the display is gone, this home's wake hooks
+    // leave the session unless another of its teams still shows there.
     let hive_built =
         !team_window.is_empty() && tmux::get_window_option(&team_window, "hive-built").is_some();
+    let display_session = if team_window.is_empty() {
+        String::new()
+    } else {
+        tmux::display_value(&team_window, "#{session_id}").unwrap_or_default()
+    };
     if !team_window.is_empty() {
         crate::team::clear_window_tags(&team_window);
     }
@@ -216,6 +223,7 @@ pub(crate) fn delete_team(
     if hive_built && !team_window_id.is_empty() && caller_window != team_window_id {
         tmux::kill_window(&team_window_id);
     }
+    release_wake_hooks(&display_session);
 
     // Explicit -w, else the entry's workspace; with neither there is no
     // workspace to stop or remove, and the team-dir sweep below still
@@ -300,6 +308,26 @@ pub(crate) fn delete_team(
         println!("retired {}", agent.name);
     }
     Ok(())
+}
+
+/// This home's wake hooks come off *session_id* once no team of this home
+/// shows a window there; a session that is gone, or still shows one, is
+/// left as it is. The hooks are a hive home's, not a team's: the entries
+/// of the human's own hooks and of other homes stay untouched either way.
+fn release_wake_hooks(session_id: &str) {
+    if session_id.is_empty() {
+        return;
+    }
+    let Some(windows) = tmux::list_session_windows(session_id, crate::hived::notify_token_key())
+    else {
+        return;
+    };
+    if crate::hived::home_displays_in(session_id, &windows) {
+        return;
+    }
+    if let Err(err) = tmux::remove_wake_hooks(session_id) {
+        eprintln!("warning: wake hooks on session {session_id} not removed: {err}");
+    }
 }
 
 #[cfg(test)]

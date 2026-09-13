@@ -231,15 +231,37 @@ pub(super) fn hooked_watching_clients(session: &str) -> Option<usize> {
     crate::tmux::watching_clients(session)
 }
 
-/// The session the desk's display sits in gets the wake hooks: at the
-/// first tick that finds the display, and again whenever it moves.
-pub(super) fn hooked_install_wake_hooks(team: &str, session_id: &str) {
+/// The session the desk's display sits in gets this home's wake hooks: at
+/// the first tick that finds the display, again whenever it moves, and
+/// again after a failed install. The error is the loop's to act on: a
+/// desk whose session cannot wake it must not retire unwatched.
+pub(super) fn hooked_install_wake_hooks(session_id: &str) -> Result<(), String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.install_wake_hooks.clone()).flatten() {
-        f(team, session_id);
+        return f(session_id);
     }
-    #[cfg(not(test))]
-    crate::tmux::install_wake_hooks(team, session_id)
+    #[cfg(test)]
+    if hookget(|_| ()).is_some() {
+        return Ok(());
+    }
+    crate::tmux::install_wake_hooks(session_id).map_err(|e| e.to_string())
+}
+
+/// This home's wake entries leave a session the display left behind, once
+/// no team of this home shows there.
+pub(super) fn hooked_remove_wake_hooks(session_id: &str) {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.remove_wake_hooks.clone()).flatten() {
+        f(session_id);
+        return;
+    }
+    #[cfg(test)]
+    if hookget(|_| ()).is_some() {
+        return;
+    }
+    if let Err(err) = crate::tmux::remove_wake_hooks(session_id) {
+        eprintln!("hived: wake hooks on session {session_id} not removed: {err}");
+    }
 }
 
 // --- agent_cli seams -------------------------------------------------------

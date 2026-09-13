@@ -108,23 +108,56 @@ pub(crate) fn mirror_cmd(mode: &str, window: &str) {
     }
 }
 
-/// `hive wake --window TARGET`: the session hooks' way of bringing a desk
-/// that retired unwatched back when a terminal arrives. It starts a hived
-/// only where the last one left an `unwatched` marker — never for a window
-/// that is not a team's, a team whose desk is up, or one that retired for
-/// another reason or never ran — and exits quietly either way.
-pub(crate) fn wake_cmd(window: &str) {
-    let Some(team) = tmux::get_window_option(window, "hive-team").filter(|t| !t.is_empty()) else {
+/// `hive wake --session ID | --window TARGET`: the session hooks' way of
+/// bringing a desk that retired unwatched back when a terminal arrives.
+/// The whole session is scanned, not the window the client happens to be
+/// on (a plain shell window in front never hides the team behind it):
+/// every window carrying a full instance tag set — team, workspace and
+/// `createdAt` — that names a team registered under this hive home, once
+/// per instance, gets its hived started where the last one left an
+/// `unwatched` marker. A window of another home's or an earlier instance
+/// of the same name, a team whose desk is up, or one that retired for
+/// another reason or never ran, is left alone; nothing is printed and the
+/// exit is 0 either way. `--window` is the older hook's form: its session
+/// is resolved and scanned the same way.
+pub(crate) fn wake_cmd(session: &str, window: &str) {
+    let session_id = if !session.is_empty() {
+        session.to_string()
+    } else {
+        match tmux::display_value(window, "#{session_id}") {
+            Some(id) => id,
+            None => return,
+        }
+    };
+    let Some(windows) = tmux::list_session_windows(&session_id, crate::hived::notify_token_key())
+    else {
         return;
     };
-    let Ok(mut t) = crate::team::load_team(&team, "") else {
-        return;
-    };
-    let workspace = crate::team::resolve_workspace(Some(&t), false).unwrap_or_default();
-    if workspace.is_empty() || !retired_unwatched(&workspace) {
-        return;
+    let mut woken: Vec<crate::hived::TeamInstance> = Vec::new();
+    for window in windows.iter().filter(|w| !w.team.is_empty()) {
+        let Some(entry) = crate::registry::load(&window.team) else {
+            continue;
+        };
+        if crate::gc::is_closing(&entry, crate::gc::epoch_now()) {
+            continue;
+        }
+        let instance = crate::hived::TeamInstance::from_entry(&entry);
+        if !instance.owns(window) || woken.contains(&instance) {
+            continue;
+        }
+        woken.push(instance.clone());
+        if !retired_unwatched(&instance.workspace) {
+            continue;
+        }
+        if let Err(err) = crate::hived::ensure_hived(
+            &instance.workspace,
+            &instance.team,
+            &window.window,
+            &window.window_id,
+        ) {
+            eprintln!("warning: {err}");
+        }
     }
-    start_team_hived_or_warn(&mut t, &workspace);
 }
 
 fn retired_unwatched(workspace: &str) -> bool {
