@@ -377,9 +377,12 @@ Options:
   Logical ownership and OS parentage are separate columns. Missing observations
   are unknown. Tmux display observations use the caller's tmux server; engine
   records use the configured homes. Process discovery covers the OS snapshot.
-  A registered team is running while its hived is up and asleep without one,
-  window or no window (`displayPresent` says which); an unknown hived
-  observation stays unknown.
+  A registered team is running while a `hive --hived` process for exactly its
+  team and workspace is in the process table, and asleep without one, window
+  or no window (`displayPresent` says which); an unknown hived observation
+  stays unknown. Presence is not health. `asleepReason` repeats what the last
+  desk wrote when it retired, or null when there is none to read: a recorded
+  reason, never a promise that the desk comes back on its own.
 
 Options:
   --json      Print a JSON array, one resource object per line.
