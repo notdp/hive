@@ -4,6 +4,20 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.21.2
+
+### Fixes
+
+- The hived's whole life, after a 37-finding review (#227): the startup lock no longer rides into the hived (`O_CLOEXEC`, a bounded `flock`, ready only once the socket, accept worker and owner file are up, a start that fails keeps the `desk.asleep` marker); a side-effect request (`send`, node dispatch, connect) is admitted on its own connection before its payload goes out, so a request the desk turned away while retiring or replacing itself is a clean "not sent" and retried, and only a lost answer after the payload stays unknown; a busy desk is not restarted, read-only and unclassified requests do not reset the idle clock, the listener closes before the slow cleanup, and an API mismatch fails closed (`HIVED_API_VERSION` 6); the desk resolves its display each tick from the windows' own instance tags, never borrows the caller's window, counts viewers over every session it is shown in and arms a wake hook on each; wake hooks name the client's session, bake the absolute hive home, quote for both the shell and tmux, and take one indexed entry per home under a per-server lock so a lent session keeps the human's hooks; retiring for want of a viewer drops the desk's own grok pool clients and signals nothing else; `hive ps --json` carries `asleepReason`; a node result read that finds no listener brings the desk back and reads the same dispatch; runtime-model documents the six exits
+- A tmux client hive starts without a UTF-8 locale gets `LC_CTYPE=C.UTF-8`: tmux writes tabs as `_` for such a client, and a hived born from a shell without `LANG` read every pane line as one id and reaped every codex thread record; a pane listing whose ids are not pane ids is unknown, not empty (#227)
+- A grok member reloaded after the desk slept closes its last turn: grok 1.0.30 carries `turn_completed` under `_x.ai/session/update`, which the client did not read, so the next workflow task answered `member_busy` (#230)
+- hive's tmux wrapper refuses to run when `TMUX_TMPDIR` names a directory that is gone, instead of following tmux's silent fallback to the default server (#230)
+
+### Internal
+
+- No compatibility code: `hive wake` takes `--session` only, the hook installer stops hunting older installs' entries, a codex pane record naming no tmux server is nobody's to reap, and README `Requires` pins tmux 3.7c, claude 2.1.263, codex-cli 0.153.4, grok 1.0.30 (#230)
+- Tests never reach the real `CODEX_HOME` or the developer's tmux server: the codex record seams panic under test unless `CODEX_HOME` is redirected, fixtures clear an ambient `CLAUDE_HOME`, and the two-process hook rig names its lane's socket explicitly (#227, #230)
+
 ## 0.21.1
 
 ### Features
