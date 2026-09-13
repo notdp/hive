@@ -272,6 +272,12 @@ Options:
   team also records, or one that is a symlink, is refused before anything
   is stopped. The two exclude each other.
 
+  The stop is forced: unlike the graceful stop an upgrade or `hive gc`
+  asks for, it is not deferred by a workflow node whose result has not
+  been read — every unresolved node is recorded interrupted before the
+  desk exits. The display's session keeps this hive home's wake hooks
+  only while another team of this home still shows a window there.
+
   A member mid-turn refuses the delete: let it finish, or --down. --down is
   the teardown of a workflow run (`hive create RUN`, `hive workflow run`
   nodes, `hive delete RUN --down`): every member is retired first, and the
@@ -396,6 +402,9 @@ Options:
 
   With no argument, probes yourself. With an agent name, probes that peer —
   pane liveness, transcript readability, hived heartbeat, runtime input state.
+
+  The heartbeat is asked of a running desk, so this starts one where none
+  is up: it is a diagnosis, not a read-only look (`hive ps` is that).
 
   Examples:
     hive doctor                  # probe self
@@ -810,6 +819,10 @@ Options:
   docs/runtime-model.md for semantics. `self` is a string pointer: look
   yourself up in `members[]` for your own state.
 
+  Those fields come from the team's hived, so this verb starts one where
+  none is up and the desk then stays for its own idle stretch. `hive ps`
+  is the inventory that starts nothing.
+
   If the current tmux window has no team bound, returns a bootstrap payload
   instead: `team=null`, a pane list, and a `hint` telling you to run `hive
   create`.
@@ -867,7 +880,13 @@ Options:
 
   Nothing else moves: no receipt, no PATH edit, no plugin sync, no restart
   of the hived or of any member. An already-running hived keeps its own
-  image until it picks the new bytes up on its own.
+  image until it picks the new bytes up, which happens one of two ways and
+  the wall clock does not decide which: the desk itself re-execs in place
+  (same pid) at one of its 5s checks, once two of them agree on the new
+  binary and no request or unfinished workflow node is outstanding; or a
+  hive verb gets there first, finds a build that is not its own on the
+  socket and replaces that generation with a new pid. Either way the
+  in-memory state — engine clients, idle clock, idle-notify — starts over.
 
   Exit codes: without --check, 0 whenever nothing is wrong (installed,
   already latest, ahead of the release) and non-zero on failure. With
