@@ -3007,6 +3007,34 @@ fn test_idle_notify_agent_panes_filters_to_live_agent_roles() {
 
 // ---- socket server / lifecycle -----------------------------------------
 
+/// A fake hived's side of the admission preflight: read the client's
+/// `admit` line and answer it admitted at this api version.
+fn admit_preflight(conn: &mut UnixStream) {
+    use std::io::BufRead;
+    let mut line = String::new();
+    std::io::BufReader::new(&*conn)
+        .read_line(&mut line)
+        .unwrap();
+    let preflight: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(preflight["action"], ADMIT_ACTION);
+    (&*conn)
+        .write_all(
+            format!("{{\"ok\":true,\"admitted\":true,\"apiVersion\":{HIVED_API_VERSION}}}\n")
+                .as_bytes(),
+        )
+        .unwrap();
+}
+
+/// A handler thread drops its lease after the client has its reply; wait
+/// for that before asserting on the admission counts.
+fn settle_leases() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while requests_in_flight() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!requests_in_flight(), "a handler lease never settled");
+}
+
 fn short_workspace() -> tempfile::TempDir {
     // AF_UNIX sun_path caps near 104 bytes: the hived socket cannot live
     // under a long tmp path.
@@ -3100,7 +3128,8 @@ fn test_serve_requests_answers_a_read_while_a_send_holds_the_transport() {
     let server = Arc::new(open_server_socket(&workspace).unwrap());
 
     let ws_slow = workspace.clone();
-    let slow_client = thread::spawn(move || request_hived(&ws_slow, &action_payload("send"), 10.0));
+    let slow_client =
+        thread::spawn(move || request_admitted(&ws_slow, &action_payload("send"), 10.0).ok());
     let ws_serve = workspace.clone();
     let server_serve = Arc::clone(&server);
     let serve_thread = thread::spawn(move || {
@@ -4706,9 +4735,9 @@ fn test_reexec_hived_stops_monitor_closes_socket_and_execs() {
         *calls.lock().unwrap(),
         vec![
             "lock /ws".to_string(),
-            "monitor.stop".to_string(),
             "server.close".to_string(),
             "cleanup /ws".to_string(),
+            "monitor.stop".to_string(),
             "execv /tmp/fake-hive --hived /ws team-a dev:3 @99 env=42".to_string(),
             "release Some(42)".to_string(),
         ]
@@ -5112,6 +5141,7 @@ fn test_request_send_survives_delayed_but_valid_acceptance() {
     thread::spawn(move || {
         let (conn, _) = listener.accept().unwrap();
         let mut conn = conn;
+        admit_preflight(&mut conn);
         let mut buf = [0u8; 65536];
         loop {
             match conn.read(&mut buf) {
@@ -6747,16 +6777,19 @@ fn test_draining_rejects_new_requests_before_any_handler_side_effect() {
     });
     let tmp = short_workspace();
     let workspace = tmp.path().to_str().unwrap().to_string();
-    let server = open_server_socket(&workspace).unwrap();
+    let raw = open_server_socket(&workspace).unwrap();
+    let server = RequestServer::start(Box::new(raw), &workspace, "t", "", "", "start").unwrap();
     close_admission();
-    let client_ws = workspace.clone();
-    let client =
-        thread::spawn(move || request_hived(&client_ws, &action_payload("node-dispatch"), 2.0));
-    reject_draining_request(&server);
-    let reply = client.join().unwrap().unwrap();
+    // The accept worker refuses on its own: an old-format request hears
+    // notAdmitted, a preflight is refused before any payload is written.
+    let reply = request_hived(&workspace, &action_payload("node-dispatch"), 2.0).unwrap();
     assert_eq!(reply["ok"], false);
     assert_eq!(reply["notAdmitted"], true);
+    let err = request_admitted(&workspace, &action_payload("node-dispatch"), 2.0).unwrap_err();
+    assert!(matches!(err, RequestFailure::NotAdmitted(_)), "{err:?}");
     assert!(!requests_in_flight());
+    assert_eq!(admission().lock().unwrap().usage, 0);
+    assert_eq!(admission().lock().unwrap().arrivals, 2);
     assert!(!hooked_run_dir(&workspace).join("operations").exists());
     server.close();
 }
@@ -6957,6 +6990,7 @@ fn test_ensure_hived_uses_old_generation_when_graceful_shutdown_is_deferred() {
                     "hiveHome",
                     Value::from(crate::paths::hive_home().to_string_lossy().to_string()),
                 ),
+                ("apiVersion", Value::from(HIVED_API_VERSION)),
                 ("buildHash", Value::from("old")),
                 ("hived", Value::Object(hived_metadata("start"))),
             ]))
@@ -6994,16 +7028,11 @@ fn test_ensure_hived_uses_old_generation_when_graceful_shutdown_is_deferred() {
 fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
     let _guard = testhook::install(Hook::default());
     let tmp = short_workspace();
-    admission().lock().unwrap().leases += 1;
-    let lease = RequestLease::default();
-    let server = RecServer {
-        calls: Arc::new(Mutex::new(Vec::new())),
-    };
+    let lease = RequestLease::reserve(&mut admission().lock().unwrap());
     SHUTDOWN.store(true, Ordering::SeqCst);
     close_admission();
     assert!(!finish_shutdown(
         tmp.path().to_str().unwrap(),
-        &server,
         Duration::ZERO
     ));
     assert!(!SHUTDOWN.load(Ordering::SeqCst));
@@ -7011,7 +7040,6 @@ fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
     FORCE_SHUTDOWN.store(true, Ordering::SeqCst);
     assert!(finish_shutdown(
         tmp.path().to_str().unwrap(),
-        &server,
         Duration::ZERO
     ));
     drop(lease);
@@ -7023,14 +7051,11 @@ fn sleep_probe_env() -> LoopProbeEnv {
     testhook::update(|h| {
         h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
         h.is_tmux_window_alive = Some(Arc::new(|_| false));
+        // The sleep commit takes the real startup lock on the probe
+        // workspace; the lock it releases is real too.
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
     });
     env
-}
-
-fn sleep_server() -> RecServer {
-    RecServer {
-        calls: Arc::new(Mutex::new(Vec::new())),
-    }
 }
 
 /// A team window the display probe sees, on a session nobody watches
@@ -7040,6 +7065,7 @@ fn unwatched_probe_env(watching: Option<usize>) -> LoopProbeEnv {
     crate::registry::record_team("probe", &env.workspace, "123", &[], "").unwrap();
     testhook::update(|h| {
         h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
         h.watching_clients = Some(Arc::new(move |session| {
             assert_eq!(session, "probe");
             watching
@@ -7248,24 +7274,33 @@ fn test_sleep_drops_owned_clients_without_parking_leaders() {
         Some(vec![alpha.to_string(), beta.to_string()])
     );
 
-    let server = sleep_server();
     let mut state = SleepState::default();
     // A member mid-turn is not idle: no sleep, however long the desk sits.
     gl::tests::feed_turn_open(&alpha_proc, alpha, true);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 601.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
     // A key whose alias rebound it elsewhere is evidence nobody can read.
     gl::tests::feed_turn_open(&alpha_proc, alpha, false);
     fs::write(gl::alias_path_for_key(beta), "l-rebound").unwrap();
     assert_eq!(gl::pool().idle_owned_keys("probe"), None);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1202.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1202.0));
     fs::remove_file(gl::alias_path_for_key(beta)).unwrap();
     assert!(!alpha_proc.terminated() && !beta_proc.terminated());
 
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1800.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", None, &server, 2401.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1800.0));
+    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 2401.0));
 
     assert_eq!(display_events(&env, "hived.sleep").len(), 1);
+    // The commit names the clients; they go only once the loop's teardown
+    // has closed the listener, still under the startup lock it holds.
+    let retirement = state.take_retirement().expect("the commit holds the lock");
+    assert!(
+        !alpha_proc.terminated() && !beta_proc.terminated(),
+        "no client is dropped before the listener closes"
+    );
+    let lock_fd = retirement.lock_fd;
+    retirement.drop_clients();
+    release_reexec_lock_fd_impl(Some(lock_fd));
     assert!(
         alpha_proc.terminated() && beta_proc.terminated(),
         "both owned clients are closed"
@@ -7298,16 +7333,15 @@ fn test_sleep_drops_owned_clients_without_parking_leaders() {
 fn test_sleep_timer_resets_when_display_or_registry_window_returns() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
-    let server = sleep_server();
     let snap = TickSnapshot::with_extras("ok", Vec::new(), HashMap::new(), None, None);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
     crate::registry::set_display("probe", "@2").unwrap();
     testhook::update(|h| h.is_tmux_window_alive = Some(Arc::new(|id| id == "@2")));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 599.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), "", 599.0));
     testhook::update(|h| h.is_tmux_window_alive = Some(Arc::new(|_| false)));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 601.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 1200.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 1201.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), "", 1200.0));
+    assert!(state.tick(&env.workspace, "probe", "@1", Some(&snap), "", 1201.0));
     assert_eq!(
         display_events(&env, "hived.sleep")[0]["reason"],
         "window-gone"
@@ -7317,14 +7351,13 @@ fn test_sleep_timer_resets_when_display_or_registry_window_returns() {
 #[test]
 fn test_sleep_obligations_reset_the_timer() {
     let env = sleep_probe_env();
-    let server = sleep_server();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
-    admission().lock().unwrap().leases += 1;
-    let lease = RequestLease::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
+    let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
+    lease.classify("send");
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 600.0));
     drop(lease);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1200.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1200.0));
     let path = prepare_operation(
         &env.workspace,
         "probe",
@@ -7334,22 +7367,21 @@ fn test_sleep_obligations_reset_the_timer() {
         "node",
     )
     .unwrap();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1800.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1800.0));
     operation_terminal(&path, Map::new()).unwrap();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 2400.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 2400.0));
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| None)));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 3000.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 3000.0));
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 3600.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", None, &server, 4200.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 3600.0));
+    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 4200.0));
 }
 
 #[test]
 fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
     let env = sleep_probe_env();
-    let server = sleep_server();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
     for action in [
         "ping",
         "doctor",
@@ -7358,71 +7390,78 @@ fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
         "node-result",
         "turn-open",
     ] {
-        admission().lock().unwrap().leases += 1;
-        let mut lease = RequestLease::default();
+        let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
         lease.classify(action);
-        assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 599.0));
+        assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 599.0));
         drop(lease);
     }
-    admission().lock().unwrap().leases += 1;
-    let mut usage = RequestLease::default();
+    let mut usage = RequestLease::reserve(&mut admission().lock().unwrap());
     usage.classify("send");
     drop(usage);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 601.0));
-    admission().lock().unwrap().leases += 1;
-    let mut reader = RequestLease::default();
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
+    let mut reader = RequestLease::reserve(&mut admission().lock().unwrap());
     reader.classify("ping");
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1201.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1201.0));
     drop(reader);
-    assert!(state.tick(&env.workspace, "probe", "@1", None, &server, 1201.0));
+    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 1201.0));
 }
 
 #[test]
 fn test_sleep_drain_new_connection_cancels_retirement() {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-    struct Queued(Mutex<Option<UnixStream>>);
-    impl HivedServerApi for Queued {
-        fn wait_readable(&self, _: f64) -> bool {
-            self.0.lock().unwrap().is_some()
-        }
-        fn close(&self) {
-            panic!("must continue serving");
-        }
-        fn accept_timeout(&self, _: f64) -> Option<UnixStream> {
-            self.0.lock().unwrap().take()
-        }
-    }
+    // A connection that arrives once the gate is shut is refused by the
+    // accept worker with notAdmitted — nothing of it is served — and its
+    // arrival cancels the retirement at the final commit, so the retry
+    // finds this desk up. The idle clock is kept: the refused request was
+    // never classified, and a real use shows up as usage on the next tick.
     let env = sleep_probe_env();
-    let (mut client, accepted) = UnixStream::pair().unwrap();
-    client.write_all(b"{\"action\":\"send\"}").unwrap();
-    client.shutdown(std::net::Shutdown::Write).unwrap();
-    let server = Queued(Mutex::new(Some(accepted)));
+    let workspace = env.workspace.clone();
+    let raw = open_server_socket(&workspace).unwrap();
+    let server = RequestServer::start(Box::new(raw), &workspace, "probe", "", "", "start").unwrap();
+    let refused = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&refused);
+    let ws = workspace.clone();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(move |_| {
+            // Asked again under the shut gate, before the commit: that is
+            // when a send arrives.
+            if admission().lock().unwrap().closed && sink.lock().unwrap().is_empty() {
+                let err = request_admitted(&ws, &action_payload("send"), 2.0).unwrap_err();
+                sink.lock().unwrap().push(err);
+            }
+            Some(Vec::new())
+        }));
+    });
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 600.0));
     assert!(!admission().lock().unwrap().closed);
     assert!(display_events(&env, "hived.sleep").is_empty());
-    let mut answer = String::new();
-    client.read_to_string(&mut answer).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&answer).unwrap()["notAdmitted"],
-        true
+    assert!(
+        matches!(
+            refused.lock().unwrap().as_slice(),
+            [RequestFailure::NotAdmitted(_)]
+        ),
+        "{:?}",
+        refused.lock().unwrap()
     );
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 601.0));
+    assert_eq!(admission().lock().unwrap().usage, 0);
     assert_eq!(
-        handle_request(
-            &env.workspace,
-            "probe",
-            "",
-            "",
-            "start",
-            &action_payload("ping")
-        )
-        .0["ok"],
-        true
+        state.idle_since(),
+        Some(0.0),
+        "a refused arrival keeps the clock"
     );
+    assert!(!requests_in_flight());
+    // The desk serves again at once.
+    let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+    assert_eq!(ping["ok"], true);
+    settle_leases();
+    testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
+    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
+    assert_eq!(display_events(&env, "hived.sleep").len(), 1);
+    let retirement = state.take_retirement().expect("the commit holds the lock");
+    server.close();
+    release_reexec_lock_fd_impl(Some(retirement.lock_fd));
 }
 
 #[test]
@@ -7516,30 +7555,30 @@ fn test_send_wakes_a_sleeping_hived_and_delivers_once() {
 
 #[test]
 fn test_sleep_drain_new_node_cancels_without_interrupting_it() {
-    struct LateNode(String);
-    impl HivedServerApi for LateNode {
-        fn wait_readable(&self, _: f64) -> bool {
-            false
-        }
-        fn close(&self) {
-            panic!("new node keeps the desk awake");
-        }
-        fn accept_timeout(&self, _: f64) -> Option<UnixStream> {
-            prepare_operation(&self.0, "probe", "123", "nd-late", "worker", "node").unwrap();
-            None
-        }
-    }
+    // A node that becomes pending after the gate shut but before the
+    // commit — one an admitted handler journaled while the coordinator
+    // was between its checks — cancels the retirement and is left as it
+    // is: no interruption, no terminal result written for it.
     let env = sleep_probe_env();
-    let server = LateNode(env.workspace.clone());
+    let workspace = env.workspace.clone();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(move |_| {
+            if admission().lock().unwrap().closed && pending_operations(&workspace) == 0 {
+                prepare_operation(&workspace, "probe", "123", "nd-late", "worker", "node").unwrap();
+            }
+            Some(Vec::new())
+        }));
+    });
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 600.0));
     assert!(!admission().lock().unwrap().closed);
     assert_eq!(pending_operations(&env.workspace), 1);
     let record = saved_operation(Path::new(&env.workspace), "nd-late");
     assert_eq!(record["state"], "prepared");
     assert!(record.get("result").is_none());
     assert!(display_events(&env, "hived.sleep").is_empty());
+    assert!(state.take_retirement().is_none());
 }
 
 #[test]
@@ -7604,7 +7643,7 @@ fn assert_hived_answers_while_sampling(reexec: bool) {
 }
 
 #[test]
-fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
+fn test_idle_accept_worker_holds_no_lease_and_refuses_closed_arrival() {
     use std::io::{Read, Write};
     struct Observed {
         server: ServerSocket,
@@ -7622,7 +7661,10 @@ fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
             self.server.accept_timeout(timeout)
         }
     }
-    let _guard = testhook::install(Hook::default());
+    let _guard = testhook::install(Hook {
+        handle_request: Some(Arc::new(|_| panic!("closed arrival was admitted"))),
+        ..Default::default()
+    });
     let tmp = short_workspace();
     let workspace = tmp.path().to_str().unwrap();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -7640,9 +7682,8 @@ fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    client.write_all(b"{\"action\":\"send\"}").unwrap();
+    client.write_all(b"{\"action\":\"send\"}\n").unwrap();
     client.shutdown(std::net::Shutdown::Write).unwrap();
-    assert!(reject_draining_request(server.as_ref()));
     let mut reply = String::new();
     client.read_to_string(&mut reply).unwrap();
     assert_eq!(
@@ -7650,5 +7691,6 @@ fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
         true
     );
     assert!(!requests_in_flight());
+    assert_eq!(admission().lock().unwrap().arrivals, 1);
     server.close();
 }

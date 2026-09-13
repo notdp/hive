@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::devlog;
 
@@ -207,11 +207,18 @@ impl Drop for StartupLock {
 /// A hived of this hive home that is another build, api version or team
 /// is replaced from this binary. One serving the workspace from another
 /// `HIVE_HOME` is refused, not restarted: nothing is spawned and the error
-/// names both homes.
+/// names both homes. One that is retiring or draining (`Busy`) is asked
+/// again within the identity budget, never replaced on that answer alone.
+///
+/// A stale build that declines the graceful stop, or does not leave in
+/// time, keeps serving only while it speaks this binary's api: the caller
+/// hears which build answers and why. A different api is refused outright,
+/// so no payload the two builds might read differently goes out.
 ///
 /// The error cases are all loud: a startup lock that cannot be taken within
-/// its budget, a hived this hive must not touch, and a spawned hived that
-/// never answered a matching ping.
+/// its budget, a hived this hive must not touch, one that stayed busy for
+/// the whole budget, and a spawned hived that never answered a matching
+/// ping.
 pub fn ensure_hived(
     workspace: &str,
     team: &str,
@@ -219,7 +226,7 @@ pub fn ensure_hived(
     tmux_window_id: &str,
 ) -> Result<Option<i32>> {
     let mut lock = StartupLock::acquire(workspace)?;
-    let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
+    let response = identity_ping(workspace, team)?;
     match hived_identity(response.as_ref(), team) {
         HivedIdentity::Matches => return Ok(None),
         HivedIdentity::ForeignHome(served) => bail!(
@@ -227,6 +234,7 @@ pub fn ensure_hived(
             crate::paths::hive_home().display()
         ),
         HivedIdentity::Restart => {}
+        HivedIdentity::Busy => unreachable!("identity_ping resolves a busy answer"),
     }
     if response.is_some() {
         // The retiring owner takes the same lock for cleanup. Do not
@@ -238,27 +246,29 @@ pub fn ensure_hived(
             false,
         );
         lock.reacquire()?;
-        if stopped == StopOutcome::Deferred {
-            return Ok(None);
-        }
-        let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
+        let response = identity_ping(workspace, team)?;
         if hived_identity_matches(response.as_ref(), team) {
             return Ok(None);
         }
-        if stopped == StopOutcome::TimedOut
-            && response
-                .as_ref()
-                .and_then(|r| r.get("team"))
-                .and_then(Value::as_str)
-                == Some(team)
-        {
-            if let HivedIdentity::ForeignHome(home) = hived_identity(response.as_ref(), team) {
-                bail!("hived now serves another hive home: {home}");
+        match stopped {
+            StopOutcome::Deferred => {
+                keep_old_generation(
+                    response.as_ref(),
+                    team,
+                    "it holds node operations and keeps serving until they finish",
+                )?;
+                return Ok(None);
             }
-            return Ok(None);
-        }
-        if stopped != StopOutcome::Stopped || response.is_some() {
-            bail!("hived is draining; retry after accepted operations finish");
+            StopOutcome::TimedOut if response.is_some() => {
+                keep_old_generation(
+                    response.as_ref(),
+                    team,
+                    "it did not leave within the stop budget and keeps serving",
+                )?;
+                return Ok(None);
+            }
+            StopOutcome::Stopped if response.is_none() => {}
+            _ => bail!("hived is draining; retry after accepted operations finish"),
         }
     }
     if std::os::unix::net::UnixStream::connect(socket_path(workspace)).is_ok() {
@@ -285,6 +295,66 @@ pub fn ensure_hived(
          see {}",
         devlog::hived_stderr_path(Path::new(workspace)).display()
     )
+}
+
+/// The identity ping, asked again while the desk answers busy: a shut
+/// gate is a retirement it may cancel or a drain that ends, not a
+/// generation to replace. The whole exchange fits the identity budget; a
+/// desk still busy at its end is an error, not a restart.
+fn identity_ping(workspace: &str, team: &str) -> Result<Option<Map<String, Value>>> {
+    let deadline = monotonic() + IDENTITY_PING_TIMEOUT;
+    loop {
+        let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
+        if hived_identity(response.as_ref(), team) != HivedIdentity::Busy {
+            return Ok(response);
+        }
+        if monotonic() >= deadline {
+            bail!(
+                "hived for team '{team}' is busy (retiring or draining) and did not admit a ping \
+                 within {IDENTITY_PING_TIMEOUT}s; retry"
+            );
+        }
+        thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
+    }
+}
+
+/// A generation this binary asked to stop is still serving: allowed to,
+/// with the reason on stderr, when it is this team's under this home and
+/// speaks this api; refused otherwise, since a payload the two builds
+/// read differently must not go out.
+fn keep_old_generation(response: Option<&Map<String, Value>>, team: &str, why: &str) -> Result<()> {
+    let Some(response) = response else {
+        bail!("hived is draining; retry after accepted operations finish");
+    };
+    if let HivedIdentity::ForeignHome(home) = hived_identity(Some(response), team) {
+        bail!("hived now serves another hive home: {home}");
+    }
+    let served_team = response.get("team").and_then(Value::as_str).unwrap_or("");
+    if served_team != team {
+        bail!("hived on this workspace now serves team '{served_team}', not '{team}'");
+    }
+    let api = response.get("apiVersion").and_then(Value::as_i64);
+    let old_build = response
+        .get("buildHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let short = |hash: &str| hash[..hash.len().min(12)].to_string();
+    if api != Some(HIVED_API_VERSION) {
+        bail!(
+            "hived for team '{team}' is build {} speaking api {} while this binary is build {} \
+             speaking api {HIVED_API_VERSION}; {why}, and this binary will not send it requests \
+             it may read differently — retry once it has retired",
+            short(old_build),
+            api.map_or("unknown".to_string(), |v| v.to_string()),
+            short(hived_build_hash())
+        );
+    }
+    eprintln!(
+        "warning: hived for team '{team}' is build {} (this binary is build {}); {why}",
+        short(old_build),
+        short(hived_build_hash())
+    );
+    Ok(())
 }
 
 pub(super) fn hooked_current_exe() -> String {
@@ -635,7 +705,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         });
 
         if !hooked_wait_tick(IDLE_NOTIFY_TICK_SECONDS) {
-            if finish_shutdown(workspace, server.as_ref(), Duration::from_secs(5)) {
+            if finish_shutdown(workspace, Duration::from_secs(5)) {
                 break;
             }
             continue;
@@ -659,32 +729,46 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             team,
             tmux_window_id,
             snap.as_ref(),
-            server.as_ref(),
+            &owner_token,
             monotonic(),
         ) {
             break;
         }
     }
 
+    // Retirement, in one order for every reason: under the startup lock
+    // — a sleep took it at its final commit, every other exit takes it
+    // here (ensure releases it before requesting shutdown, so a competing
+    // starter cannot bind between the owner check and the unlink) — the
+    // gate shuts, the accept worker is joined and the listener closed, the
+    // journal gets its interruptions, the socket goes if it is still this
+    // generation's, and only then the slow work: the monitor's join and
+    // the pool clients this desk held. The lock outlasts all of it, so no
+    // starter binds while this generation may still write shared state.
+    let retirement = sleep.take_retirement();
+    let lock_fd = match retirement.as_ref() {
+        Some(retirement) => retirement.lock_fd,
+        None => loop {
+            if let Some(fd) = hooked_try_acquire_reexec_lock(workspace) {
+                break fd;
+            }
+            thread::sleep(Duration::from_millis(20));
+        },
+    };
+    close_admission();
+    server.close();
+    if !SHUTDOWN.load(Ordering::SeqCst) && Path::new(workspace).is_dir() {
+        interrupt_operations(workspace, retirement_reason);
+    }
+    cleanup_socket_if_owner(workspace, &owner_token);
     if let Some(monitor) = busy_monitor.as_ref() {
         monitor.stop();
     }
     set_output_busy_monitor(None);
-    close_admission();
-    if !SHUTDOWN.load(Ordering::SeqCst) && Path::new(workspace).is_dir() {
-        interrupt_operations(workspace, retirement_reason);
+    if let Some(retirement) = retirement {
+        retirement.drop_clients();
     }
-    server.close();
-    // ensure releases this lock before requesting shutdown; competing
-    // starters cannot bind between our owner check and unlink.
-    loop {
-        if let Some(fd) = hooked_try_acquire_reexec_lock(workspace) {
-            cleanup_socket_if_owner(workspace, &owner_token);
-            hooked_release_reexec_lock_fd(Some(fd));
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    hooked_release_reexec_lock_fd(Some(lock_fd));
 }
 
 fn now_epoch_seconds() -> i64 {
@@ -700,14 +784,12 @@ pub(super) fn drain_ready(workspace: &str) -> bool {
 
 /// Await only already accepted request handlers. A late node dispatch or a
 /// slow handler cancels graceful retirement; forced deletion has a deadline.
-pub(super) fn finish_shutdown(
-    workspace: &str,
-    server: &dyn HivedServerApi,
-    timeout: Duration,
-) -> bool {
+pub(super) fn finish_shutdown(workspace: &str, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while requests_in_flight() && std::time::Instant::now() < deadline {
-        reject_draining_request(server);
+        // The accept worker refuses arrivals meanwhile; only the leases
+        // already handed out are waited for.
+        thread::sleep(Duration::from_millis(20));
     }
     if FORCE_SHUTDOWN.load(Ordering::SeqCst) {
         interrupt_operations(workspace, "forced shutdown");

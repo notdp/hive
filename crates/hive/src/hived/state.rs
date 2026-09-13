@@ -85,15 +85,34 @@ pub(super) fn codex_reattach_at() -> &'static Mutex<HashMap<String, f64>> {
 
 pub(super) static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 pub(super) static FORCE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
-/// Admission and the outstanding count share one lock. The accept loop
-/// accepts without blocking and reserves the handler lease under this lock.
+/// Admission and the outstanding counts share one lock. The accept worker
+/// accepts without blocking and reserves the handler lease under this lock
+/// while the gate is open; while it is shut, an accepted connection is
+/// only counted as an arrival and refused, holding no lease.
 /// Waiting for listener readiness holds no lease and cannot postpone sleep.
+///
+/// A lease is `unclassified` from accept until the handler has read the
+/// request's action: it delays the final exit but says nothing about
+/// whether the desk is in use. Only a classified write bumps `usage`.
 #[derive(Default)]
 pub(super) struct Admission {
     pub closed: bool,
     pub leases: usize,
     pub readers: usize,
+    pub unclassified: usize,
     pub usage: u64,
+    /// Connections accepted while the gate was shut. Sleep compares the
+    /// count before and after its final checks: an arrival in between, even
+    /// one that was refused, cancels this retirement so the retry lands.
+    pub arrivals: u64,
+}
+
+impl Admission {
+    /// Leases that are a request in progress: not a reader, not one whose
+    /// action is still unread.
+    pub(super) fn working(&self) -> bool {
+        self.leases > self.readers + self.unclassified
+    }
 }
 
 pub(super) fn admission() -> &'static Mutex<Admission> {
@@ -101,18 +120,39 @@ pub(super) fn admission() -> &'static Mutex<Admission> {
     CELL.get_or_init(|| Mutex::new(Admission::default()))
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum LeaseKind {
+    #[default]
+    Unclassified,
+    Read,
+    Write,
+}
+
 pub(super) struct RequestLease {
-    read_only: bool,
+    kind: LeaseKind,
 }
 
 impl RequestLease {
+    /// Reserve a lease under the admission lock the caller holds.
+    pub(super) fn reserve(state: &mut Admission) -> RequestLease {
+        state.leases += 1;
+        state.unclassified += 1;
+        RequestLease {
+            kind: LeaseKind::Unclassified,
+        }
+    }
+
     pub(super) fn classify(&mut self, action: &str) {
         let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
+        if self.kind != LeaseKind::Unclassified {
+            return;
+        }
+        state.unclassified -= 1;
         if read_only_request(action) {
-            self.read_only = true;
+            self.kind = LeaseKind::Read;
             state.readers += 1;
         } else {
+            self.kind = LeaseKind::Write;
             state.usage = state.usage.wrapping_add(1);
         }
     }
@@ -125,12 +165,24 @@ pub(super) fn read_only_request(action: &str) -> bool {
     )
 }
 
+/// The actions with a side effect on the line: a new-format client sends
+/// them only after the hived admitted the request on the same connection,
+/// and the hived refuses them without that preflight.
+pub(crate) fn admission_required(action: &str) -> bool {
+    matches!(
+        action,
+        "send" | "node-dispatch" | "connect-codex" | "connect-grok"
+    )
+}
+
 impl Drop for RequestLease {
     fn drop(&mut self) {
         let mut state = admission().lock().unwrap_or_else(|e| e.into_inner());
         state.leases -= 1;
-        if self.read_only {
-            state.readers -= 1;
+        match self.kind {
+            LeaseKind::Unclassified => state.unclassified -= 1,
+            LeaseKind::Read => state.readers -= 1,
+            LeaseKind::Write => {}
         }
     }
 }

@@ -260,12 +260,15 @@ pub(crate) fn reexec_hived(
 
     let previous_lock_env = std::env::var(HIVED_REEXEC_LOCK_ENV).ok();
     std::env::set_var(HIVED_REEXEC_LOCK_ENV, lock_fd.to_string());
+    // Intake closes first: with the worker joined and the socket gone, a
+    // late arrival meets no listener and starts its retry, and no
+    // connection queues behind the slow monitor join to be reset later.
+    server.close();
+    hooked_cleanup_socket(workspace);
     if let Some(monitor) = busy_monitor {
         monitor.stop();
     }
     set_output_busy_monitor(None);
-    server.close();
-    hooked_cleanup_socket(workspace);
     if let Some(cb) = on_reexec {
         cb();
     }

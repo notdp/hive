@@ -31,16 +31,49 @@ pub(crate) fn request_send_payload(
     if warn_on_long_body {
         maybe_warn_long_body(body, command_name);
     }
-    ensure_team_hived(team, std::path::Path::new(workspace))?;
-    let payload = crate::hived::request_send(
-        workspace,
-        &team.name,
-        sender_agent,
-        target_agent,
-        body,
-        artifact,
-    );
+    let payload = admitted_request(workspace, team, || {
+        crate::hived::request_send(
+            workspace,
+            &team.name,
+            sender_agent,
+            target_agent,
+            body,
+            artifact,
+        )
+    })?;
     hived_send_result(workspace, payload, command_name)
+}
+
+/// How often a request the hived would not admit is tried again, and the
+/// pause between tries. A refusal at the preflight is a desk retiring or
+/// draining: the retry finds it back up (a cancelled sleep reopens within
+/// the tick), or finds no listener and starts the next generation through
+/// `ensure_team_hived`. Nothing was sent, so nothing repeats.
+const ADMISSION_ATTEMPTS: usize = 3;
+const ADMISSION_RETRY_GAP: f64 = 0.25;
+
+/// A request with a side effect, behind the hived's admission: the desk
+/// is ensured before every attempt, and only a failure from before the
+/// payload went out is tried again.
+fn admitted_request(
+    workspace: &str,
+    team: &Team,
+    mut request: impl FnMut() -> Result<Map<String, Value>, RequestFailure>,
+) -> Result<Result<Map<String, Value>, RequestFailure>> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        ensure_team_hived(team, std::path::Path::new(workspace))?;
+        let answer = request();
+        let retry = matches!(
+            answer,
+            Err(RequestFailure::NotAdmitted(_)) | Err(RequestFailure::NoListener)
+        );
+        if !retry || attempt >= ADMISSION_ATTEMPTS {
+            return Ok(answer);
+        }
+        std::thread::sleep(std::time::Duration::from_secs_f64(ADMISSION_RETRY_GAP));
+    }
 }
 
 /// Why a node dispatch has no seq. `Refused`: the hived answered `ok:false`
@@ -76,16 +109,17 @@ pub(crate) fn request_node_dispatch(
     artifact: &str,
     dispatch_id: &str,
 ) -> Result<Map<String, Value>, DispatchFailure> {
-    ensure_team_hived(team, std::path::Path::new(workspace))
-        .map_err(|err| DispatchFailure::Refused(err.to_string()))?;
-    let answer = crate::hived::request_node_dispatch(
-        workspace,
-        &team.name,
-        target_agent,
-        body,
-        artifact,
-        dispatch_id,
-    );
+    let answer = admitted_request(workspace, team, || {
+        crate::hived::request_node_dispatch(
+            workspace,
+            &team.name,
+            target_agent,
+            body,
+            artifact,
+            dispatch_id,
+        )
+    })
+    .map_err(|err| DispatchFailure::Refused(err.to_string()))?;
     hived_answer(workspace, answer, "node dispatch")
 }
 
@@ -102,9 +136,9 @@ fn hived_send_result(
     })
 }
 
-/// The hived's answer as a result: `ok:false` and an unsent request are
-/// `Refused`, a lost answer is `Unknown`, and `ok` is stripped from a
-/// success.
+/// The hived's answer as a result: `ok:false`, an unsent request and one
+/// the hived would not admit (nothing went out) are `Refused`, a lost
+/// answer is `Unknown`, and `ok` is stripped from a success.
 fn hived_answer(
     workspace: &str,
     answer: Result<Map<String, Value>, RequestFailure>,
@@ -126,6 +160,16 @@ fn hived_answer(
             return Err(DispatchFailure::Refused(
                 crate::devlog::hived_unavailable_message(std::path::Path::new(workspace)),
             ))
+        }
+        Err(RequestFailure::NotAdmitted(reason)) => {
+            return Err(DispatchFailure::Refused(format!(
+                "{command_name}: hived did not admit the request ({reason}); nothing was sent"
+            )))
+        }
+        Err(RequestFailure::Incompatible(reason)) => {
+            return Err(DispatchFailure::Refused(format!(
+                "{command_name}: {reason}"
+            )))
         }
     };
     if payload.get("ok") == Some(&Value::Bool(false)) {

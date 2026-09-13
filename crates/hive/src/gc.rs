@@ -960,7 +960,9 @@ fn hived_runtime(workspace: &str, team: &str) -> Result<Option<Map<String, Value
     match crate::hived::request_team_runtime_answer(workspace, team) {
         Ok(runtime) => Ok(Some(runtime)),
         Err(crate::hived::RequestFailure::NoListener) => Ok(None),
-        Err(crate::hived::RequestFailure::NotSent(reason)) => {
+        Err(crate::hived::RequestFailure::NotSent(reason))
+        | Err(crate::hived::RequestFailure::NotAdmitted(reason))
+        | Err(crate::hived::RequestFailure::Incompatible(reason)) => {
             Err(format!("hived socket unreachable ({reason})"))
         }
         Err(crate::hived::RequestFailure::AnswerLost(reason)) => {

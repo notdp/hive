@@ -11,9 +11,13 @@ use serde_json::{Map, Value};
 
 use super::*;
 
-/// Why a request got no answer. `NoListener` and `NotSent`: it never
-/// reached the hived — no socket or nobody on it, the connect or the write
-/// failed — so nothing was served.
+/// Why a request got no answer. `NoListener`, `NotSent` and `NotAdmitted`:
+/// the business payload never reached the hived — no socket or nobody on
+/// it, the connect or the write failed, or the hived answered the
+/// admission preflight with a refusal (or went away before answering it) —
+/// so nothing was served and the request may be sent again.
+/// `Incompatible`: a hived answered, but speaks another api than this
+/// binary; the payload was withheld. Not retried.
 /// `AnswerLost`: the request went out whole and the answer did not come
 /// back (read failed or timed out, empty, unparsable), so the hived may
 /// have served it. A caller with a side effect on the line (a node
@@ -26,39 +30,35 @@ pub(crate) enum RequestFailure {
     /// The request never reached a hived, for a reason that is not
     /// "nobody there" (a permission error, a failed timeout or write).
     NotSent(String),
+    /// The hived did not admit the request: the gate was shut (it is
+    /// retiring or draining), or the connection ended at the preflight.
+    /// No business payload was written.
+    NotAdmitted(String),
+    Incompatible(String),
     AnswerLost(String),
 }
 
-pub(crate) fn request_hived_answer(
-    workspace: &str,
-    payload: &Map<String, Value>,
-    timeout: f64,
-) -> Result<Map<String, Value>, RequestFailure> {
+fn connect_hived(workspace: &str) -> Result<UnixStream, RequestFailure> {
     let path = socket_path(workspace);
     if !path.exists() {
         return Err(RequestFailure::NoListener);
     }
-    let dur = Some(Duration::from_secs_f64(timeout.max(0.001)));
-    let not_sent = |e: std::io::Error| RequestFailure::NotSent(e.to_string());
-    let mut client = UnixStream::connect(&path).map_err(|e| match e.kind() {
+    UnixStream::connect(&path).map_err(|e| match e.kind() {
         std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound => {
             RequestFailure::NoListener
         }
-        _ => not_sent(e),
-    })?;
-    client.set_read_timeout(dur).map_err(not_sent)?;
-    client.set_write_timeout(dur).map_err(not_sent)?;
-    let mut body = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
-    body.push('\n');
-    client.write_all(body.as_bytes()).map_err(not_sent)?;
-    // From here the whole request is with the hived: every failure is a
-    // lost answer, not an unsent request.
+        _ => RequestFailure::NotSent(e.to_string()),
+    })
+}
+
+/// The reply to a request the hived took whole: every failure from here is
+/// a lost answer, not an unsent request.
+fn read_answer(mut reader: impl Read) -> Result<Map<String, Value>, RequestFailure> {
     let lost = |e: std::io::Error| RequestFailure::AnswerLost(e.to_string());
-    client.shutdown(std::net::Shutdown::Write).map_err(lost)?;
     let mut chunks = Vec::new();
     let mut buf = [0u8; 65536];
     loop {
-        let n = client.read(&mut buf).map_err(lost)?;
+        let n = reader.read(&mut buf).map_err(lost)?;
         if n == 0 {
             break;
         }
@@ -73,6 +73,122 @@ pub(crate) fn request_hived_answer(
             "answer is not a JSON object".to_string(),
         )),
     }
+}
+
+fn json_line(payload: &Map<String, Value>) -> String {
+    let mut body = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_string());
+    body.push('\n');
+    body
+}
+
+/// The one-shot request format: the whole payload, then a read to EOF.
+/// This is the format read-only and control requests use — ping, doctor,
+/// shutdown — and the one an older hived understands, so a build that
+/// changed the api can still identify and retire the generation it found.
+pub(crate) fn request_hived_answer(
+    workspace: &str,
+    payload: &Map<String, Value>,
+    timeout: f64,
+) -> Result<Map<String, Value>, RequestFailure> {
+    let dur = Some(Duration::from_secs_f64(timeout.max(0.001)));
+    let not_sent = |e: std::io::Error| RequestFailure::NotSent(e.to_string());
+    let mut client = connect_hived(workspace)?;
+    client.set_read_timeout(dur).map_err(not_sent)?;
+    client.set_write_timeout(dur).map_err(not_sent)?;
+    client
+        .write_all(json_line(payload).as_bytes())
+        .map_err(not_sent)?;
+    // From here the whole request is with the hived: every failure is a
+    // lost answer, not an unsent request.
+    let lost = |e: std::io::Error| RequestFailure::AnswerLost(e.to_string());
+    client.shutdown(std::net::Shutdown::Write).map_err(lost)?;
+    read_answer(&client)
+}
+
+/// A request with a side effect on the line, sent only once the hived has
+/// admitted it on this very connection.
+///
+/// The preflight `{"action":"admit","forAction":<action>}` goes out first;
+/// the hived answers `admitted` with its api version while it holds a
+/// lease for this connection, or refuses. Only after that answer is the
+/// payload written, so every failure up to it — a refusal, an EOF, a reset
+/// as a retiring desk closes its listener, a timeout — is `NotAdmitted`
+/// with nothing sent, and the caller may try again. From the payload write
+/// on, the conservative `AnswerLost` rule applies.
+pub(crate) fn request_admitted(
+    workspace: &str,
+    payload: &Map<String, Value>,
+    timeout: f64,
+) -> Result<Map<String, Value>, RequestFailure> {
+    use std::io::BufRead;
+    let not_sent = |e: std::io::Error| RequestFailure::NotSent(e.to_string());
+    let action = payload
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let client = connect_hived(workspace)?;
+    let preflight_budget = Some(Duration::from_secs_f64(IDENTITY_PING_TIMEOUT));
+    client
+        .set_read_timeout(preflight_budget)
+        .map_err(not_sent)?;
+    client
+        .set_write_timeout(preflight_budget)
+        .map_err(not_sent)?;
+    let mut preflight = action_payload(ADMIT_ACTION);
+    preflight.insert("forAction".to_string(), Value::from(action.clone()));
+    let not_admitted =
+        |what: &str, e: std::io::Error| RequestFailure::NotAdmitted(format!("{what}: {e}"));
+    (&client)
+        .write_all(json_line(&preflight).as_bytes())
+        .map_err(|e| not_admitted("preflight not sent", e))?;
+    let mut reader = std::io::BufReader::new(&client);
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) => {
+            return Err(RequestFailure::NotAdmitted(
+                "hived closed the connection before admitting".to_string(),
+            ))
+        }
+        Ok(_) => {}
+        Err(e) => return Err(not_admitted("preflight answer lost", e)),
+    }
+    let answer = match serde_json::from_str::<Value>(&line) {
+        Ok(Value::Object(map)) => map,
+        _ => {
+            return Err(RequestFailure::NotAdmitted(
+                "preflight answer is not a JSON object".to_string(),
+            ))
+        }
+    };
+    if answer.get("ok") != Some(&Value::Bool(true))
+        || answer.get("admitted") != Some(&Value::Bool(true))
+    {
+        return Err(RequestFailure::NotAdmitted(
+            answer
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("request not admitted")
+                .to_string(),
+        ));
+    }
+    let api = answer.get("apiVersion").and_then(Value::as_i64);
+    if api != Some(HIVED_API_VERSION) {
+        return Err(RequestFailure::Incompatible(format!(
+            "hived speaks api {}, this binary api {HIVED_API_VERSION}; '{action}' not sent",
+            api.map_or("unknown".to_string(), |v| v.to_string())
+        )));
+    }
+    let dur = Some(Duration::from_secs_f64(timeout.max(0.001)));
+    client.set_read_timeout(dur).map_err(not_sent)?;
+    client.set_write_timeout(dur).map_err(not_sent)?;
+    // From the first payload byte the hived may have served it.
+    let lost = |e: std::io::Error| RequestFailure::AnswerLost(e.to_string());
+    (&client)
+        .write_all(json_line(payload).as_bytes())
+        .map_err(lost)?;
+    client.shutdown(std::net::Shutdown::Write).map_err(lost)?;
+    read_answer(reader)
 }
 
 pub(crate) fn request_hived(
@@ -111,7 +227,7 @@ pub(crate) fn socket_alive(workspace: &str) -> bool {
 /// member's first turn. Best-effort: returns None when the hived is down,
 /// and the lazy connect on the next runtime tick covers that case.
 pub fn request_connect_codex(workspace: &str) -> Option<Map<String, Value>> {
-    request_hived(workspace, &action_payload("connect-codex"), 3.0)
+    request_admitted(workspace, &action_payload("connect-codex"), 3.0).ok()
 }
 
 /// Ask the hived to bring the grok 2nd client for the pane's daemon key online now.
@@ -125,7 +241,7 @@ pub fn request_connect_codex(workspace: &str) -> Option<Map<String, Value>> {
 pub fn request_connect_grok(workspace: &str, pane: &str) -> Option<Map<String, Value>> {
     let mut payload = action_payload("connect-grok");
     payload.insert("pane".to_string(), Value::from(pane));
-    request_hived(workspace, &payload, 3.0)
+    request_admitted(workspace, &payload, 3.0).ok()
 }
 
 /// What a ping answer says about the hived on the workspace socket.
@@ -136,6 +252,10 @@ pub(crate) enum HivedIdentity {
     /// No hived, or one of this hive home that is another build, api
     /// version or team: replace it from this binary.
     Restart,
+    /// A hived is there and did not admit the ping: its gate is shut for a
+    /// retirement it may yet cancel, or a drain. Not a generation to
+    /// replace — ask again shortly.
+    Busy,
     /// A hived serving the workspace from another `HIVE_HOME` (the path it
     /// reported). Not this hive's to restart: a replacement started from
     /// here would run with this home, could not see that team's registry,
@@ -157,6 +277,11 @@ pub(crate) fn hived_identity(response: Option<&Map<String, Value>>, team: &str) 
         if Path::new(home) != crate::paths::hive_home().as_path() {
             return HivedIdentity::ForeignHome(home.to_string());
         }
+    }
+    if map.get("ok") == Some(&Value::Bool(false))
+        && map.get("notAdmitted") == Some(&Value::Bool(true))
+    {
+        return HivedIdentity::Busy;
     }
     let matches = map.get("ok") == Some(&Value::Bool(true))
         && map.get("apiVersion") == Some(&Value::from(HIVED_API_VERSION))
@@ -189,7 +314,7 @@ pub(crate) fn request_send(
     payload.insert("targetAgent".to_string(), Value::from(target_agent));
     payload.insert("body".to_string(), Value::from(body));
     payload.insert("artifact".to_string(), Value::from(artifact));
-    request_hived_answer(workspace, &payload, timeout)
+    request_admitted(workspace, &payload, timeout)
 }
 
 /// A `hive workflow run` dispatch: the same transport as a send, no sender.
@@ -210,7 +335,7 @@ pub(crate) fn request_node_dispatch(
     payload.insert("targetAgent".to_string(), Value::from(target_agent));
     payload.insert("body".to_string(), Value::from(body));
     payload.insert("artifact".to_string(), Value::from(artifact));
-    request_hived_answer(workspace, &payload, timeout)
+    request_admitted(workspace, &payload, timeout)
 }
 
 pub fn request_doctor(
