@@ -806,8 +806,22 @@ The wake hooks are a hive *home's*, not a team's: each hook is an indexed
 array and this home takes one entry per hook, carrying the resolved absolute
 `HIVE_HOME`, the installer's `HOME` and whatever engine homes it had, so a
 session showing teams of two homes, or holding the human's own hook, keeps
-every entry but this one. They leave a session only when no team of this home
-shows a window there any more.
+every entry but this one. The baked `HIVE_HOME` is the only proof of whose
+an entry is: an entry from before homes were baked in names a binary, and a
+binary is shared by every home installed from it, so such an entry is
+nobody's — never claimed, updated or removed. The arrays are shared state
+across every home on the server, so each install and each removal reads and
+writes them under one lock beside the server's socket
+(`<socket>.hive-hooks.lock`), and two homes installing at once cannot both
+take the same free index.
+
+The desk arms every session its display sits in, not only the primary's: a
+window of the instance linked or moved into a second session makes that
+session's terminals viewers, so a terminal arriving there alone must be able
+to bring the desk back. Each session's install is tracked and retried on its
+own, and an `unwatched` retirement is committed only once every one of them
+carries this home's entries. They leave a session only when no team of this
+home shows a window there any more.
 
 ### Admission: a side effect is admitted before it is sent
 
