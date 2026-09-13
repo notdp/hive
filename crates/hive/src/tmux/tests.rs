@@ -1068,6 +1068,30 @@ fn test_pane_scan_status_reads_a_sanitized_listing_as_unknown() {
 }
 
 #[test]
+fn test_run_refuses_a_tmux_tmpdir_that_is_gone() {
+    // tmux would fall back to the default server; hive must not follow.
+    let mut env = EnvGuard::cleared(&["TMUX", "TMUX_TMPDIR"]);
+    let gone = tempfile::tempdir().unwrap();
+    let path = gone.path().to_path_buf();
+    drop(gone);
+    env.set("TMUX_TMPDIR", &path);
+    let err = run(&["display-message", "-p", "x"], true, 5).unwrap_err();
+    assert!(
+        matches!(&err, TmuxError::Os(msg) if msg.contains("does not exist")),
+        "{err:?}"
+    );
+    // Inside tmux the server is named by TMUX itself: no refusal.
+    env.set("TMUX", "/tmp/tmux-0/default,1,0");
+    set_exec_override(|_argv, _timeout, _input| Ok(ok_run(0, "x\n", "")));
+    assert_eq!(
+        run(&["display-message", "-p", "x"], true, 5)
+            .unwrap()
+            .stdout,
+        "x\n"
+    );
+}
+
+#[test]
 fn test_tmux_client_gets_a_utf8_ctype_only_without_one() {
     let mut env = EnvGuard::cleared(&["LC_ALL", "LC_CTYPE", "LANG"]);
     let ctype_of = |cmd: &std::process::Command| -> (Option<String>, bool) {
