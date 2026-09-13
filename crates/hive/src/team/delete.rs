@@ -223,7 +223,6 @@ pub(crate) fn delete_team(
     if hive_built && !team_window_id.is_empty() && caller_window != team_window_id {
         tmux::kill_window(&team_window_id);
     }
-    release_wake_hooks(&display_session);
 
     // Explicit -w, else the entry's workspace; with neither there is no
     // workspace to stop or remove, and the team-dir sweep below still
@@ -288,6 +287,10 @@ pub(crate) fn delete_team(
         crate::registry::delete_team(name)?;
     }
 
+    // With the entry gone the team shows nowhere: the display's session
+    // keeps this home's wake hooks only for another team of this home.
+    release_wake_hooks(&display_session);
+
     // Last, because it is the point of no return for the engines: the hived
     // reaps orphan leaders only for its own team, and a deleted team has no
     // hived — an unswept leader would outlive every trace of who it served.
@@ -335,8 +338,8 @@ mod tests {
     use super::*;
     use crate::testenv::EnvGuard;
     use crate::testkit::{
-        args, count, display_env, display_env_outside, fake_tmux_sessions, has_row, member_row,
-        team_dir, DisplayEnv,
+        args, count, display_env, display_env_outside, fake_tmux_hooks, fake_tmux_sessions,
+        has_row, member_row, team_dir, DisplayEnv,
     };
 
     #[test]
@@ -486,6 +489,89 @@ mod tests {
 
         assert!(crate::registry::load("honey").is_none());
         assert_eq!(count(&argv, "kill-window"), 0);
+    }
+
+    /// Two teams of this home lent windows in the human's session `dev`
+    /// (`$1`), whose hooks hold the human's own entry, another hive home's
+    /// wake and this home's: deleting one team keeps this home's entries
+    /// (the other team still shows there); deleting the last removes this
+    /// home's and nothing else.
+    #[test]
+    fn test_wake_hooks_follow_display_and_remove_only_owned_entries() {
+        let mut env = display_env_outside();
+        env.env.set("HIVE_BIN", "/x/hive");
+        let home = env._tmp.path().join(".hive").to_string_lossy().into_owned();
+        let honey_ws = env
+            ._tmp
+            .path()
+            .join("honey-ws")
+            .to_string_lossy()
+            .into_owned();
+        let comb_ws = env
+            ._tmp
+            .path()
+            .join("comb-ws")
+            .to_string_lossy()
+            .into_owned();
+        crate::registry::record_team("honey", &honey_ws, "100", &[], "@7").unwrap();
+        crate::registry::record_team("comb", &comb_ws, "200", &[], "@8").unwrap();
+        let own = crate::tmux::wake_run_shell(&crate::tmux::wake_shell_line(
+            "/x/hive",
+            &[("HIVE_HOME".to_string(), home)],
+        ));
+        let own: &'static str = Box::leak(own.into_boxed_str());
+        let windows: &'static str = Box::leak(
+            format!("dev:2\t@7\thoney\t{honey_ws}\t\t100\ndev:3\t@8\tcomb\t{comb_ws}\t\t200\n")
+                .into_boxed_str(),
+        );
+        let hooks: &'static [(&'static str, &'static str)] = Box::leak(
+            vec![
+                ("client-attached[0]", "run-shell \"touch /tmp/user\""),
+                (
+                    "client-attached[1]",
+                    "run-shell -b \"HIVE_HOME=/other/home /y/hive wake --session #{q:session_id} >/dev/null 2>&1 || true\"",
+                ),
+                ("client-attached[2]", own),
+                ("client-session-changed[0]", own),
+                ("client-session-changed[1]", "display-message hi"),
+            ]
+            .into_boxed_slice(),
+        );
+        let argv = fake_tmux_hooks(windows, &[], &[], &["dev"], hooks);
+        let unsets = |argv: &crate::testkit::Argv| -> Vec<Vec<String>> {
+            argv.borrow()
+                .iter()
+                .filter(|a| a[0] == "set-hook")
+                .cloned()
+                .collect()
+        };
+        let listed = |argv: &crate::testkit::Argv| -> Vec<String> {
+            argv.borrow()
+                .iter()
+                .filter(|a| a[0] == "show-hooks")
+                .map(|a| a[2].clone())
+                .collect()
+        };
+
+        crate::team::delete_team("honey", &honey_ws, false, false, false).unwrap();
+        assert!(crate::registry::load("honey").is_none());
+        assert_eq!(count(&argv, "kill-window"), 0);
+        // comb still shows in `$1`: the hooks stay for it.
+        assert!(unsets(&argv).is_empty(), "{:?}", unsets(&argv));
+
+        crate::team::delete_team("comb", &comb_ws, false, false, false).unwrap();
+        assert_eq!(listed(&argv), vec!["$1".to_string()]);
+        assert_eq!(
+            unsets(&argv),
+            vec![
+                args(&["set-hook", "-u", "-t", "$1", "client-attached[2]"]),
+                args(&["set-hook", "-u", "-t", "$1", "client-session-changed[0]"]),
+            ]
+        );
+        // Running the release again finds nothing of this home's: no write.
+        super::release_wake_hooks("$1");
+        assert_eq!(unsets(&argv).len(), 2);
+        assert_eq!(listed(&argv).len(), 2);
     }
 
     #[test]

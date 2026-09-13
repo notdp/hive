@@ -7189,6 +7189,144 @@ fn test_a_starting_hived_installs_the_wake_hooks_on_its_team_session() {
     assert_eq!(*installed.lock().unwrap(), vec!["$1".to_string()]);
 }
 
+/// An unwatched desk retires only behind wake hooks that installed: while
+/// tmux refuses the install the idle clock keeps running, the failure is
+/// reported and the install retried, and the first success lets the
+/// desk go.
+#[test]
+fn test_install_failure_blocks_unwatched_sleep_until_it_succeeds() {
+    let env = unwatched_probe_env(Some(0));
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    let installs = Arc::new(AtomicUsize::new(0));
+    let attempts = Arc::clone(&installs);
+    testhook::update(|h| {
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            assert_eq!(session, "$1");
+            if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err("set-hook refused".to_string())
+            } else {
+                Ok(())
+            }
+        }));
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.wait_tick = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(*n <= 3, "a desk whose hooks installed failed to sleep");
+            true
+        }));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+
+    assert_eq!(installs.load(Ordering::SeqCst), 3);
+    let failed = display_events(&env, "hived.wake_hooks_failed");
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert_eq!(failed[0]["session"], "$1");
+    assert_eq!(failed[0]["error"], "set-hook refused");
+    assert_eq!(failed[0]["retryInSeconds"], WAKE_HOOK_RETRY_SECONDS);
+    let slept = display_events(&env, "hived.sleep");
+    assert_eq!(slept.len(), 1, "{slept:?}");
+    assert_eq!(slept[0]["reason"], "unwatched");
+    // The clock was never reset by the refusals: idle since the first tick.
+    assert_eq!(slept[0]["idleSeconds"], 2.0 * HIVED_SLEEP_AFTER_SECONDS);
+    let order: Vec<String> = env
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(event, _)| event.clone())
+        .filter(|event| event == "hived.sleep" || event == "hived.wake_hooks_failed")
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            "hived.wake_hooks_failed",
+            "hived.wake_hooks_failed",
+            "hived.sleep"
+        ]
+    );
+    let marker = fs::read_to_string(asleep_marker_path(&env.workspace)).unwrap();
+    assert_eq!(asleep_reason(&marker).as_deref(), Some("unwatched"));
+}
+
+/// This home's wake hooks follow the display from session to session,
+/// and leave a session behind only when no team of this home shows there
+/// any more; the same location again installs nothing.
+#[test]
+fn test_wake_hooks_follow_display_and_remove_only_owned_entries() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    // Another team of this home, whose window sits in `$2` from tick 2 on.
+    let other_ws = env
+        ._tmp
+        .path()
+        .join("other-ws")
+        .to_string_lossy()
+        .into_owned();
+    crate::registry::record_team("other", &other_ws, "50", &[], "").unwrap();
+    let mut other = probe_window("main:4", "@5", "$2", &other_ws);
+    other.team = "other".to_string();
+    other.created = "50".to_string();
+    // A same-named window of another instance in `$3`: not this home's.
+    let mut stale = probe_window("work:2", "@6", "$3", &ws);
+    stale.created = "99".to_string();
+    let listings: Vec<Vec<WindowExtra>> = vec![
+        vec![probe_window("probe:1", "@1", "$1", &ws)],
+        vec![probe_window("main:3", "@1", "$2", &ws)],
+        vec![probe_window("main:3", "@1", "$2", &ws), other.clone()],
+        vec![
+            probe_window("work:3", "@1", "$3", &ws),
+            other.clone(),
+            stale.clone(),
+        ],
+        vec![other.clone(), stale.clone()],
+        vec![probe_window("probe:1", "@9", "$1", &ws), other.clone()],
+        vec![probe_window("probe:1", "@9", "$1", &ws), other.clone()],
+    ];
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    testhook::update(|h| {
+        let sink = Arc::clone(&log);
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("install {session}"));
+            Ok(())
+        }));
+        let sink = Arc::clone(&log);
+        h.remove_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("remove {session}"));
+        }));
+        let tick = Arc::clone(&ticks);
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let listing = listings[tick.load(Ordering::SeqCst).min(listings.len() - 1)].clone();
+            (Some(listing), "ok")
+        }));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            tick.fetch_add(1, Ordering::SeqCst) + 1 < 7
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            "install $1", // born
+            "remove $1",  // moved: nothing of this home's left in $1
+            "install $2",
+            // `other` arrives in $2: the same location, nothing to do
+            "install $3", // moved again: $2 still shows `other`, kept
+            "remove $3",  // windowless: the stale instance in $3 is not this home's
+            "install $1", // rebuilt; the repeated snapshot installs nothing
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn test_a_starting_hived_clears_the_asleep_marker() {
     let env = unwatched_probe_env(Some(1));
