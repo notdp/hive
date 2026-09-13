@@ -120,6 +120,21 @@ pub(super) fn pane_write_interleave() {
     }
 }
 
+thread_local! {
+    static RECORD_UPDATE_INTERLEAVE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Runs once inside a record update, after its read and before its write.
+pub(super) fn record_update_interleave() {
+    if let Some(hook) = RECORD_UPDATE_INTERLEAVE.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+fn set_record_update_interleave(hook: impl FnOnce() + 'static) {
+    RECORD_UPDATE_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
 fn set_pane_write_interleave(hook: impl FnOnce() + 'static) {
     PANE_WRITE_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
@@ -2047,6 +2062,52 @@ fn test_write_pane_session_creates_a_pane_record_but_not_a_member_one() {
     let err = write_pane_session("%9", SID, CWD).unwrap_err();
     assert!(err.to_string().contains("no session record"), "{err}");
     assert!(!bed.tmp.path().join("hive/m-cedar.worker.session").exists());
+}
+
+#[test]
+fn test_write_pane_session_does_not_recreate_a_member_record_deleted_after_its_read() {
+    let mut bed = setup();
+    retained_member(&mut bed, "m-cedar.worker");
+    tag_cedar_worker();
+    let path = session_path_for_key("m-cedar.worker");
+    set_record_update_interleave(|| {
+        kill_daemon_key("m-cedar.worker");
+        assert!(!session_path_for_key("m-cedar.worker").exists());
+    });
+    let _ = write_pane_session("%9", SID, "/old-pane");
+    assert!(
+        !path.exists(),
+        "pane update recreated a member record deleted after its read"
+    );
+}
+
+#[test]
+fn test_write_pane_session_does_not_overwrite_a_record_replaced_after_its_read() {
+    let mut bed = setup();
+    retained_member(&mut bed, "m-cedar.worker");
+    tag_cedar_worker();
+    set_record_update_interleave(|| {
+        kill_daemon_key("m-cedar.worker");
+        write_session_key(
+            "m-cedar.worker",
+            "new-session",
+            "/new-cwd",
+            Some(&binding("cedar", "456", "worker")),
+        )
+        .unwrap();
+        record_cedar("456", Some("new-session"));
+        assert!(binding_holds("m-cedar.worker").is_ok());
+    });
+    let _ = write_pane_session("%9", SID, "/old-pane");
+    assert_eq!(
+        read_session_key("m-cedar.worker").unwrap(),
+        SessionRecord {
+            session_id: "new-session".to_string(),
+            cwd: "/new-cwd".to_string(),
+            binding: Some(binding("cedar", "456", "worker")),
+        }
+    );
+    assert!(binding_holds("m-cedar.worker").is_ok());
 }
 
 #[test]
