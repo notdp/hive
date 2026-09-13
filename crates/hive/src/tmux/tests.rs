@@ -264,6 +264,38 @@ fn test_client_window_helpers_resolve_most_recent_client() {
     );
 }
 
+/// `-t <name>` falls back to prefix matching when no session has that
+/// exact name: every client query pins the name, or names the id.
+#[test]
+fn test_client_queries_pin_the_session_target() {
+    let calls: Calls = Rc::new(RefCell::new(Vec::new()));
+    let recorded = Rc::clone(&calls);
+    set_run_override(move |args, check, timeout| {
+        recorded.borrow_mut().push((args.to_vec(), check, timeout));
+        if args[0] == "list-clients" {
+            return Ok(ok_run(0, "1\n1\n", ""));
+        }
+        Ok(ok_run(0, "dev:5\n", ""))
+    });
+    assert_eq!(watching_clients("fern"), Some(0), "control clients count 0");
+    assert_eq!(watching_clients("$3"), Some(0));
+    assert_eq!(watching_clients("=fern"), Some(0));
+    assert_eq!(watching_clients(""), None);
+    assert_eq!(get_most_recent_client_window(Some("fern")), None);
+    assert_eq!(get_most_recent_client_tty(Some("$3")), None);
+    let targets: Vec<String> = calls
+        .borrow()
+        .iter()
+        .filter(|(args, _, _)| args[0] == "list-clients")
+        .map(|(args, _, _)| args[2].clone())
+        .collect();
+    assert_eq!(targets, vec!["=fern", "$3", "=fern", "=fern", "$3"]);
+    assert!(calls
+        .borrow()
+        .iter()
+        .all(|(args, _, _)| args[0] != "list-clients" || args[1] == "-t"));
+}
+
 #[test]
 fn test_client_helpers_ignore_control_mode_clients() {
     set_run_override(|args, _check, _timeout| {
@@ -690,8 +722,9 @@ fn test_prefix_m_fallback_is_empty_for_an_unbound_key() {
 
 #[test]
 fn test_install_team_status_runs_options_then_bindings() {
-    let mut env = EnvGuard::new();
-    env.set("HIVE_BIN", "/x/hive");
+    // The wake hook install at the end takes the reached server's lock:
+    // a server under a temp tree, never the developer's.
+    let _env = wake_env();
     let calls = prefix_m_server("bind-key -T prefix m select-pane -m\n", "");
 
     install_team_status("$3");
@@ -716,22 +749,19 @@ fn test_install_team_status_runs_options_then_bindings() {
     ));
     expected.push(status_click_binding("/x/hive", STOCK_STATUS_CLICK));
     expected.push(mirror_key_binding("/x/hive", "select-pane -m"));
-    // …then the two session hooks that wake a desk when a terminal arrives.
-    expected.extend(wake_hook_argv("$3", "/x/hive"));
+    // …then the two session hooks that wake a desk when a terminal
+    // arrives: the array is read, and each hook gets one indexed entry.
+    let wake = wake_run_shell(&wake_shell_line("/x/hive", &wake_environment()));
+    expected.push(v(&["show-hooks", "-t", "$3"]));
+    expected.push(v(&["set-hook", "-t", "$3", "client-attached[0]", &wake]));
+    expected.push(v(&[
+        "set-hook",
+        "-t",
+        "$3",
+        "client-session-changed[0]",
+        &wake,
+    ]));
     assert_eq!(argvs(&calls), expected);
-}
-
-#[test]
-fn test_wake_hooks_run_hive_wake_on_the_sessions_current_window() {
-    let rows = wake_hook_argv("$3", "/x/hive");
-    let run = "run-shell -b \"/x/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
-    assert_eq!(
-        rows,
-        vec![
-            v(&["set-hook", "-t", "$3", "client-attached", run]),
-            v(&["set-hook", "-t", "$3", "client-session-changed", run]),
-        ]
-    );
 }
 
 /// The bar reads options only — no `#(` shell-out — and every `@hive-`
@@ -1018,6 +1048,74 @@ fn test_pane_scan_status_maps_no_server_variants() {
 }
 
 #[test]
+fn test_pane_scan_status_reads_a_sanitized_listing_as_unknown() {
+    // A client tmux does not treat as UTF-8 gets its tabs written as `_`:
+    // the id column is then the whole line and names no pane. Such a
+    // listing is unreadable, never an empty server or a server without
+    // these panes.
+    let sanitized = "%1_[worker]_node_agent_worker_t_codex_\n%2_zsh_zsh_____\n";
+    set_run_override(move |_args, _check, _timeout| Ok(ok_run(0, sanitized, "")));
+    assert_eq!(list_panes_all_status(), (None, "unknown"));
+    assert_eq!(list_panes_full_or_none("t:1"), None);
+    assert_eq!(list_panes_snapshot_status().1, "unknown");
+    assert!(list_panes_snapshot_status().0.is_none());
+
+    let readable = "%1\t[worker]\tnode\tagent\tworker\tt\tcodex\t\n";
+    set_run_override(move |_args, _check, _timeout| Ok(ok_run(0, readable, "")));
+    let (panes, status) = list_panes_all_status();
+    assert_eq!(status, "ok");
+    assert_eq!(panes.unwrap()[0].pane_id, "%1");
+}
+
+#[test]
+fn test_tmux_client_gets_a_utf8_ctype_only_without_one() {
+    let mut env = EnvGuard::cleared(&["LC_ALL", "LC_CTYPE", "LANG"]);
+    let ctype_of = |cmd: &std::process::Command| -> (Option<String>, bool) {
+        let envs: Vec<_> = cmd.get_envs().collect();
+        let ctype = envs
+            .iter()
+            .find(|(k, _)| *k == "LC_CTYPE")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        let lc_all_removed = envs.iter().any(|(k, v)| *k == "LC_ALL" && v.is_none());
+        (ctype, lc_all_removed)
+    };
+
+    // No locale at all: the C locale, so the client gets a UTF-8 one.
+    let mut cmd = std::process::Command::new("tmux");
+    utf8_client(&mut cmd);
+    assert_eq!(ctype_of(&cmd), (Some("C.UTF-8".to_string()), true));
+
+    // A UTF-8 locale in any of the three variables is left alone.
+    for (key, value) in [
+        ("LANG", "en_US.UTF-8"),
+        ("LC_CTYPE", "C.utf8"),
+        ("LC_ALL", "de_DE.UTF-8@euro"),
+    ] {
+        for other in ["LC_ALL", "LC_CTYPE", "LANG"] {
+            env.remove(other);
+        }
+        env.set(key, value);
+        let mut cmd = std::process::Command::new("tmux");
+        utf8_client(&mut cmd);
+        assert_eq!(ctype_of(&cmd), (None, false), "{key}={value}");
+    }
+    env.remove("LC_CTYPE");
+
+    // LC_ALL wins over the others: a non-UTF-8 one is replaced.
+    env.set("LANG", "en_US.UTF-8");
+    env.set("LC_ALL", "C");
+    let mut cmd = std::process::Command::new("tmux");
+    utf8_client(&mut cmd);
+    assert_eq!(ctype_of(&cmd), (Some("C.UTF-8".to_string()), true));
+
+    assert!(locale_is_utf8("en_US.UTF-8"));
+    assert!(locale_is_utf8("C.utf8"));
+    assert!(!locale_is_utf8("C"));
+    assert!(!locale_is_utf8(""));
+    assert!(!locale_is_utf8("en_US.ISO8859-1"));
+}
+
+#[test]
 fn test_pane_scan_status_keeps_permission_denied_unknown() {
     set_run_override(|_args, _check, _timeout| {
         Ok(ok_run(
@@ -1050,34 +1148,6 @@ fn test_team_window_scan_parses_pr_and_tolerates_short_lines() {
 }
 
 // --- facade-hygiene helpers (exact command contracts) ---------------------
-
-#[test]
-fn test_window_exists_requires_exact_id_echo() {
-    let calls = capture_run(0, "@7\n");
-    assert!(window_exists("@7"));
-    let calls = calls.borrow();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(
-        calls[0],
-        (
-            v(&["display-message", "-t", "@7", "-p", "#{window_id}"]),
-            false,
-            5
-        )
-    );
-}
-
-#[test]
-fn test_window_exists_false_paths() {
-    let calls = capture_run(0, "@8\n");
-    assert!(!window_exists("")); // no subprocess for empty id
-    assert!(calls.borrow().is_empty());
-    assert!(!window_exists("@7")); // mismatched id
-    capture_run(1, "@7\n");
-    assert!(!window_exists("@7")); // nonzero exit
-    raising_run();
-    assert!(!window_exists("@7")); // missing binary never raises
-}
 
 #[test]
 fn test_run_shell_detached_passes_command_byte_for_byte() {
@@ -1238,9 +1308,484 @@ fn test_parse_all_tty_processes_groups_by_tty_and_drops_ttyless_rows() {
 }
 
 #[test]
-fn test_parse_window_option_all_keeps_only_windows_with_a_value() {
-    let map = parse_window_option_all("dev:1\ttok-1\ndev:2\t\nlane:0\ttok-2\n");
-    assert_eq!(map.len(), 2);
-    assert_eq!(map["dev:1"], "tok-1");
-    assert_eq!(map["lane:0"], "tok-2");
+fn test_parse_windows_snapshot_reads_every_window_with_its_instance_tags() {
+    let windows = parse_windows_snapshot(
+        "dev:1\t@3\t$0\tdev\tfern\t/ws/fern\t1700000000.5\ttok-1\n\
+         lane:0\t@7\t$4\tlane\t\t\t\t\n\
+         \t@9\t$4\tlane\tfern\t/ws\t1\t\n",
+    );
+    assert_eq!(windows.len(), 2, "{windows:?}");
+    let fern = &windows["dev:1"];
+    assert_eq!(fern.window_id, "@3");
+    assert_eq!(fern.session_id, "$0");
+    assert_eq!(fern.session_name, "dev");
+    assert_eq!(fern.team, "fern");
+    assert_eq!(fern.workspace, "/ws/fern");
+    assert_eq!(fern.created, "1700000000.5");
+    assert_eq!(fern.token, "tok-1");
+    let plain = &windows["lane:0"];
+    assert_eq!(plain.window_id, "@7");
+    assert_eq!(plain.team, "");
+    assert_eq!(plain.token, "");
+}
+
+#[test]
+fn test_windows_snapshot_lists_the_instance_tags_and_the_token_in_one_read() {
+    let calls = capture_run(0, "dev:1\t@3\t$0\tdev\tfern\t/ws\t1\ttok\n");
+    let (windows, status) = list_windows_snapshot_status("hive-notify-token");
+    assert_eq!(status, "ok");
+    assert_eq!(windows.unwrap()["dev:1"].token, "tok");
+    let calls = calls.borrow();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0[..3], v(&["list-windows", "-a", "-F"])[..]);
+    let fmt = &calls[0].0[3];
+    assert!(fmt.contains(WINDOW_TEAM_FMT), "{fmt}");
+    assert!(fmt.contains("#{session_id}"), "{fmt}");
+    assert!(fmt.ends_with("#{@hive-notify-token}"), "{fmt}");
+    capture_run(1, "");
+    assert_eq!(
+        list_windows_snapshot_status("hive-notify-token").1,
+        "unknown"
+    );
+    raising_run();
+    assert_eq!(
+        list_windows_snapshot_status("hive-notify-token").1,
+        "unknown"
+    );
+}
+
+// --- wake hooks -----------------------------------------------------------
+
+/// The hook environment a wake-hook test installs under: a fixed binary,
+/// hive home, `HOME` and one engine home, no other engine home, and the
+/// tmux server's directory under a temp dir of its own — the hook lock
+/// the installer takes lands beside that server's socket, never the
+/// developer's.
+struct WakeEnv {
+    env: EnvGuard,
+    tmp: tempfile::TempDir,
+}
+
+impl WakeEnv {
+    /// The lock file the installer and the remover take.
+    fn lock_path(&self) -> std::path::PathBuf {
+        self.tmp
+            .path()
+            .join(format!("tmux-{}", unsafe { libc::getuid() }))
+            .join("default.hive-hooks.lock")
+    }
+}
+
+fn wake_env() -> WakeEnv {
+    let mut env = EnvGuard::cleared(&[
+        "CLAUDE_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "GROK_HOME",
+        "TMUX",
+    ]);
+    let tmp = tempfile::tempdir().unwrap();
+    env.set("TMUX_TMPDIR", tmp.path());
+    env.set("HIVE_BIN", "/x/hive");
+    env.set("HIVE_HOME", "/h/one");
+    env.set("HOME", "/home/dp");
+    env.set("CODEX_HOME", "/home/dp/.codex");
+    WakeEnv { env, tmp }
+}
+
+/// The wake entry `wake_env`'s installer bakes for *home*, as tmux lists it.
+fn wake_entry(home: &str) -> String {
+    format!("run-shell -b \"HIVE_HOME={home} HOME=/home/dp CODEX_HOME=/home/dp/.codex /x/hive wake --session #{{q:session_id}} >/dev/null 2>&1 || true\"")
+}
+
+const OWN_WAKE: &str = "run-shell -b \"HIVE_HOME=/h/one HOME=/home/dp CODEX_HOME=/home/dp/.codex /x/hive wake --session #{q:session_id} >/dev/null 2>&1 || true\"";
+const FOREIGN_WAKE: &str = "run-shell -b \"HIVE_HOME=/h/two HOME=/home/dp /y/hive wake --session #{q:session_id} >/dev/null 2>&1 || true\"";
+const USER_ATTACH: &str = "run-shell \"touch /tmp/attached\"";
+const USER_CHANGED: &str = "display-message hi";
+/// Wake entries from before homes were baked in: this binary's and
+/// another's. Neither names a home, so neither is any home's.
+const LEGACY_THIS_BIN: &str = "run-shell -b \"/x/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
+const LEGACY_OTHER_BIN: &str = "run-shell -b \"/y/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
+
+type HookStore = Rc<RefCell<std::collections::BTreeMap<String, String>>>;
+
+/// A tmux answering `show-hooks -t $3` from *entries* (`name[idx]` →
+/// command, listed as tmux prints them) and applying every `set-hook` to
+/// them, or refusing each `set-hook` when *refuse_set*; every other
+/// command answers empty. Returns the store and the recorded calls.
+fn hook_server(entries: &[(&str, &str)], refuse_set: bool) -> (HookStore, Calls) {
+    let store: HookStore = Rc::new(RefCell::new(
+        entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    ));
+    let calls: Calls = Rc::new(RefCell::new(Vec::new()));
+    let recorded = Rc::clone(&calls);
+    let hooks = Rc::clone(&store);
+    set_run_override(move |args, check, timeout| {
+        recorded.borrow_mut().push((args.to_vec(), check, timeout));
+        match args[0].as_str() {
+            "show-hooks" => {
+                assert_eq!(args[1..], ["-t", "$3"]);
+                let listing: String = hooks
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| format!("{k} {v}\n"))
+                    .collect();
+                Ok(ok_run(0, &listing, ""))
+            }
+            "set-hook" if refuse_set => Err(TmuxError::CalledProcess {
+                returncode: 1,
+                stderr: "refused".to_string(),
+            }),
+            "set-hook" if args[1] == "-u" => {
+                assert_eq!(args[2..4], ["-t", "$3"]);
+                hooks.borrow_mut().remove(&args[4]);
+                Ok(ok_run(0, "", ""))
+            }
+            "set-hook" => {
+                assert_eq!(args[1..3], ["-t", "$3"]);
+                hooks.borrow_mut().insert(args[3].clone(), args[4].clone());
+                Ok(ok_run(0, "", ""))
+            }
+            _ => Ok(ok_run(0, "", "")),
+        }
+    });
+    (store, calls)
+}
+
+fn entries(store: &HookStore) -> Vec<(String, String)> {
+    store
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+#[test]
+fn test_wake_shell_line_quotes_argv_then_escapes_the_line_for_tmux() {
+    let env = vec![
+        ("HIVE_HOME".to_string(), "/h \"q\" $x".to_string()),
+        ("HOME".to_string(), "/home/dp".to_string()),
+    ];
+    let line = wake_shell_line("/tmp/we ird$x/hi've", &env);
+    // Each argv piece is shell-quoted on its own; the session id is tmux
+    // format quoting, never shell quoting.
+    assert_eq!(
+        line,
+        "HIVE_HOME='/h \"q\" $x' HOME=/home/dp '/tmp/we ird$x/hi'\"'\"'ve' wake --session #{q:session_id} >/dev/null 2>&1 || true"
+    );
+    // The whole line then gets tmux's double-quote escaping: `$` and `"`
+    // in the path reach sh intact.
+    let run = wake_run_shell(&line);
+    assert_eq!(
+        run,
+        "run-shell -b \"HIVE_HOME='/h \\\"q\\\" \\$x' HOME=/home/dp '/tmp/we ird\\$x/hi'\\\"'\\\"'ve' wake --session #{q:session_id} >/dev/null 2>&1 || true\""
+    );
+    // tmux prints a stored entry back with the same escapes: the body
+    // read off a listing is the line that was installed.
+    assert_eq!(run_shell_body(&run), Some(line.clone()));
+    assert_eq!(
+        run_shell_body(&format!("\"{}\"", crate::shell::tmux_dquote_escape(&run))),
+        Some(line)
+    );
+    assert_eq!(run_shell_body("display-message hi"), None);
+    assert_eq!(run_shell_body("run-shell \"touch /tmp/x\""), None);
+}
+
+#[test]
+fn test_wake_environment_bakes_the_absolute_hive_home_and_set_engine_homes() {
+    let mut env = wake_env();
+    assert_eq!(
+        wake_environment(),
+        vec![
+            ("HIVE_HOME".to_string(), "/h/one".to_string()),
+            ("HOME".to_string(), "/home/dp".to_string()),
+            ("CODEX_HOME".to_string(), "/home/dp/.codex".to_string()),
+        ]
+    );
+    // A relative or default home is baked resolved: the hook must name the
+    // home it was installed for, not read one from the server's env.
+    env.env.remove("HIVE_HOME");
+    env.env.set("HOME", "/home/dp");
+    assert_eq!(wake_environment()[0].1, "/home/dp/.hive");
+    env.env.set("HIVE_HOME", "rel/home");
+    let cwd = std::env::current_dir().unwrap();
+    assert_eq!(
+        wake_environment()[0].1,
+        cwd.join("rel/home").to_string_lossy()
+    );
+}
+
+#[test]
+fn test_parse_hook_entries_reads_indexed_and_plain_wake_hooks_only() {
+    let listing = "client-attached[0] run-shell x\nclient-attached[3] display-message hi\nclient-session-changed run-shell y\nsession-created run-shell z\nbogus\n";
+    assert_eq!(
+        parse_hook_entries(listing),
+        vec![
+            HookEntry {
+                hook: "client-attached".to_string(),
+                index: 0,
+                command: "run-shell x".to_string()
+            },
+            HookEntry {
+                hook: "client-attached".to_string(),
+                index: 3,
+                command: "display-message hi".to_string()
+            },
+            HookEntry {
+                hook: "client-session-changed".to_string(),
+                index: 0,
+                command: "run-shell y".to_string()
+            },
+        ]
+    );
+}
+
+#[test]
+fn test_install_wake_hooks_preserves_user_and_foreign_home_entries() {
+    let env = wake_env();
+    let (store, calls) = hook_server(
+        &[
+            ("client-attached[0]", USER_ATTACH),
+            ("client-attached[1]", FOREIGN_WAKE),
+            ("client-session-changed[0]", USER_CHANGED),
+        ],
+        false,
+    );
+
+    // Three installs: one entry of this home's per hook, at the lowest
+    // free index, the user's and the other home's bytes untouched.
+    for _ in 0..3 {
+        install_wake_hooks("$3").unwrap();
+        assert_eq!(
+            entries(&store),
+            vec![
+                ("client-attached[0]".to_string(), USER_ATTACH.to_string()),
+                ("client-attached[1]".to_string(), FOREIGN_WAKE.to_string()),
+                ("client-attached[2]".to_string(), OWN_WAKE.to_string()),
+                (
+                    "client-session-changed[0]".to_string(),
+                    USER_CHANGED.to_string()
+                ),
+                (
+                    "client-session-changed[1]".to_string(),
+                    OWN_WAKE.to_string()
+                ),
+            ]
+        );
+    }
+    // Every write is checked, and only this home's index is ever written.
+    let writes: Vec<Vec<String>> = argvs(&calls)
+        .into_iter()
+        .filter(|a| a[0] == "set-hook")
+        .collect();
+    assert_eq!(writes.len(), 6);
+    assert!(writes
+        .iter()
+        .all(|a| a[1] == "-t"
+            && (a[3] == "client-attached[2]" || a[3] == "client-session-changed[1]")));
+    assert!(calls.borrow().iter().all(|(_, check, _)| *check));
+    // The server's lock, beside its socket, taken for every install.
+    assert!(env.lock_path().is_file());
+}
+
+#[test]
+fn test_install_and_remove_wake_hooks_recognise_their_entry_under_a_relative_hive_home() {
+    let mut env = wake_env();
+    env.env.set("HIVE_HOME", "rel/home");
+    let (store, _calls) = hook_server(&[("client-attached[0]", USER_ATTACH)], false);
+
+    // The entry is baked with the resolved home, and a second install
+    // under the same relative spelling finds it instead of growing.
+    install_wake_hooks("$3").unwrap();
+    let after_first = entries(&store);
+    assert_eq!(after_first.len(), 3);
+    let baked = &after_first[1].1;
+    let cwd = std::env::current_dir().unwrap();
+    assert!(baked.contains(&cwd.join("rel/home").to_string_lossy().to_string()));
+    install_wake_hooks("$3").unwrap();
+    assert_eq!(entries(&store), after_first);
+
+    // The remover recognises the same entry and leaves the user's alone.
+    remove_wake_hooks("$3").unwrap();
+    assert_eq!(
+        entries(&store),
+        vec![("client-attached[0]".to_string(), USER_ATTACH.to_string())]
+    );
+}
+
+#[test]
+fn test_install_wake_hooks_leaves_home_less_legacy_hooks_and_drops_its_own_duplicates() {
+    let _env = wake_env();
+    // Older installs (no home baked in, the whole array clobbered to
+    // index 0) of this binary and of another are nobody's: both stay as
+    // they are and this home takes the next free index. A second entry of
+    // this home's is a leftover to drop.
+    let (store, _calls) = hook_server(
+        &[
+            ("client-attached[0]", LEGACY_THIS_BIN),
+            ("client-attached[1]", LEGACY_OTHER_BIN),
+            ("client-session-changed[0]", OWN_WAKE),
+            ("client-session-changed[2]", USER_CHANGED),
+            ("client-session-changed[3]", OWN_WAKE),
+        ],
+        false,
+    );
+
+    install_wake_hooks("$3").unwrap();
+
+    assert_eq!(
+        entries(&store),
+        vec![
+            (
+                "client-attached[0]".to_string(),
+                LEGACY_THIS_BIN.to_string()
+            ),
+            (
+                "client-attached[1]".to_string(),
+                LEGACY_OTHER_BIN.to_string()
+            ),
+            ("client-attached[2]".to_string(), OWN_WAKE.to_string()),
+            (
+                "client-session-changed[0]".to_string(),
+                OWN_WAKE.to_string()
+            ),
+            (
+                "client-session-changed[2]".to_string(),
+                USER_CHANGED.to_string()
+            ),
+        ]
+    );
+}
+
+/// Two hive homes installed from one binary: the home-less legacy entry
+/// that binary left names no home, so a second home neither claims it as
+/// its own index nor removes it — its entry is created beside it, updated
+/// in place, and removed alone.
+#[test]
+fn test_a_second_home_of_the_same_binary_leaves_the_binarys_legacy_hook_alone() {
+    let mut env = wake_env();
+    env.env.set("HIVE_HOME", "/h/two");
+    let (store, calls) = hook_server(
+        &[
+            ("client-attached[0]", LEGACY_THIS_BIN),
+            ("client-session-changed[0]", LEGACY_THIS_BIN),
+        ],
+        false,
+    );
+    let two = wake_entry("/h/two");
+
+    for _ in 0..2 {
+        install_wake_hooks("$3").unwrap();
+        assert_eq!(
+            entries(&store),
+            vec![
+                (
+                    "client-attached[0]".to_string(),
+                    LEGACY_THIS_BIN.to_string()
+                ),
+                ("client-attached[1]".to_string(), two.clone()),
+                (
+                    "client-session-changed[0]".to_string(),
+                    LEGACY_THIS_BIN.to_string()
+                ),
+                ("client-session-changed[1]".to_string(), two.clone()),
+            ]
+        );
+    }
+    // Index 0 was never written: not to migrate it, not to unset it.
+    assert!(argvs(&calls)
+        .iter()
+        .filter(|a| a[0] == "set-hook")
+        .all(|a| a.iter().all(|arg| !arg.ends_with("[0]"))));
+
+    remove_wake_hooks("$3").unwrap();
+    assert_eq!(
+        entries(&store),
+        vec![
+            (
+                "client-attached[0]".to_string(),
+                LEGACY_THIS_BIN.to_string()
+            ),
+            (
+                "client-session-changed[0]".to_string(),
+                LEGACY_THIS_BIN.to_string()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_install_wake_hooks_reports_a_refused_write_and_an_unanswered_session() {
+    let _env = wake_env();
+    let (store, _calls) = hook_server(&[("client-attached[0]", USER_ATTACH)], true);
+    let err = install_wake_hooks("$3").unwrap_err().to_string();
+    assert!(err.contains("refused"), "{err}");
+    assert_eq!(
+        entries(&store),
+        vec![("client-attached[0]".to_string(), USER_ATTACH.to_string())]
+    );
+
+    set_run_override(|args, _check, _timeout| {
+        assert_eq!(args[0], "show-hooks");
+        Err(TmuxError::CalledProcess {
+            returncode: 1,
+            stderr: "can't find session: $3".to_string(),
+        })
+    });
+    assert!(install_wake_hooks("$3").is_err());
+    assert!(install_wake_hooks("").is_err());
+}
+
+#[test]
+fn test_remove_wake_hooks_unsets_only_this_homes_entries() {
+    let _env = wake_env();
+    let (store, calls) = hook_server(
+        &[
+            ("client-attached[0]", USER_ATTACH),
+            ("client-attached[1]", FOREIGN_WAKE),
+            ("client-attached[2]", OWN_WAKE),
+            ("client-session-changed[0]", LEGACY_THIS_BIN),
+            ("client-session-changed[1]", LEGACY_OTHER_BIN),
+            ("client-session-changed[2]", OWN_WAKE),
+        ],
+        false,
+    );
+
+    remove_wake_hooks("$3").unwrap();
+
+    assert_eq!(
+        entries(&store),
+        vec![
+            ("client-attached[0]".to_string(), USER_ATTACH.to_string()),
+            ("client-attached[1]".to_string(), FOREIGN_WAKE.to_string()),
+            (
+                "client-session-changed[0]".to_string(),
+                LEGACY_THIS_BIN.to_string()
+            ),
+            (
+                "client-session-changed[1]".to_string(),
+                LEGACY_OTHER_BIN.to_string()
+            ),
+        ]
+    );
+    let unsets: Vec<Vec<String>> = argvs(&calls)
+        .into_iter()
+        .filter(|a| a[0] == "set-hook")
+        .collect();
+    assert_eq!(
+        unsets,
+        vec![
+            v(&["set-hook", "-u", "-t", "$3", "client-attached[2]"]),
+            v(&["set-hook", "-u", "-t", "$3", "client-session-changed[2]"]),
+        ]
+    );
+
+    // A session that is gone has nothing to remove: no error, no write.
+    let calls = capture_run(1, "");
+    remove_wake_hooks("$3").unwrap();
+    assert_eq!(argvs(&calls), vec![v(&["show-hooks", "-t", "$3"])]);
+    remove_wake_hooks("").unwrap();
 }

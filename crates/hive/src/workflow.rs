@@ -45,6 +45,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
+use crate::hived::RequestFailure;
 use crate::send::DispatchFailure;
 
 const POLL_SECONDS: f64 = 1.0;
@@ -1022,9 +1023,81 @@ fn hived_turn_open(answer: Option<Map<String, Value>>) -> Option<bool> {
     answer.get("open").and_then(Value::as_bool)
 }
 
+/// The instance the registry holds for `team` right now, spelled as a
+/// `team::created_at_key`; empty when no entry stands for the name.
+fn registry_instance(team: &str) -> String {
+    let Some(entry) = crate::registry::load(team) else {
+        return String::new();
+    };
+    let created = match entry.get("createdAt") {
+        Some(Value::String(s)) => s.parse::<f64>().unwrap_or(0.0),
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0),
+        _ => 0.0,
+    };
+    crate::team::created_at_key(created)
+}
+
+/// Whether the team's name still holds the instance a run resolved
+/// against. An empty key names no instance: the operation journal is
+/// keyed by the incarnation, so a team the registry does not place holds
+/// no durable result to recover either.
+fn same_instance(team: &str, instance: &str) -> bool {
+    !instance.is_empty() && registry_instance(team) == instance
+}
+
+/// One `node-result` poll and the single failure it recovers from.
+///
+/// The hived's obligation for a node ends when the turn is terminal and
+/// its journal entry is on disk, not when the runner reads it: a desk
+/// whose last turn ended goes to sleep on its own clock, and a runner that
+/// polls after that finds nobody listening. The result outlives the desk,
+/// so `NoListener` — and only `NoListener` — starts the next generation
+/// and asks it for the same dispatch id. Every other failure came from a
+/// desk that was there, and a restart would answer nothing new; no failure
+/// ever dispatches the task again.
+///
+/// The instance is checked before anything is started: the journal is
+/// keyed by the team's incarnation, so a team that was deleted, or whose
+/// name now holds a newer instance, is not the team this run dispatched
+/// to. Its result cannot be read, its namesake's must not be, and neither
+/// a desk nor a team is created for it — the poll simply goes unanswered,
+/// and the runner's own bounded unanswered policy ends the wait.
+fn recover_node_result(
+    dispatch_id: &str,
+    ask: &mut dyn FnMut() -> Result<Map<String, Value>, RequestFailure>,
+    same_instance: &dyn Fn() -> bool,
+    ensure: &dyn Fn() -> Result<(), String>,
+) -> Option<NodeResult> {
+    match ask() {
+        Ok(answer) => return NodeResult::from_answer(&answer),
+        Err(RequestFailure::NoListener) => {}
+        Err(_) => return None,
+    }
+    if !same_instance() {
+        log(&format!(
+            "no hived answers for {dispatch_id}; the team instance it ran on is gone"
+        ));
+        return None;
+    }
+    if let Err(error) = ensure() {
+        log(&format!(
+            "no hived answers for {dispatch_id} and none could be started: {error}"
+        ));
+        return None;
+    }
+    match ask() {
+        Ok(answer) => NodeResult::from_answer(&answer),
+        Err(_) => None,
+    }
+}
+
 struct RealCtx {
     team_name: String,
     workspace: String,
+    /// The team instance this run resolved against (`created_at_key`):
+    /// the same name under a later instance is a different team, and
+    /// holds none of this run's results.
+    instance: String,
     team: crate::team::Team,
 }
 
@@ -1067,6 +1140,7 @@ impl RealEnv {
             *guard = Some(RealCtx {
                 team_name: team_name.unwrap_or_default(),
                 workspace,
+                instance: team.created_at_key(),
                 team,
             });
         }
@@ -1181,13 +1255,20 @@ impl WorkflowEnv for RealEnv {
     }
 
     /// One question to the hived (`node-result`): the turn it holds under
-    /// the dispatch id, as its adapter client saw it end.
+    /// the dispatch id, as its adapter client saw it end. A desk that
+    /// retired since the turn ended is started once more and asked for the
+    /// same dispatch id, which it serves from its journal
+    /// (`recover_node_result`); the task is never dispatched again.
     fn node_result(&self, dispatch_id: &str) -> Option<NodeResult> {
-        let ctx = self.context().ok()?;
-        NodeResult::from_answer(&crate::hived::request_node_result(
-            &ctx.workspace,
+        let (workspace, team_name, instance) = self
+            .with_ctx(|c| (c.workspace.clone(), c.team_name.clone(), c.instance.clone()))
+            .ok()?;
+        recover_node_result(
             dispatch_id,
-        )?)
+            &mut || crate::hived::request_node_result_answer(&workspace, dispatch_id),
+            &|| same_instance(&team_name, &instance),
+            &|| self.ensure_hived(),
+        )
     }
 
     fn retire(&self, name: &str) {
@@ -2872,5 +2953,372 @@ mod tests {
         assert!(!serve_thread.join().unwrap());
         server.close();
         crate::hived::cleanup_socket_impl(&workspace);
+    }
+
+    // ------------------------------------------------------------------
+    // reading a result the desk retired on
+    // ------------------------------------------------------------------
+
+    /// The runner's side of a node whose desk has gone: a hive home of its
+    /// own, a workspace short enough to hold the socket in-tree, and the
+    /// registry instance the operation journal is keyed by.
+    struct NodeRig {
+        _env: crate::testenv::EnvGuard,
+        _home: TempDir,
+        _ws: tempfile::TempDir,
+        workspace: String,
+        team: &'static str,
+    }
+
+    fn node_rig(team: &'static str) -> NodeRig {
+        let mut env = crate::testenv::EnvGuard::new();
+        let home = TempDir::new().unwrap();
+        env.set("HIVE_HOME", home.path().join(".hive"));
+        let ws = tempfile::Builder::new()
+            .prefix("hive-w7-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let workspace = ws.path().to_string_lossy().to_string();
+        crate::bus::init_workspace(&workspace).unwrap();
+        let member = Map::from_iter([
+            ("name".to_string(), Value::from("b")),
+            ("cli".to_string(), Value::from("codex")),
+            ("sessionId".to_string(), Value::from("thr-1")),
+            ("cwd".to_string(), Value::from("/repo")),
+        ]);
+        assert_eq!(
+            crate::registry::record_team(
+                team,
+                &workspace,
+                &crate::team::created_at_key(NODE_RIG_CREATED),
+                &[member],
+                "dev:1"
+            )
+            .unwrap(),
+            "written"
+        );
+        let window_row = format!(
+            "dev:1\t@7\t{team}\t{workspace}\t\t{}\n",
+            crate::team::created_at_key(NODE_RIG_CREATED)
+        );
+        crate::team::set_fake_tmux_run(move |args, _check| {
+            let stdout = if args.first().map(String::as_str) == Some("list-windows") {
+                window_row.clone()
+            } else {
+                String::new()
+            };
+            Ok(crate::tmux::Run {
+                returncode: 0,
+                stdout,
+                stderr: String::new(),
+            })
+        });
+        // Any path that reaches for the real tmux server fails loudly.
+        crate::tmux::set_run_override(|_args, _check, _timeout| {
+            Err(crate::tmux::TmuxError::Os(
+                "no tmux in this test".to_string(),
+            ))
+        });
+        NodeRig {
+            _env: env,
+            _home: home,
+            _ws: ws,
+            workspace,
+            team,
+        }
+    }
+
+    const NODE_RIG_CREATED: f64 = 1700000000.0;
+
+    /// What a finished node leaves in the journal: the terminal record
+    /// with the engine's own result, under the team's incarnation.
+    fn write_terminal_record(
+        rig: &NodeRig,
+        incarnation: &str,
+        id: &str,
+        status: &str,
+        text: &str,
+    ) -> PathBuf {
+        let dir = crate::devlog::run_dir(Path::new(&rig.workspace))
+            .join("operations")
+            .join(incarnation);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.json"));
+        let record = serde_json::json!({
+            "team": rig.team,
+            "incarnation": incarnation,
+            "dispatchId": id,
+            "attempt": 1,
+            "target": "b",
+            "kind": "node",
+            "registryBacked": true,
+            "state": "terminal",
+            "result": {
+                "ok": true,
+                "dispatchId": id,
+                "state": "ended",
+                "status": status,
+                "text": text,
+                "error": Value::Null,
+            },
+        });
+        fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        path
+    }
+
+    /// A desk on the workspace's socket, serving real requests until it is
+    /// dropped.
+    struct Desk {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Desk {
+        fn start(workspace: &str, team: &str) -> Desk {
+            use crate::hived::HivedServerApi;
+            let server = crate::hived::open_server_socket(workspace).unwrap();
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = std::sync::Arc::clone(&stop);
+            let ws = workspace.to_string();
+            let team = team.to_string();
+            let thread = std::thread::spawn(move || {
+                while !flag.load(Ordering::SeqCst) {
+                    crate::hived::serve_requests(&server, &ws, &team, "dev:1", "@7", "w7", 0.05);
+                }
+                server.close();
+                crate::hived::cleanup_socket_impl(&ws);
+            });
+            Desk {
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for Desk {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    #[test]
+    fn test_node_result_no_listener_wakes_and_reads_same_dispatch() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::{Arc, Mutex};
+
+        let rig = node_rig("ndwake");
+        let incarnation = crate::team::created_at_key(NODE_RIG_CREATED);
+        let id = "nd-00000000fade";
+        // The turn ended and its result is on disk; the desk that held it
+        // slept its idle clock out and retired.
+        let record = write_terminal_record(&rig, &incarnation, id, "completed", "the last word");
+        let journal: Value = serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+        let events_before = crate::bus::count_events(&rig.workspace).unwrap();
+
+        assert_eq!(
+            crate::hived::request_node_result_answer(&rig.workspace, id),
+            Err(RequestFailure::NoListener)
+        );
+
+        let starts = Arc::new(AtomicUsize::new(0));
+        let desk: Arc<Mutex<Option<Desk>>> = Arc::new(Mutex::new(None));
+        let counted = Arc::clone(&starts);
+        let started = Arc::clone(&desk);
+        let ws = rig.workspace.clone();
+        let team = rig.team;
+        let _hived = crate::hived::testhook::install(crate::hived::testhook::Hook {
+            popen: Some(Arc::new(move |_argv, _stderr| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                *started.lock().unwrap() = Some(Desk::start(&ws, team));
+                4242
+            })),
+            ..Default::default()
+        });
+
+        let env = RealEnv::for_team(Some(rig.team.to_string()));
+        // The poll finds nobody, starts the next generation once and asks
+        // it for the same dispatch id: the answer is the journal's own.
+        assert_eq!(
+            env.node_result(id),
+            Some(NodeResult::Ended {
+                status: journal["result"]["status"].as_str().unwrap().to_string(),
+                text: journal["result"]["text"].as_str().unwrap().to_string(),
+                error: None,
+            })
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+
+        // A poll the desk answers is one question and nothing else.
+        assert!(matches!(
+            env.node_result(id),
+            Some(NodeResult::Ended { .. })
+        ));
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "a normal poll starts no generation"
+        );
+
+        // Nothing was sent to get it: no ledger row, and the journal holds
+        // the one entry the finished turn wrote.
+        assert_eq!(
+            crate::bus::count_events(&rig.workspace).unwrap(),
+            events_before
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&record).unwrap()).unwrap(),
+            journal
+        );
+        let entries: Vec<_> = fs::read_dir(record.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from(format!("{id}.json"))]
+        );
+        drop(desk.lock().unwrap().take());
+    }
+
+    #[test]
+    fn test_node_result_timeout_or_changed_instance_does_not_redispatch() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let rig = node_rig("ndkeep");
+        let incarnation = crate::team::created_at_key(NODE_RIG_CREATED);
+        let id = "nd-00000000beef";
+        let record = write_terminal_record(&rig, &incarnation, id, "completed", "the last word");
+        let record_bytes = fs::read(&record).unwrap();
+
+        // Every failure but "nobody listens" came from a desk that was
+        // there: no generation is started, and the question is not asked
+        // twice.
+        let ensures = AtomicUsize::new(0);
+        let asks = AtomicUsize::new(0);
+        let failures = [
+            RequestFailure::AnswerLost("read timed out".to_string()),
+            RequestFailure::AnswerLost("empty answer".to_string()),
+            RequestFailure::NotSent("permission denied".to_string()),
+            RequestFailure::NotAdmitted("the desk is draining".to_string()),
+            RequestFailure::Incompatible("api 5".to_string()),
+        ];
+        for failure in &failures {
+            assert_eq!(
+                recover_node_result(
+                    id,
+                    &mut || {
+                        asks.fetch_add(1, Ordering::SeqCst);
+                        Err(failure.clone())
+                    },
+                    &|| panic!("the instance is read only when nobody listens"),
+                    &|| {
+                        ensures.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                ),
+                None
+            );
+        }
+        assert_eq!(ensures.load(Ordering::SeqCst), 0);
+        assert_eq!(asks.load(Ordering::SeqCst), failures.len());
+
+        // No generation may be started for the rest of this test.
+        let _hived = crate::hived::testhook::install(crate::hived::testhook::Hook {
+            popen: Some(Arc::new(|_argv, _stderr| {
+                panic!("no hived may be started here")
+            })),
+            ..Default::default()
+        });
+
+        // The same rule over the real transport: a desk that takes the
+        // question and answers nothing is not recovered from, and hears
+        // nothing after it.
+        fs::create_dir_all(crate::devlog::run_dir(Path::new(&rig.workspace))).unwrap();
+        let listener =
+            std::os::unix::net::UnixListener::bind(crate::hived::socket_path(&rig.workspace))
+                .unwrap();
+        let served = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&served);
+        let drain = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            let _ = conn.read_to_string(&mut request);
+            counted.fetch_add(1, Ordering::SeqCst);
+            assert!(request.contains("node-result"), "{request}");
+        });
+        let env = RealEnv::for_team(Some(rig.team.to_string()));
+        assert_eq!(env.context().unwrap().team_name, rig.team);
+        assert_eq!(env.node_result(id), None);
+        drain.join().unwrap();
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            1,
+            "one question, and no shutdown after it"
+        );
+        crate::hived::cleanup_socket_impl(&rig.workspace);
+
+        // The name now holds a newer instance. It is not the team this run
+        // dispatched to: its desk is not started, its journal is not read,
+        // and no team is made to read one.
+        assert!(same_instance(rig.team, &incarnation));
+        let newer = crate::team::created_at_key(1700009999.0);
+        let member = crate::testkit::member_row("b", "codex", "thr-2");
+        crate::registry::record_team(rig.team, &rig.workspace, &newer, &[member], "dev:1").unwrap();
+        let namesake = write_terminal_record(&rig, &newer, id, "completed", "the namesake's word");
+        let namesake_bytes = fs::read(&namesake).unwrap();
+        assert!(!same_instance(rig.team, &incarnation));
+        assert_eq!(env.node_result(id), None);
+        assert_eq!(fs::read(&namesake).unwrap(), namesake_bytes);
+        assert_eq!(
+            fs::read(&record).unwrap(),
+            record_bytes,
+            "the run's own entry is untouched"
+        );
+
+        // The team is gone from the registry: nothing to verify against,
+        // so nothing is started and no entry is written back.
+        let entry = crate::registry::entry_path(rig.team).unwrap();
+        fs::remove_file(&entry).unwrap();
+        assert!(!same_instance(rig.team, &incarnation));
+        assert!(!same_instance(rig.team, &newer));
+        assert!(!same_instance(rig.team, ""), "no key names no instance");
+        assert_eq!(env.node_result(id), None);
+        assert!(!entry.exists(), "no team was created to answer the poll");
+
+        // A recovery that cannot start a desk answers nothing rather than
+        // asking again, and the runner's own bounded policy ends the wait.
+        let tries = AtomicUsize::new(0);
+        assert_eq!(
+            recover_node_result(
+                id,
+                &mut || {
+                    tries.fetch_add(1, Ordering::SeqCst);
+                    Err(RequestFailure::NoListener)
+                },
+                &|| true,
+                &|| Err("hived did not answer a matching ping".to_string()),
+            ),
+            None
+        );
+        assert_eq!(tries.load(Ordering::SeqCst), 1);
+
+        let tmp = TempDir::new().unwrap();
+        let fake = fake_env(tmp.path());
+        fake.add_live("audit");
+        *fake.turn_answers.lock().unwrap() = VecDeque::from([Some(false), Some(true)]);
+        *fake.node_answers.lock().unwrap() = VecDeque::from([None]);
+        let verdict = run_workflow(&fake, &codex("audit", "t")).unwrap();
+        assert_eq!(verdict["status"], "unknown");
+        assert_eq!(fake.sleeps.load(Ordering::SeqCst), UNANSWERED_POLLS - 1);
+        assert_eq!(
+            fake.dispatches.lock().unwrap().len(),
+            1,
+            "the task is never dispatched again"
+        );
     }
 }

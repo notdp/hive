@@ -4,6 +4,33 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// The character type a tmux client is started under. tmux writes command
+/// output through a client that is not UTF-8 sanitized: every control
+/// character, the tab hive separates format columns with included, comes
+/// out as `_`, and a pane listing then reads as one column per line. A
+/// process without a UTF-8 locale (`LANG` unset in a hook or a tool
+/// shell) gives its tmux clients one; the caller's own locale is otherwise
+/// left alone.
+pub(crate) fn utf8_client(cmd: &mut Command) {
+    let var = |key: &str| std::env::var(key).ok().filter(|v| !v.is_empty());
+    let ctype = var("LC_ALL")
+        .or_else(|| var("LC_CTYPE"))
+        .or_else(|| var("LANG"))
+        .unwrap_or_default();
+    if !locale_is_utf8(&ctype) {
+        cmd.env_remove("LC_ALL");
+        cmd.env("LC_CTYPE", "C.UTF-8");
+    }
+}
+
+/// Whether a locale name selects a UTF-8 codeset (`en_US.UTF-8`,
+/// `C.utf8`); the empty name is the C locale.
+pub(crate) fn locale_is_utf8(name: &str) -> bool {
+    let codeset = name.split_once('.').map(|(_, c)| c).unwrap_or("");
+    let codeset = codeset.split('@').next().unwrap_or("");
+    codeset.eq_ignore_ascii_case("utf-8") || codeset.eq_ignore_ascii_case("utf8")
+}
+
 /// A finished tmux subprocess as `run` returns it.
 #[derive(Debug, Clone)]
 pub struct Run {
@@ -98,6 +125,7 @@ pub(super) fn exec_capture(
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
+    utf8_client(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     if input.is_some() {
         cmd.stdin(Stdio::piped());

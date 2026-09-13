@@ -10,6 +10,16 @@ repository = "https://github.com/notdp/hive"
 name = "hive"
 path = "src/main.rs"
 
+[[test]]
+name = "hived_startup_lock"
+path = "tests/hived_startup_lock.rs"
+harness = false
+
+[[test]]
+name = "wake_hook_lock"
+path = "tests/wake_hook_lock.rs"
+harness = false
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }

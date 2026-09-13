@@ -64,52 +64,63 @@ Consequences across modules:
   needs nothing. Out of scope: a bg job member's `/clear` (its roster
   session id is also its job address; following it needs a job id on the
   row first), and hosts other than the desktop app.
-- **The `display` window id.** It is a cache: authority checks do not read
-  it, and hived identity is `(workspace socket, team, hive home)`, so a dead
-  window does not retire a hived on its own; a missing registry entry with
-  no window left behind it does.
+- **The `display` window id.** It is a cache, not an authority: hived
+  identity is `(workspace socket, team, hive home)`, and a team exists by
+  its entry whatever the entry's `display` says. The desk does read it —
+  as the preferred candidate when it resolves where the team shows this
+  tick — and where the team shows is half of two exits: a window that is
+  no longer this instance's leaves the desk with no display, which starts
+  the idle clock below (`window-gone`) rather than retiring it, and a
+  registry entry that is gone *with* no display left is the team-removed
+  exit, asked every 30 seconds. Neither reads a bare window id: an id is
+  taken only with the team, workspace and `createdAt` tags beside it,
+  because ids restart at `@0` with the tmux server and a desk from before
+  a restart once read another team's `@0` as its own display for days.
 - **The desk sleeps.** A hived stays resident while it has a display or an
   obligation. With neither for 600 seconds, it closes admission and retires
   gracefully; registry, bus and run files stay in place. A display is absent
-  when tmux is unreachable, when neither the original window nor the
-  registry's cached window is this team's any more (a window id is checked
-  for the team's own tag, never by existence alone: ids restart from `@0`
-  with the tmux server, and a hived from before the restart once read
-  another team's `@0` as its display for days), or when no terminal is
-  attached to the window's session (`unwatched`): a window nobody looks at is a picture, and hive's
-  own control-mode monitor is not a viewer. The viewer count is asked only
-  once the cheaper gates pass, and a count tmux will not give never reads as
-  nobody. A retiring desk leaves `run/desk.asleep` with its
-  reason; the next generation's start removes it. The team session carries
-  `client-attached` and `client-session-changed` hooks that run `hive wake
-  --window` on its current window (installed with the session's status bar
-  and again by every hived start on a session hive built, so a session from
-  an older binary gets them at the first start after an upgrade), and `wake` starts a desk only where that
-  marker says `unwatched` — so a plain `tmux attach` brings back a desk that
-  left for want of a viewer before the human notices a stale bar, and a
-  hook firing on any other window, or on a team whose desk never ran or
-  left for another reason, does nothing. An accepted request, a pending node result or an
-  owned Grok client whose idle state cannot be established blocks sleep.
-  Grok needs a completed load/replay, no open turn and no outstanding RPC;
-  a completed replay with zero turn events is idle. Observing the
-  pool does not connect or spawn a client. Claude background jobs belong to
-  their supervisor and do not keep the desk awake. Ordinary Codex sends do
-  not own a node-result obligation.
+  when tmux is unreachable (`display-unreachable`), when no window carries
+  this instance's tags (`window-gone`), or when no ordinary terminal is
+  attached to the sessions those windows are in (`unwatched`): a window
+  nobody looks at is a picture, and hive's own control-mode monitor is not
+  a viewer. The viewer count is asked only once the cheaper gates pass, and
+  a count tmux will not give never reads as nobody. A desk that leaves
+  `unwatched` is the one case a plain `tmux attach` brings back, through
+  the session's wake hooks, and it commits that retirement only behind
+  hooks that can do so — the hooks, the other five exits and the admission
+  handshake are in *The team's desk* below. An accepted request, a pending
+  node result or an owned Grok client whose idle state cannot be
+  established blocks sleep. Grok needs a completed load/replay, no open
+  turn and no outstanding RPC; a completed replay with zero turn events is
+  idle. Observing the pool does not connect or spawn a client. Claude
+  background jobs belong to their supervisor and do not keep the desk
+  awake. Ordinary Codex sends do not own a node-result obligation.
   Read-only ping, doctor, team-runtime, runtime-snapshot, node-result and
   turn-open requests do not renew the timer, though their replies must finish
   before exit. Other requests renew it even if they finish between ticks.
   Display recovery or an obligation resets the timer. An arrival during the
   sleep drain cancels retirement; a queued connection gets `notAdmitted` and
-  can retry. Before exit the hived backfills the registry, stops only its own
-  idle Grok clients' team keys, emits `hived.sleep` with `idleSeconds` and
-  `display-unreachable` / `window-gone`, and performs owner-checked socket
-  cleanup. Grok session records and aliases survive parking; the next send
-  starts the member leader and loads the recorded session. Runtime reads do
-  not start parked leaders. Codex shared daemons are left to their home. The existing ensure
+  can retry. Before exit the hived backfills the registry, closes the stdio
+  clients it holds on its own team's idle Grok keys, emits `hived.sleep`
+  with `idleSeconds` and that reason, leaves the same word in
+  `run/desk.asleep` for the next generation's start to remove, and performs
+  owner-checked socket cleanup. The leader on a member's socket is grok's
+  own process and the TUI in that member's pane is one of the leader's
+  clients, so retiring signals neither: a leader outliving the desk is the
+  price of the pane's session surviving it. Session records and aliases
+  survive either way; the next send reuses a leader still up, or starts one
+  and loads the recorded session. Runtime reads start no leader. Codex
+  shared daemons are left to their home. The existing ensure
   path starts the next generation on demand, including a subsequent send or
-  attach. `hive ps` reports a registered team as `running` while its hived is up and
-  `asleep` without one, window or no window (`displayPresent` carries the
-  window separately); an unknown hived observation is `unknown`. This is a read-only inventory, not a request to wake the team.
+  attach — and including `hive team` and `hive doctor`, which augment their
+  answer from the hived's runtime and so start a desk and give it a fresh
+  idle stretch. `hive ps` is the one that does not: it reports a registered
+  team as `running` while a `hive --hived` process for exactly its team and
+  workspace is in the process table and `asleep` without one, window or no
+  window (`displayPresent` carries the window separately, `asleepReason`
+  the marker's word verbatim or null); an unknown hived observation is
+  `unknown`. That is a read-only inventory — presence, not health, and not
+  a request to wake the team.
 - **The hive home is part of the identity.** A hived answers `ping` with
   the `HIVE_HOME` it resolved. A client of the same home that finds another
   build, api version or team on the socket restarts the hived from its own
@@ -444,10 +455,13 @@ off, doubling from one tick up to `DISPLAY_PROBE_MAX_BACKOFF_SECONDS`, with
 `display.unreachable` / `display.recovered` logged once per flip. The
 request socket has its own accept worker, independent of display sampling
 and maintenance. Listener readiness waits hold no request lease; nonblocking
-accept and lease reservation share the admission lock. Closing admission leaves
-queued connections for the coordinator to reject synchronously. Closing the
-socket joins its accept worker before unlink/reexec; a failed exec starts a
-new worker on the rebound listener. The
+accept and lease reservation share the admission lock. That worker is the
+listener's only acceptor: with the gate open it hands each connection a
+lease and a handler, with it shut it refuses each one inside a bounded
+budget and counts the arrival, so the coordinator never accepts a
+connection of its own and no queued connection is left to be reset. Closing
+the socket joins its accept worker before unlink/reexec; a failed exec
+starts a new worker on the rebound listener. The
 control-mode monitor's reattach backs off the same way (`tmux/control_mode.rs`),
 so a dead tmux server costs a hived one probe per 30s instead of a fork
 storm per second. The monitor records every control client it spawns in
@@ -517,21 +531,37 @@ runner refuses a claude member before anything is spawned.
   the answer (`grok_leader::PromptResult`). In both engines the result is
   the member's last message of the turn; a member that stops to ask has
   ended its turn with that question.
-- **Retirement.** A graceful shutdown with pending node operations returns
-  `draining: true` and leaves the hived serving and ticking. An identity
-  upgrade that receives this answer uses the old generation until its normal
-  reexec gate can retire it. A shutdown accepted before a concurrent node
-  dispatch becomes visible also resumes service when that dispatch is seen.
-  Only accepted request leases are waited on, for at most five seconds;
-  graceful timeout resumes service. Explicit deletion uses `force: true`,
-  records unresolved nodes as interrupted/ambiguous and exits after the bounded
-  request wait. During that short wait, new requests receive `notAdmitted`.
+- **Retirement.** The two shutdowns are not the same request. An upgrade's
+  generation change and `hive gc`'s archive ask gracefully (`force: false`):
+  with pending node operations the hived answers `draining: true` and keeps
+  serving and ticking, the gc leaves the team where it is, and the upgrading
+  CLI goes on using the old generation until its own reexec gate can retire
+  it — but only while that generation speaks this binary's api (a different
+  api is refused instead, and no request goes out). A shutdown accepted
+  before a concurrent node dispatch becomes visible also resumes service when
+  that dispatch is seen. Only accepted request leases are waited on, for at
+  most five seconds; graceful timeout resumes service. `hive delete` is the
+  other one: it always asks with `force: true`, so a pending node result
+  defers nothing — every unresolved node is recorded interrupted/ambiguous
+  (`forced shutdown`) and the desk exits after the same bounded request
+  wait. During that short wait, new requests receive `notAdmitted`.
   Ordinary sends stay in memory and do not delay retirement; their terminal
   entries are removed. Persisted node terminal entries are also removed from
   memory, with subsequent reads served by the journal. Failed node writes
   retain the in-memory result and emit a diagnostic. Incarnation lookup for
   `node-result` reads the registry directly, without tmux or `Team::load`.
-- **The read-back.** The runner polls the hived's `node-result` for the
+- **The read-back.** The hived's obligation for a node ends when the turn is
+  terminal and its journal entry is on disk, not when the runner reads it: a
+  desk whose last turn ended sleeps on its own clock, and a runner polling
+  after that finds nobody listening. The result outlives the desk, so that
+  one failure — `NoListener`, and only it — starts one generation and asks it
+  for the same dispatch id, which it serves from the journal; every other
+  failure came from a desk that was there and answers nothing new on a
+  restart, and no failure ever dispatches the task again. The team instance
+  is checked first (`created_at_key`): a team deleted, or whose name now
+  holds a newer instance, is not the one this run dispatched to, so neither
+  a desk nor a team is created for it and the poll simply goes unanswered.
+  The runner polls the hived's `node-result` for the
   dispatch id at 1s: `running` while the turn is open; `ended` with
   `status` (the engine's word), `text` and `error` once it is; `unknown`
   with a `reason` when no operation is recorded for the id. A journaled
@@ -617,6 +647,219 @@ runner refuses a claude member before anything is spawned.
   The new task still passes the normal turn-closed gate before dispatch.
   The per-member record is replaced when the new task starts; this is
   reconciliation on reuse, not a result archive or a resume command.
+
+## The team's desk: starting, serving, leaving
+
+One hived per team serves that team's workspace socket. What it is for is
+above; this is its own life — who starts one, what a start refuses, the six
+ways a running one leaves and how a request is admitted. Every number below
+is how often a question is asked, never a promise about when a desk goes
+away.
+
+### Starting one
+
+Any verb that needs the transport calls `ensure_hived`: send, attach,
+create, spawn, `workflow run`, `hive wake` behind an `unwatched` marker, and
+the two read verbs that augment their answer from the hived's runtime —
+`hive team` and `hive doctor` — which start a desk like anyone else. Only
+`hive ps` reads without starting anything.
+
+`ensure_hived` takes the workspace's `run/hived.lock` first. The descriptor
+is close-on-exec: it is held across the spawn of the hived, and one riding
+into that child would keep the lock for as long as the child or anything it
+spawned lived, leaving every later `ensure_hived` waiting on a holder
+nothing can name. The wait for it is bounded (5s, retried non-blocking), so
+a lock an older binary leaked is a loud error naming the lock path and the
+OS error — never a claim about which process holds it, which a flock cannot
+tell anyone, and never an unbounded hang. The reexec handoff descriptor is
+the opposite contract, deliberately inheritable and released by the
+generation that inherits it.
+
+Then the identity ping decides. A hived of this home, this team, this build
+and this api is the answer. One of another home is refused outright, naming
+both homes, and nothing is started. One that answers "not admitted" is busy —
+a retirement it may still cancel, or a drain that ends — and is asked again
+inside the 5s identity budget rather than replaced; still busy at the end of
+it is an error the caller can retry, not a restart. Anything else is a
+generation to replace: a graceful stop (`force: false`), then the ping
+again.
+
+A generation this binary asked to stop that is still serving — it declined
+with `draining`, or did not leave inside the stop budget — keeps serving
+when it is this team's under this home **and speaks this binary's api**,
+with the reason and both build hashes on stderr. A different api is refused
+instead, and the caller sends it nothing: a payload two builds may read
+differently must not go out on the strength of a warning.
+
+A start is ready only when it can serve: the listener bound, the accept
+worker up, the owner file naming this generation. Only then does the
+`run/desk.asleep` marker go. A start that failed before that point leaves
+the marker byte for byte — so the session hooks can still wake the desk —
+and says why in `hived.socket_bind_failed`. `hived.start` is an attempt, not
+a readiness; the evidence of a desk is a matching ping and its owner file.
+A spawned hived that never answers a matching ping inside its budget is an
+error that names the stderr log, and nothing is killed or unlinked on the
+way out: the generation may be seconds from correct, and unlinking a socket
+without its owner token would take down whoever did bind.
+
+Two refusals happen before the loop ever runs. A hived whose own hive home
+holds no registry entry for its team exits 2 instead of serving — it could
+not read the roster it is supposed to supervise, and would reap every
+engine as an orphan. A socket that will not bind also never serves: after
+`hived.socket_bind_failed` the process returns from its loop and exits 0,
+the marker still in place and nothing unlinked.
+
+### Six ways a running desk leaves
+
+In the order the loop asks:
+
+1. **workspace removed** — checked every tick. The directory the desk
+   serves is gone (a `--delete-workspace`, an archive); it exits without
+   recreating anything under it, journal included.
+2. **hived replaced** — every 5 seconds, when `hived.owner.json` names
+   another pid and token. `hived.retire_orphan`; unfinished node operations
+   are journaled `interrupted` with reason `hived replaced`, and the new
+   owner's socket and owner file are left untouched.
+3. **reexec** — every 5 seconds the binary at the exe path is fingerprinted
+   (`stat`; rehashed only when dev/inode/length/mtime moved) and two checks
+   must agree on the new hash. Then, and only when no lease is outstanding
+   and every node operation is terminal, the desk closes intake, unlinks its
+   socket and `execv`s itself — same pid, new bytes. It does not drain and
+   does not wait: an outstanding lease or an unfinished node makes it reopen
+   admission and try again at the next check. An `execv` that comes back
+   rebinds the listener, restarts the monitor and keeps serving the old
+   build rather than leaving the window with no socket.
+4. **team removed** — every 30 seconds, when the registry entry is gone
+   *and* no window of this instance shows the team. A corrupt or foreign
+   entry is not "missing": a read that might be wrong never retires a desk.
+5. **shutdown RPC** — `hive delete` forced, an upgrade's generation change
+   and `hive gc`'s archive graceful (above).
+6. **sleep** — 600 seconds with neither a display nor an obligation
+   (below).
+
+None of these is an upper bound on how long a desk lives. 30s, 5s and one
+tick are how often the question is asked; the answer can also be deferred by
+an obligation, and a sleep can be cancelled at its final commit. A desk that
+should have gone and did not is evidence to collect, not a schedule to wait
+out.
+
+Five of the six reach one teardown after the loop; a reexec that succeeded
+never returns to it — same pid, new bytes — having closed its intake and
+unlinked its socket before the `execv`, as item 3 says. The teardown runs
+under the startup lock for hived replaced, team removed and shutdown, which
+take it here, and for sleep, which took it at its final commit;
+`ensure_hived` releases it before asking for a shutdown so a competing
+starter cannot bind in between. Workspace removed takes no lock: the lock
+file lives in the run directory, and taking it would recreate the directory
+that the team's end removed. The gate shuts, the accept worker is joined and
+the listener closed, the journal gets its interruptions, the socket is
+unlinked only while the owner token is still this generation's, and only
+then the slow work: the monitor's join and the pool clients this desk held.
+The lock outlasts all of it, so no new generation is writing the same state
+while the old one still might.
+
+What the journal receives depends on the exit. Hived replaced and team
+removed mark every unfinished node operation `interrupted` with that reason.
+A forced shutdown wrote `forced shutdown` while it was still answering the
+RPC, and a graceful shutdown or a sleep was granted only because nothing was
+left to write, so neither writes here. Workspace removed writes nothing at
+all — the journal is under the directory that is gone, and the desk exits
+without recreating it (item 1).
+
+What the desk closes at the end is its own: the stdio clients it holds on
+its team's idle Grok keys. A Grok leader is the member's own process and the
+TUI in that member's pane is one of the leader's clients, so retiring
+signals neither — the leader outliving the desk is the price of the pane's
+session surviving it. Explicit `hive kill` and `hive delete` keep their own
+collection contract.
+
+### Sleep: three reasons, one of them wakeable
+
+The display is absent when tmux does not answer at all
+(`display-unreachable`), or when no window carries this instance's tags
+(`window-gone`); a display that is there but whose sessions hold no ordinary
+terminal is `unwatched`. Those three words are the `hived.sleep` reason, the
+`run/desk.asleep` marker's text and what `hive ps` repeats as
+`asleepReason`. Only `unwatched` is one the session hooks act on, and an
+`unwatched` retirement is only committed once those hooks are installed on
+the display's session.
+
+That asymmetry is deliberate and it has an edge this round does not cover: a
+window carried to another session, or a tmux server restarted, *after* the
+desk went to sleep leaves a marker no attach hook will act on. The way back
+is any hive verb — `hive attach` rebuilds the display, reinstalls the hooks
+and starts the desk. Hive installs no server-wide tmux hook to catch it.
+
+### The display the desk follows
+
+Where a team shows is resolved from the windows' own tags every tick, not
+taken from what the CLI passed at start: a window moved to another session, a
+session renamed, a display rebuilt after a windowless stretch all move the
+desk's idea of its display, and with it the control-mode monitor (the old one
+stopped before the new one starts), the sessions the viewer count is asked
+over, the idle notifier's session and the session the wake hooks go on. The
+desk itself does not restart for any of it. A verb run from a foreign team's
+pane cannot lend its window either: a team with no display of its own starts
+its desk with an empty window and window id rather than the caller's.
+
+The wake hooks are a hive *home's*, not a team's: each hook is an indexed
+array and this home takes one entry per hook, carrying the resolved absolute
+`HIVE_HOME`, the installer's `HOME` and whatever engine homes it had, so a
+session showing teams of two homes, or holding the human's own hook, keeps
+every entry but this one. The baked `HIVE_HOME` is the only proof of whose
+an entry is: an entry from before homes were baked in names a binary, and a
+binary is shared by every home installed from it, so such an entry is
+nobody's — never claimed, updated or removed. The arrays are shared state
+across every home on the server, so each install and each removal reads and
+writes them under one lock beside the server's socket
+(`<socket>.hive-hooks.lock`), and two homes installing at once cannot both
+take the same free index.
+
+The desk arms every session its display sits in, not only the primary's: a
+window of the instance linked or moved into a second session makes that
+session's terminals viewers, so a terminal arriving there alone must be able
+to bring the desk back. Each session's install is tracked and retried on its
+own, and an `unwatched` retirement is committed only once every one of them
+carries this home's entries. They leave a session only when no team of this
+home shows a window there any more.
+
+### Admission: a side effect is admitted before it is sent
+
+`send`, `node-dispatch`, `connect-codex` and `connect-grok` are sent in two
+steps on one connection. The client writes `{"action":"admit","forAction":…}`
+and waits; the hived reserves the request's lease at accept, answers
+`{"ok":true,"admitted":true,"apiVersion":N}`, and only then does the client
+write the real payload. The lease spans the preflight, the body and the
+reply, so closing the gate under an admitted request cannot retire the desk
+out from under it, and a client that goes quiet after the handshake releases
+it with nothing served. A body whose action is not the one admitted is not
+served either. Each frame — the preflight, the body — is read under one
+deadline from its first byte, so a client that drips a line it never finishes
+is dropped at the budget's end however slowly it drips; the client reads the
+admission line and the answer the same way.
+
+The point is where the retry boundary sits. A refusal, an EOF or a timeout
+*before* the business payload is written is `NotAdmitted` / `NotSent` /
+`NoListener` — nothing was served, and the caller may send it again. Once the
+payload is out, a lost answer stays `AnswerLost`/unknown: the hived may have
+injected the task, so the runner keeps its pending record and reads the turn
+back instead of resending. Closing the gate no longer has to win a race with
+a connection that already wrote its request.
+
+The api version (`HIVED_API_VERSION`) identifies the wire format and is
+bumped with it, never with the crate's release. A hived of this api refuses a
+side-effect request that arrives without a preflight — the sender is an older
+build — while `ping` and `shutdown` keep the one-shot format so two
+generations can still identify each other and retire gracefully.
+
+Leases have three kinds and they do different things. Unclassified (accepted,
+action not yet read) and read-only (`ping`, `doctor`, `team-runtime`,
+`runtime-snapshot`, `node-result`, `turn-open`) hold the desk's final exit
+open until their reply is done, but neither renews the idle clock: a poller is
+not use. Only a classified write counts as usage and resets the 600 seconds.
+An arrival while the gate is shut is counted even though it is refused, and a
+count that moved between the sleep's checks and its commit cancels that
+retirement so the retry lands on a desk that is still there.
 
 ## Runtime fields and their sources
 

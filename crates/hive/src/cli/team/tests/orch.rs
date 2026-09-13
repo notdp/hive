@@ -21,7 +21,12 @@ struct Display {
 
 fn setup(panes: usize) -> (crate::testkit::DisplayEnv, Rc<RefCell<Display>>) {
     let mut env = display_env_outside();
-    env.env.set("TMUX", "/tmp/hive-unit-only,1,0");
+    // Inside tmux, on a socket under the temp tree: what hive keeps beside
+    // a server's socket (the wake hook lock) lands there.
+    env.env.set(
+        "TMUX",
+        format!("{},1,0", env._tmp.path().join("hive-unit-only").display()),
+    );
     env.env.set("TMUX_PANE", "%0");
     env.env.set("HOME", env._tmp.path());
     env.env.set("CODEX_HOME", env._tmp.path().join("codex"));

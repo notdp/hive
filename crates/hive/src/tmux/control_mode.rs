@@ -721,6 +721,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
     let mut cmd = Command::new("tmux");
     cmd.args(["-C", "attach", "-t", session_target]);
     cmd.env("TERM", super::default_terminal());
+    super::run::utf8_client(&mut cmd);
     unsafe {
         use std::os::unix::io::FromRawFd;
         use std::os::unix::process::CommandExt;

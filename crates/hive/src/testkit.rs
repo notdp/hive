@@ -47,8 +47,13 @@ pub(crate) fn display_env() -> DisplayEnv {
     env.set("GROK_HOME", tmp.path().join(".grok"));
     env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
     // Inside tmux: the jump must never reach exec_attach, which would
-    // replace the test process with `tmux attach`.
-    env.set("TMUX", "/tmp/hive-test-tmux,1,0");
+    // replace the test process with `tmux attach`. The socket named is
+    // the temp tree's, so what hive keeps beside a server's socket (the
+    // wake hook lock) lands there.
+    env.set(
+        "TMUX",
+        format!("{},1,0", tmp.path().join("tmux-socket").display()),
+    );
     env.set("TMUX_PANE", "%0");
     DisplayEnv { _tmp: tmp, env }
 }
@@ -62,6 +67,9 @@ pub(crate) fn display_env_outside() -> DisplayEnv {
     env.set("CLAUDE_CONFIG_DIR", tmp.path().join(".claude"));
     env.set("CODEX_HOME", tmp.path().join(".codex"));
     env.set("GROK_HOME", tmp.path().join(".grok"));
+    // Outside tmux the default server is the one reached: under the
+    // temp tree, never the developer's.
+    env.set("TMUX_TMPDIR", tmp.path());
     DisplayEnv { _tmp: tmp, env }
 }
 
@@ -132,6 +140,22 @@ pub(crate) fn fake_tmux_sessions(
     tags: &'static [(&'static str, &'static str, &'static str)],
     sessions: &'static [&'static str],
 ) -> Argv {
+    fake_tmux_hooks(windows, panes, tags, sessions, &[])
+}
+
+/// `fake_tmux_sessions` whose sessions carry hooks: *hooks* are the
+/// `(name[index], command)` rows `show-hooks -t <session>` lists (every
+/// session answers the same rows), kept up to date by the `set-hook`
+/// writes the verbs make. The session-scoped `list-windows` a wake or a
+/// hook release reads answers the fixture windows of session `$1` in the
+/// snapshot format, their tags as written since.
+pub(crate) fn fake_tmux_hooks(
+    windows: &'static str,
+    panes: &'static [&'static str],
+    tags: &'static [(&'static str, &'static str, &'static str)],
+    sessions: &'static [&'static str],
+    hooks: &'static [(&'static str, &'static str)],
+) -> Argv {
     let built: std::rc::Rc<std::cell::RefCell<Vec<BuiltWindow>>> = Default::default();
     let listing = {
         let built = std::rc::Rc::clone(&built);
@@ -192,6 +216,10 @@ pub(crate) fn fake_tmux_sessions(
         .map_or(1, |n| n + 1);
     let mut live_sessions: Vec<String> = sessions.iter().map(|s| s.to_string()).collect();
     let mut created_session: Option<String> = None;
+    let mut hook_rows: std::collections::BTreeMap<String, String> = hooks
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
     crate::tmux::set_run_override(move |args, _check, _timeout| {
         recorded.borrow_mut().push(args.to_vec());
         let mut returncode = 0;
@@ -273,7 +301,60 @@ pub(crate) fn fake_tmux_sessions(
                 rows.join("\n")
             }
             "list-sessions" => live_sessions.join("\n"),
+            // The session-scoped snapshot listing (`list-windows -t $1 -F
+            // <window snapshot>`): the fixture windows in that format, a
+            // tag written or cleared since outranking the fixture row.
+            "list-windows"
+                if args.get(1).map(String::as_str) == Some("-t")
+                    && args.last().is_some_and(|fmt| {
+                        fmt.starts_with(
+                            "#{session_name}:#{window_index}\t#{window_id}\t#{session_id}",
+                        )
+                    }) =>
+            {
+                listing()
+                    .lines()
+                    .filter(|row| !row.trim().is_empty())
+                    .map(|row| {
+                        let fields: Vec<&str> = row.split('\t').collect();
+                        let window = fields.first().copied().unwrap_or_default();
+                        let field =
+                            |i: usize| fields.get(i).copied().unwrap_or_default().to_string();
+                        let tagged = |key: &str, fixture: String| -> String {
+                            written
+                                .get(&(window.to_string(), key.to_string()))
+                                .cloned()
+                                .unwrap_or(fixture)
+                        };
+                        format!(
+                            "{window}\t{}\t$1\t{}\t{}\t{}\t{}\t",
+                            field(1),
+                            window.split(':').next().unwrap_or_default(),
+                            tagged("hive-team", field(2)),
+                            tagged("hive-workspace", field(3)),
+                            tagged("hive-created", field(5)),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
             "list-windows" => listing(),
+            "show-hooks" => hook_rows
+                .iter()
+                .map(|(k, v)| format!("{k} {v}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            "set-hook" if args.get(1).map(String::as_str) == Some("-u") => {
+                hook_rows.remove(&args.get(4).cloned().unwrap_or_default());
+                String::new()
+            }
+            "set-hook" => {
+                hook_rows.insert(
+                    args.get(3).cloned().unwrap_or_default(),
+                    args.get(4).cloned().unwrap_or_default(),
+                );
+                String::new()
+            }
             "has-session" => {
                 let target = args.get(2).cloned().unwrap_or_default();
                 let found = match target.strip_prefix('=') {
@@ -319,8 +400,23 @@ pub(crate) fn fake_tmux_sessions(
                 format!("{target}:2\t{pane}")
             }
             "set-window-option" => {
-                // set-window-option -t <window> @<option> <value>
+                // set-window-option -t <window> [-u] @<option> [<value>]
                 let target = args.get(2).cloned().unwrap_or_default();
+                if args.get(3).map(String::as_str) == Some("-u") {
+                    if let Some(key) = args.get(4).and_then(|opt| opt.strip_prefix('@')) {
+                        if key == "hive-team" {
+                            for w in built.borrow_mut().iter_mut().filter(|w| w.target == target) {
+                                w.team.clear();
+                            }
+                        }
+                        written.insert((target, key.to_string()), String::new());
+                    }
+                    return Ok(crate::tmux::Run {
+                        returncode,
+                        stdout: "\n".to_string(),
+                        stderr: String::new(),
+                    });
+                }
                 if let Some(key) = args.get(3).and_then(|opt| opt.strip_prefix('@')) {
                     let value = args.get(4).cloned().unwrap_or_default();
                     if key == "hive-team" {

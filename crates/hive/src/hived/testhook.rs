@@ -30,6 +30,9 @@ pub type SessionStatus = Arc<dyn Fn(Option<i32>) -> Option<(String, String)> + S
 pub type WriteHivedOwner = Arc<dyn Fn(&str, i64, &str, &str) + Send + Sync>;
 pub type Popen = Arc<dyn Fn(&[String], &Path) -> i32 + Send + Sync>;
 pub type RequestPing = Arc<dyn Fn(&str, f64) -> Option<Map<String, Value>> + Send + Sync>;
+pub type FlockNb = Arc<dyn Fn(i32) -> Result<(), i32> + Send + Sync>;
+pub type StartRequestServer =
+    Arc<dyn Fn(Box<dyn HivedServerApi>) -> anyhow::Result<Box<dyn HivedServerApi>> + Send + Sync>;
 pub type JobRows = Vec<Map<String, Value>>;
 
 /// The two adapter methods the hived consumes
@@ -43,9 +46,15 @@ pub struct FakeAdapter {
 #[derive(Default)]
 pub struct Hook {
     pub monotonic: Option<F0<f64>>,
-    pub gl_park_daemon_key: Option<S1<()>>,
     pub gl_idle_owned_keys: Option<S1<Option<Vec<String>>>>,
     pub after_accept: Option<F0<()>>,
+    /// Barriers inside a served connection: after the admission line went
+    /// out, before the handler runs, before the final reply goes out.
+    pub after_admit: Option<F0<()>>,
+    pub before_handler: Option<F0<()>>,
+    pub before_reply: Option<F0<()>>,
+    /// Every frame a client wrote on a hived connection, as it went out.
+    pub client_wrote: Option<S1<()>>,
     // adapters / gate
     pub adapters_get: Option<S1<Option<AdapterHandle>>>,
     pub check_input_gate: Option<P1<GateResult>>,
@@ -62,10 +71,11 @@ pub struct Hook {
     #[allow(clippy::type_complexity)]
     pub list_panes_all_status: Option<F0<(Option<Vec<crate::tmux::PaneInfo>>, &'static str)>>,
     pub tmux_socket_path: Option<F0<Option<String>>>,
-    pub is_tmux_window_alive: Option<S1<bool>>,
-    pub team_window_alive: Option<S2<bool>>,
+    #[allow(clippy::type_complexity)]
+    pub list_windows_snapshot: Option<F0<(Option<Vec<crate::tmux::WindowExtra>>, &'static str)>>,
     pub watching_clients: Option<S1<Option<usize>>>,
-    pub install_wake_hooks: Option<S1<()>>,
+    pub install_wake_hooks: Option<S1<Result<(), String>>>,
+    pub remove_wake_hooks: Option<S1<()>>,
     // agent_cli
     pub detect_cli_process_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
     pub detect_profile_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
@@ -166,6 +176,8 @@ pub struct Hook {
     pub fresh_snapshot_session_id: Option<S1<String>>,
     // sockets / lifecycle
     pub request_ping: Option<RequestPing>,
+    pub flock_nb: Option<FlockNb>,
+    pub start_request_server: Option<StartRequestServer>,
     pub cleanup_socket: Option<S1<()>>,
     pub run_dir: Option<S1<PathBuf>>,
     pub write_hived_owner: Option<WriteHivedOwner>,

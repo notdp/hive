@@ -274,6 +274,11 @@ pub struct Team {
     pub tmux_session: String,
     pub tmux_window: String,
     pub tmux_window_id: String,
+    /// The `@hive-workspace` and `@hive-created` tags of `tmux_window`, as
+    /// read with it: whether that window is this instance's is decided
+    /// from these, not from the name alone.
+    pub window_workspace: String,
+    pub window_created: String,
     pub member_groups: HashMap<String, String>,
 }
 
@@ -291,6 +296,8 @@ impl Default for Team {
             tmux_session: String::new(),
             tmux_window: String::new(),
             tmux_window_id: String::new(),
+            window_workspace: String::new(),
+            window_created: String::new(),
             member_groups: HashMap::new(),
         }
     }
@@ -409,6 +416,8 @@ impl Team {
         }
 
         team.write_window_options();
+        team.window_workspace = team.workspace.clone();
+        team.window_created = team.created_at_key();
         Ok(team)
     }
 
@@ -497,6 +506,8 @@ impl Team {
             },
             tmux_window: window_target.clone(),
             tmux_window_id: window_data.window_id.clone(),
+            window_workspace: window_data.workspace.clone(),
+            window_created: window_data.created.clone(),
             ..Default::default()
         };
 

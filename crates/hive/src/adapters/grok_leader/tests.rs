@@ -159,7 +159,7 @@ fn set_process_table(procs: Vec<(libc::pid_t, String)>) -> (ProcessTable, KillLo
     (procs, killed)
 }
 
-type KillLog = Arc<Mutex<Vec<libc::pid_t>>>;
+pub(crate) type KillLog = Arc<Mutex<Vec<libc::pid_t>>>;
 
 /// The command line of the leader that binds *sock*, as `ps` would print it.
 fn leader_args(sock: &std::path::Path) -> String {
@@ -197,6 +197,52 @@ fn bind_leader_socket(sock: &std::path::Path) -> UnixListener {
     UnixListener::bind(sock).unwrap()
 }
 
+// ---- fixtures for tests outside this module --------------------------
+
+/// Watch the adapter's process seams from elsewhere in the crate: *procs*
+/// is the table a reap reads, the returned log every pid it signalled. A
+/// path that must not collect a member's engine proves it against a table
+/// that gives it something to kill.
+pub(crate) fn watch_process_signals(procs: Vec<(libc::pid_t, String)>) -> KillLog {
+    set_process_table(procs).1
+}
+
+/// How `ps` prints the two processes on *key*'s socket: the leader grok
+/// raised, and the TUI in the member's pane — what a reap of the key
+/// signals, TUI first.
+pub(crate) fn socket_process_args(key: &str) -> (String, String) {
+    let sock = socket_path_for_key(key);
+    (leader_args(&sock), tui_args(&sock))
+}
+
+/// The desk's own stdio client on *key*, pooled and idle: a fake leader
+/// handshaken against a written session record — what a hived holds for a
+/// member it has sent to. The handle says whether the child was signalled.
+pub(crate) fn pool_idle_fake_client(key: &str) -> Arc<FakeProc> {
+    write_session_key(key, SID, CWD).unwrap();
+    let proc = FakeProc::new(Some(responder(None, Vec::new())));
+    let handout = Arc::clone(&proc);
+    set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+    let client = Arc::new(GrokStdioClient::new(key).unwrap());
+    assert!(client.handshake());
+    pool().hold_for_test(key, client);
+    proc
+}
+
+/// Feed the pooled client on *key* one activity notification and wait for
+/// its reader thread to take it.
+pub(crate) fn feed_turn_open(proc: &FakeProc, key: &str, open: bool) {
+    proc.feed(&activity(if open { "working" } else { "idle" }));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if pool().turn_open_for_key(key) == Some(Some(open)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("turn evidence never became {open} on {key}");
+}
+
 /// Serialized test bed: env guard held, GROK_HOME pinned to a tempdir,
 /// key cache and every thread-local seam reset.
 struct TestBed {
@@ -223,7 +269,7 @@ fn setup() -> TestBed {
 
 type Responder = Box<dyn Fn(&Value) -> Vec<Value> + Send + Sync>;
 
-struct FakeProc {
+pub(crate) struct FakeProc {
     lines: Mutex<Vec<String>>,
     writer: Mutex<Option<UnixStream>>,
     reader: Mutex<Option<UnixStream>>,
@@ -268,6 +314,11 @@ impl FakeProc {
 
     fn set_write_fail(&self) {
         self.write_fail.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the client ever signalled this child.
+    pub(crate) fn terminated(&self) -> bool {
+        self.terminated.load(Ordering::SeqCst)
     }
 }
 
@@ -3285,8 +3336,70 @@ fn test_sleep_pool_observation_is_scoped_and_requires_idle_evidence() {
     );
 }
 
+/// The desk's sleep hands the pool a key; the only process that may go is
+/// the stdio client this process spawned. The leader on the socket is the
+/// member's own, the TUI in its pane is one of the leader's clients, and
+/// the session and alias that resume the member read back unchanged.
 #[test]
-fn test_parked_member_keeps_session_and_alias_and_wakes_only_on_submission() {
+fn test_pool_drop_closes_only_owned_stdio_client() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    let key = "m-cedar.worker";
+    let spare_key = "m-cedar.scribe";
+    fs::create_dir_all(bed.tmp.path().join("hive")).unwrap();
+    fs::write(alias_path_for_key(key), "l-cafe").unwrap();
+    let sock = socket_path_for_key(key);
+    fs::write(&sock, "").unwrap();
+    fs::write(sock.with_extension("pid"), "4321").unwrap();
+    let (_procs, killed) = set_process_table(vec![
+        (11, tui_args(&sock)),
+        (12, stdio_args(&sock)),
+        (4321, leader_args(&sock)),
+    ]);
+
+    let pool = GrokClientPool::new();
+    let owned = FakeProc::new(Some(responder(None, Vec::new())));
+    let handout = Arc::clone(&owned);
+    set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+    write_session_key(key, SID, CWD).unwrap();
+    let client = Arc::new(GrokStdioClient::new(key).unwrap());
+    assert!(client.handshake());
+    pool.hold_for_test(key, client.clone());
+    let spare = FakeProc::new(Some(responder(None, Vec::new())));
+    let handout = Arc::clone(&spare);
+    set_stdio_spawn(move |_argv| Ok(handout.clone() as Arc<dyn LeaderProc>));
+    write_session_key(spare_key, SID, CWD).unwrap();
+    let spare_client = Arc::new(GrokStdioClient::new(spare_key).unwrap());
+    assert!(spare_client.handshake());
+    pool.hold_for_test(spare_key, spare_client.clone());
+
+    pool.drop_key(key);
+
+    assert!(owned.terminated(), "the pool's own client is closed");
+    assert!(!client.is_alive());
+    assert!(
+        killed.lock().unwrap().is_empty(),
+        "no process-group signal: {:?}",
+        killed.lock().unwrap()
+    );
+    assert!(sock.exists(), "the leader keeps its socket");
+    assert!(sock.with_extension("pid").exists());
+    assert_eq!(alias_target(key).as_deref(), Some("l-cafe"));
+    assert_eq!(
+        read_session_key(key).map(|record| record.session_id),
+        Some(SID.to_string())
+    );
+    assert!(!spare.terminated(), "another key's client is untouched");
+    assert_eq!(spare_client.turn_open(), None);
+    assert!(spare_client.is_alive());
+    teardown(&spare_client, &spare);
+}
+
+/// A member whose leader is gone keeps what resumes it. The desk's sleep
+/// takes no leader down, so this is the leader exiting on its own — grok's
+/// own lifecycle — and the next send has to raise it from the record.
+#[test]
+fn test_member_without_a_leader_keeps_session_and_alias_and_wakes_only_on_submission() {
     let mut bed = setup();
     bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
     let key = "m-cedar.worker";
@@ -3298,9 +3411,6 @@ fn test_parked_member_keeps_session_and_alias_and_wakes_only_on_submission() {
     let mut record: Value = serde_json::from_slice(&fs::read(&session).unwrap()).unwrap();
     record["extra"] = json!("preserved");
     fs::write(&session, record.to_string()).unwrap();
-    fs::write(socket_path_for_key(key), "").unwrap();
-    set_process_listing(Vec::new);
-    park_daemon_key(key);
     assert!(!socket_path_for_key(key).exists());
     assert_eq!(alias_target(key).as_deref(), Some("l-cafe"));
     assert_eq!(

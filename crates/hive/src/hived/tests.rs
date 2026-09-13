@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
 use crate::adapters::grok_leader::PromptId;
@@ -37,7 +37,7 @@ type OptionWrites = Arc<Mutex<Vec<(String, String, String)>>>;
 type EventSink = Arc<Mutex<Vec<(String, Map<String, Value>)>>>;
 type SpawnSink = Arc<Mutex<Vec<(Vec<String>, PathBuf)>>>;
 type DebugEventSink = Arc<Mutex<Vec<(String, Vec<(String, Value)>)>>>;
-use crate::tmux::PaneInfo;
+use crate::tmux::{PaneInfo, WindowExtra};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 
@@ -3007,6 +3007,34 @@ fn test_idle_notify_agent_panes_filters_to_live_agent_roles() {
 
 // ---- socket server / lifecycle -----------------------------------------
 
+/// A fake hived's side of the admission preflight: read the client's
+/// `admit` line and answer it admitted at this api version.
+fn admit_preflight(conn: &mut UnixStream) {
+    use std::io::BufRead;
+    let mut line = String::new();
+    std::io::BufReader::new(&*conn)
+        .read_line(&mut line)
+        .unwrap();
+    let preflight: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(preflight["action"], ADMIT_ACTION);
+    (&*conn)
+        .write_all(
+            format!("{{\"ok\":true,\"admitted\":true,\"apiVersion\":{HIVED_API_VERSION}}}\n")
+                .as_bytes(),
+        )
+        .unwrap();
+}
+
+/// A handler thread drops its lease after the client has its reply; wait
+/// for that before asserting on the admission counts.
+fn settle_leases() {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while requests_in_flight() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!requests_in_flight(), "a handler lease never settled");
+}
+
 fn short_workspace() -> tempfile::TempDir {
     // AF_UNIX sun_path caps near 104 bytes: the hived socket cannot live
     // under a long tmp path.
@@ -3100,7 +3128,8 @@ fn test_serve_requests_answers_a_read_while_a_send_holds_the_transport() {
     let server = Arc::new(open_server_socket(&workspace).unwrap());
 
     let ws_slow = workspace.clone();
-    let slow_client = thread::spawn(move || request_hived(&ws_slow, &action_payload("send"), 10.0));
+    let slow_client =
+        thread::spawn(move || request_admitted(&ws_slow, &action_payload("send"), 10.0).ok());
     let ws_serve = workspace.clone();
     let server_serve = Arc::clone(&server);
     let serve_thread = thread::spawn(move || {
@@ -3452,6 +3481,397 @@ fn ensure_hived_with_delayed_ping(delay: Option<Duration>) -> (Option<i32>, usiz
         spawns.load(Ordering::SeqCst),
         cleanups.load(Ordering::SeqCst),
     )
+}
+
+/// A hived identity this binary accepts as its own.
+fn matching_identity() -> Map<String, Value> {
+    json_obj(&[
+        ("ok", Value::Bool(true)),
+        ("apiVersion", Value::from(HIVED_API_VERSION)),
+        ("buildHash", Value::from(hived_build_hash())),
+        ("team", Value::from("team-a")),
+    ])
+}
+
+/// A clock that jumps `step` seconds on every read, so a budget expires
+/// without the test waiting for it.
+fn stepping_clock(step: f64) -> Arc<dyn Fn() -> f64 + Send + Sync> {
+    let now = Arc::new(Mutex::new(0.0f64));
+    Arc::new(move || {
+        let mut now = now.lock().unwrap();
+        *now += step;
+        *now
+    })
+}
+
+#[test]
+fn test_startup_lock_is_cloexec_and_reexec_lock_is_inheritable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_string_lossy().to_string();
+
+    // `start_hived` spawns the hived while this lock is held: a descriptor
+    // that rode into the child would hold the lock for the child's life.
+    let lock = StartupLock::acquire(&workspace).unwrap();
+    let fd = lock.raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(flags >= 0, "F_GETFD on the startup lock fd failed");
+    assert_eq!(
+        flags & libc::FD_CLOEXEC,
+        libc::FD_CLOEXEC,
+        "the startup lock fd must be close-on-exec"
+    );
+    drop(lock);
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_GETFD) },
+        -1,
+        "dropping the startup lock must close its fd"
+    );
+
+    // The reexec handoff fd keeps the opposite contract: it rides through
+    // execv into the generation that releases it.
+    let reexec_fd = try_acquire_reexec_lock_impl(&workspace).unwrap();
+    let flags = unsafe { libc::fcntl(reexec_fd, libc::F_GETFD) };
+    assert!(flags >= 0, "F_GETFD on the reexec handoff fd failed");
+    assert_eq!(
+        flags & libc::FD_CLOEXEC,
+        0,
+        "the reexec handoff fd must stay inheritable"
+    );
+    release_reexec_lock_fd_impl(Some(reexec_fd));
+
+    // A flock that comes back non-zero never reaches the spawn, and the
+    // fd is closed on that path too.
+    let spawns = Arc::new(Mutex::new(0usize));
+    let counted = Arc::clone(&spawns);
+    let _guard = testhook::install(Hook {
+        flock_nb: Some(Arc::new(|_fd| Err(libc::ENOLCK))),
+        popen: Some(Arc::new(move |_command, _stderr| {
+            *counted.lock().unwrap() += 1;
+            4242
+        })),
+        ..Default::default()
+    });
+    let err = ensure_hived(&workspace, "team-a", "dev:3", "@99")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("hived.lock"), "{err}");
+    assert_eq!(*spawns.lock().unwrap(), 0);
+}
+
+#[test]
+fn test_startup_lock_timeout_and_eintr_do_not_spawn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_string_lossy().to_string();
+    let lock_path = lock_path(&workspace);
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+
+    // A budget for a lock a live holder keeps: a real second open file
+    // description on the same path, exactly what a leaked fd looks like.
+    let holder = try_acquire_reexec_lock_impl(&workspace).expect("holder takes the lock");
+    let spawns = Arc::new(Mutex::new(0usize));
+    let cleanups = Arc::new(Mutex::new(0usize));
+    let count_spawn = |spawns: &Arc<Mutex<usize>>| {
+        let counted = Arc::clone(spawns);
+        Arc::new(move |_command: &[String], _stderr: &std::path::Path| {
+            *counted.lock().unwrap() += 1;
+            4242
+        }) as testhook::Popen
+    };
+    let count_cleanup = |cleanups: &Arc<Mutex<usize>>| {
+        let counted = Arc::clone(cleanups);
+        Arc::new(move |_ws: &str| {
+            *counted.lock().unwrap() += 1;
+        }) as testhook::S1<()>
+    };
+    {
+        let _guard = testhook::install(Hook {
+            monotonic: Some(stepping_clock(10.0)),
+            popen: Some(count_spawn(&spawns)),
+            cleanup_socket: Some(count_cleanup(&cleanups)),
+            ..Default::default()
+        });
+        let err = ensure_hived(&workspace, "team-a", "dev:3", "@99")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&lock_path.display().to_string()),
+            "the error names the lock path: {err}"
+        );
+        assert!(
+            err.contains(&format!("{STARTUP_LOCK_TIMEOUT}s")),
+            "the error names the budget: {err}"
+        );
+        // flock never says who holds the lock; owner.json's pid is not it.
+        assert!(!err.contains("pid"), "{err}");
+    }
+    release_reexec_lock_fd_impl(Some(holder));
+    assert_eq!(*spawns.lock().unwrap(), 0);
+    assert_eq!(*cleanups.lock().unwrap(), 0);
+
+    // EINTR retries on the same deadline and then succeeds: one spawn.
+    let flocks = Arc::new(Mutex::new(0usize));
+    {
+        let counted = Arc::clone(&flocks);
+        let pings = Arc::new(Mutex::new(0usize));
+        let _guard = testhook::install(Hook {
+            flock_nb: Some(Arc::new(move |fd| {
+                let mut n = counted.lock().unwrap();
+                *n += 1;
+                if *n <= 2 {
+                    return Err(libc::EINTR);
+                }
+                flock_nb_impl(fd)
+            })),
+            request_ping: Some(Arc::new(move |_ws, _timeout| {
+                let mut n = pings.lock().unwrap();
+                *n += 1;
+                (*n > 1).then(matching_identity)
+            })),
+            popen: Some(count_spawn(&spawns)),
+            cleanup_socket: Some(count_cleanup(&cleanups)),
+            ..Default::default()
+        });
+        assert_eq!(
+            ensure_hived(&workspace, "team-a", "dev:3", "@99").unwrap(),
+            Some(4242)
+        );
+    }
+    assert_eq!(*flocks.lock().unwrap(), 3);
+    assert_eq!(*spawns.lock().unwrap(), 1);
+
+    // EINTR all the way to the deadline: an error, still no spawn.
+    let spawns = Arc::new(Mutex::new(0usize));
+    let cleanups = Arc::new(Mutex::new(0usize));
+    {
+        let _guard = testhook::install(Hook {
+            monotonic: Some(stepping_clock(10.0)),
+            flock_nb: Some(Arc::new(|_fd| Err(libc::EINTR))),
+            popen: Some(count_spawn(&spawns)),
+            cleanup_socket: Some(count_cleanup(&cleanups)),
+            ..Default::default()
+        });
+        let err = ensure_hived(&workspace, "team-a", "dev:3", "@99")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("{STARTUP_LOCK_TIMEOUT}s")), "{err}");
+    }
+    assert_eq!(*spawns.lock().unwrap(), 0);
+    assert_eq!(*cleanups.lock().unwrap(), 0);
+
+    // A non-retryable errno fails at once, with the OS error in the text.
+    {
+        let _guard = testhook::install(Hook {
+            flock_nb: Some(Arc::new(|_fd| Err(libc::ENOLCK))),
+            popen: Some(count_spawn(&spawns)),
+            cleanup_socket: Some(count_cleanup(&cleanups)),
+            ..Default::default()
+        });
+        let err = ensure_hived(&workspace, "team-a", "dev:3", "@99")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&lock_path.display().to_string()), "{err}");
+        assert!(
+            err.contains(&std::io::Error::from_raw_os_error(libc::ENOLCK).to_string()),
+            "{err}"
+        );
+    }
+    assert_eq!(*spawns.lock().unwrap(), 0);
+    assert_eq!(*cleanups.lock().unwrap(), 0);
+
+    // The lock taken again after the stale generation stopped goes through
+    // the same budget: its failure is the same loud error, and nothing spawns.
+    let flocks = Arc::new(Mutex::new(0usize));
+    {
+        let counted = Arc::clone(&flocks);
+        let stale = json_obj(&[
+            ("ok", Value::Bool(true)),
+            ("apiVersion", Value::from(HIVED_API_VERSION)),
+            ("buildHash", Value::from("stale")),
+            ("team", Value::from("team-a")),
+        ]);
+        let _guard = testhook::install(Hook {
+            flock_nb: Some(Arc::new(move |fd| {
+                let mut n = counted.lock().unwrap();
+                *n += 1;
+                if *n == 1 {
+                    return flock_nb_impl(fd);
+                }
+                Err(libc::ENOLCK)
+            })),
+            request_ping: Some(Arc::new(move |_ws, _timeout| Some(stale.clone()))),
+            popen: Some(count_spawn(&spawns)),
+            cleanup_socket: Some(count_cleanup(&cleanups)),
+            ..Default::default()
+        });
+        let err = ensure_hived(&workspace, "team-a", "dev:3", "@99")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&lock_path.display().to_string()), "{err}");
+    }
+    assert_eq!(
+        *flocks.lock().unwrap(),
+        2,
+        "the retake uses the same helper"
+    );
+    assert_eq!(*spawns.lock().unwrap(), 0);
+    assert_eq!(*cleanups.lock().unwrap(), 0);
+}
+
+#[test]
+fn test_startup_timeout_is_error_and_ready_clears_marker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_string_lossy().to_string();
+
+    // A hived that never answers a matching ping is an error, not Ok(pid):
+    // the caller's request would otherwise be sent into a dead socket.
+    let spawns = Arc::new(Mutex::new(0usize));
+    {
+        let counted = Arc::clone(&spawns);
+        let _guard = testhook::install(Hook {
+            monotonic: Some(stepping_clock(10.0)),
+            request_ping: Some(Arc::new(|_ws, _timeout| None)),
+            cleanup_socket: Some(Arc::new(|_ws| {})),
+            popen: Some(Arc::new(move |_command, _stderr| {
+                *counted.lock().unwrap() += 1;
+                4242
+            })),
+            ..Default::default()
+        });
+        let err = ensure_hived(&workspace, "team-a", "dev:3", "@99")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("team-a"), "{err}");
+        assert!(err.contains("matching ping"), "{err}");
+    }
+    assert_eq!(*spawns.lock().unwrap(), 1);
+
+    // A ping that misses once and then matches is a success, on one spawn.
+    let spawns = Arc::new(Mutex::new(0usize));
+    {
+        let counted = Arc::clone(&spawns);
+        let pings = Arc::new(Mutex::new(0usize));
+        let _guard = testhook::install(Hook {
+            request_ping: Some(Arc::new(move |_ws, _timeout| {
+                let mut n = pings.lock().unwrap();
+                *n += 1;
+                (*n > 2).then(matching_identity)
+            })),
+            cleanup_socket: Some(Arc::new(|_ws| {})),
+            popen: Some(Arc::new(move |_command, _stderr| {
+                *counted.lock().unwrap() += 1;
+                4242
+            })),
+            ..Default::default()
+        });
+        assert_eq!(
+            ensure_hived(&workspace, "team-a", "dev:3", "@99").unwrap(),
+            Some(4242)
+        );
+    }
+    assert_eq!(*spawns.lock().unwrap(), 1);
+
+    // In the hived, the marker survives every startup barrier and goes
+    // only once the owner file names this generation.
+    let env = loop_probe_env("ok");
+    let marker = asleep_marker_path(&env.workspace);
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "{\"reason\":\"unwatched\"}\n").unwrap();
+    let barriers: Arc<Mutex<Vec<(&str, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let at_open = Arc::clone(&barriers);
+    let at_worker = Arc::clone(&barriers);
+    let at_owner = Arc::clone(&barriers);
+    let open_marker = marker.clone();
+    let worker_marker = marker.clone();
+    let owner_marker = marker.clone();
+    testhook::update(|h| {
+        h.open_server_socket = Some(Arc::new(move |_workspace| {
+            at_open.lock().unwrap().push(("bind", open_marker.exists()));
+            Ok(Box::new(RecServer {
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }) as Box<dyn HivedServerApi>)
+        }));
+        h.start_request_server = Some(Arc::new(move |server| {
+            at_worker
+                .lock()
+                .unwrap()
+                .push(("worker", worker_marker.exists()));
+            Ok(server)
+        }));
+        h.write_hived_owner = Some(Arc::new(move |ws, pid, started_at, token| {
+            at_owner
+                .lock()
+                .unwrap()
+                .push(("owner", owner_marker.exists()));
+            write_hived_owner_impl(ws, pid, started_at, token);
+        }));
+        h.try_acquire_reexec_lock = Some(Arc::new(|_ws| Some(9)));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+    assert_eq!(
+        *barriers.lock().unwrap(),
+        vec![("bind", true), ("worker", true), ("owner", true)]
+    );
+    assert!(!marker.exists(), "a ready hived clears the marker");
+}
+
+#[test]
+fn test_failed_bind_preserves_unwatched_marker() {
+    for failure in ["bind", "worker"] {
+        let env = loop_probe_env("ok");
+        let marker = asleep_marker_path(&env.workspace);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        let bytes = "{\"reason\":\"unwatched\",\"at\":1730000000}\n";
+        std::fs::write(&marker, bytes).unwrap();
+        let owners = Arc::new(Mutex::new(0usize));
+        let counted = Arc::clone(&owners);
+        testhook::update(|h| {
+            h.write_hived_owner = Some(Arc::new(move |ws, pid, started_at, token| {
+                *counted.lock().unwrap() += 1;
+                write_hived_owner_impl(ws, pid, started_at, token);
+            }));
+            h.try_acquire_reexec_lock = Some(Arc::new(|_ws| Some(9)));
+            if failure == "bind" {
+                h.open_server_socket = Some(Arc::new(|_workspace| {
+                    Err(anyhow::anyhow!("File name too long (os error 63)"))
+                }));
+            } else {
+                h.start_request_server = Some(Arc::new(|_server| {
+                    Err(anyhow::anyhow!("cannot spawn the accept worker"))
+                }));
+            }
+        });
+
+        hived_loop(&env.workspace, "probe", "probe:1", "@1");
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            bytes,
+            "{failure}: the marker bytes are left as they were found"
+        );
+        assert_eq!(
+            *owners.lock().unwrap(),
+            0,
+            "{failure}: nothing published an owner"
+        );
+        assert_eq!(
+            display_events(&env, "hived.socket_bind_failed").len(),
+            1,
+            "{failure}"
+        );
+
+        // Fault cleared: the next start reaches ready and the marker goes.
+        testhook::update(|h| {
+            h.open_server_socket = Some(Arc::new(|_workspace| {
+                Ok(Box::new(RecServer {
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                }) as Box<dyn HivedServerApi>)
+            }));
+            h.start_request_server = Some(Arc::new(Ok));
+        });
+        hived_loop(&env.workspace, "probe", "probe:1", "@1");
+        assert!(!marker.exists(), "{failure}");
+        assert_eq!(*owners.lock().unwrap(), 1, "{failure}");
+    }
 }
 
 #[test]
@@ -4315,9 +4735,9 @@ fn test_reexec_hived_stops_monitor_closes_socket_and_execs() {
         *calls.lock().unwrap(),
         vec![
             "lock /ws".to_string(),
-            "monitor.stop".to_string(),
             "server.close".to_string(),
             "cleanup /ws".to_string(),
+            "monitor.stop".to_string(),
             "execv /tmp/fake-hive --hived /ws team-a dev:3 @99 env=42".to_string(),
             "release Some(42)".to_string(),
         ]
@@ -4476,7 +4896,6 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
             write_hived_owner_impl(workspace, pid + 1, started_at, "foreign");
         })),
         release_reexec_lock_fd: Some(Arc::new(|_fd| {})),
-        is_tmux_window_alive: Some(Arc::new(|_id| true)),
         stale_disk_build_hash: Some(Arc::new(|| None)),
         wait_tick: Some(Arc::new(move || {
             serve_sink.lock().unwrap().push("serve".to_string());
@@ -4504,6 +4923,7 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
+    crate::registry::record_team("team-a", &workspace, "123", &[], "").unwrap();
 
     hived_loop(&workspace, "team-a", "dev:3", "@99");
 
@@ -4601,7 +5021,6 @@ fn test_hived_loop_reports_a_socket_bind_failure_instead_of_exiting_silently() {
         })),
         release_reexec_lock_fd: Some(Arc::new(move |fd| release_sink.lock().unwrap().push(fd))),
         cleanup_socket: Some(Arc::new(|_workspace| {})),
-        is_tmux_window_alive: Some(Arc::new(|_id| false)),
         make_busy_monitor: Some(Arc::new(|_session| None)),
         notify_debug_emit: Some(Arc::new(move |_ws, event, fields| {
             sink.lock().unwrap().push((
@@ -4644,6 +5063,9 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
     let mut env = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     env.set("HIVE_HOME", tmp.path().join(".hive"));
+    // The loop's supervisors run for real here: their record store and
+    // their pane listing must be this test's, not the developer's.
+    env.set("CODEX_HOME", tmp.path().join(".codex"));
     env.set(HIVED_REEXEC_LOCK_ENV, "77");
     let workspace = tmp.path().to_string_lossy().to_string();
     let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -4668,9 +5090,9 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
                 .unwrap()
                 .push(format!("cleanup {workspace}"))
         })),
-        is_tmux_window_alive: Some(Arc::new(|_id| false)),
         make_busy_monitor: Some(Arc::new(|_session| None)),
         notify_debug_emit: Some(Arc::new(|_ws, _event, _fields| {})),
+        list_panes_all: Some(Arc::new(Vec::new)),
         ..Default::default()
     };
     let _guard = testhook::install(hook);
@@ -4721,6 +5143,7 @@ fn test_request_send_survives_delayed_but_valid_acceptance() {
     thread::spawn(move || {
         let (conn, _) = listener.accept().unwrap();
         let mut conn = conn;
+        admit_preflight(&mut conn);
         let mut buf = [0u8; 65536];
         loop {
             match conn.read(&mut buf) {
@@ -6058,13 +6481,45 @@ struct LoopProbeEnv {
     _guard: testhook::Guard,
 }
 
+/// A window of team `probe`'s instance (`createdAt` 123 on *workspace*)
+/// as the tick's window listing reports it.
+fn probe_window(window: &str, window_id: &str, session_id: &str, workspace: &str) -> WindowExtra {
+    WindowExtra {
+        window: window.to_string(),
+        window_id: window_id.to_string(),
+        session_id: session_id.to_string(),
+        session_name: window.split(':').next().unwrap_or_default().to_string(),
+        team: "probe".to_string(),
+        workspace: workspace.to_string(),
+        created: "123".to_string(),
+        token: String::new(),
+    }
+}
+
 /// A hived loop that serves four ticks then retires, against a display
 /// whose probe answers *status* (`(None, status)` unless `ok`).
 fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
     let mut env = EnvGuard::cleared(&[HIVED_REEXEC_LOCK_ENV]);
     let tmp = tempfile::tempdir().unwrap();
     env.set("HIVE_HOME", tmp.path().join(".hive"));
+    // The sleep path asks the real Grok pool which keys it holds, and the
+    // pool reads and writes session records under this root.
+    env.set("GROK_HOME", tmp.path().join(".grok"));
     let workspace = tmp.path().to_string_lossy().to_string();
+    // The instance the loop serves: its entry names the createdAt the
+    // window tags must match, and the members a node may be dispatched to.
+    crate::registry::record_team(
+        "probe",
+        &workspace,
+        "123",
+        &[
+            crate::testkit::member_row("worker", "codex", "t-worker"),
+            crate::testkit::member_row("b", "codex", "t-b"),
+        ],
+        "",
+    )
+    .unwrap();
+    let window_ws = workspace.clone();
     let probes = Arc::new(Mutex::new(0usize));
     let bindings = Arc::new(Mutex::new(0usize));
     let serves = Arc::new(Mutex::new(0usize));
@@ -6083,7 +6538,6 @@ fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
             write_hived_owner_impl(workspace, pid, started_at, token);
         })),
         release_reexec_lock_fd: Some(Arc::new(|_fd| {})),
-        is_tmux_window_alive: Some(Arc::new(|_id| true)),
         stale_disk_build_hash: Some(Arc::new(|| None)),
         wait_tick: Some(Arc::new(move || {
             let mut served = serves_sink.lock().unwrap();
@@ -6103,6 +6557,18 @@ fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
             *probes_sink.lock().unwrap() += 1;
             if status == "ok" {
                 (Some(Vec::new()), "ok")
+            } else {
+                (None, status)
+            }
+        })),
+        // The team window `probe:1` (`@1`, in session `$1`) carries this
+        // instance's tags whenever the display answers.
+        list_windows_snapshot: Some(Arc::new(move || {
+            if status == "ok" {
+                (
+                    Some(vec![probe_window("probe:1", "@1", "$1", &window_ws)]),
+                    "ok",
+                )
             } else {
                 (None, status)
             }
@@ -6353,16 +6819,19 @@ fn test_draining_rejects_new_requests_before_any_handler_side_effect() {
     });
     let tmp = short_workspace();
     let workspace = tmp.path().to_str().unwrap().to_string();
-    let server = open_server_socket(&workspace).unwrap();
+    let raw = open_server_socket(&workspace).unwrap();
+    let server = RequestServer::start(Box::new(raw), &workspace, "t", "", "", "start").unwrap();
     close_admission();
-    let client_ws = workspace.clone();
-    let client =
-        thread::spawn(move || request_hived(&client_ws, &action_payload("node-dispatch"), 2.0));
-    reject_draining_request(&server);
-    let reply = client.join().unwrap().unwrap();
+    // The accept worker refuses on its own: an old-format request hears
+    // notAdmitted, a preflight is refused before any payload is written.
+    let reply = request_hived(&workspace, &action_payload("node-dispatch"), 2.0).unwrap();
     assert_eq!(reply["ok"], false);
     assert_eq!(reply["notAdmitted"], true);
+    let err = request_admitted(&workspace, &action_payload("node-dispatch"), 2.0).unwrap_err();
+    assert!(matches!(err, RequestFailure::NotAdmitted(_)), "{err:?}");
     assert!(!requests_in_flight());
+    assert_eq!(admission().lock().unwrap().usage, 0);
+    assert_eq!(admission().lock().unwrap().arrivals, 2);
     assert!(!hooked_run_dir(&workspace).join("operations").exists());
     server.close();
 }
@@ -6378,9 +6847,9 @@ fn snapshot_fixture() -> TickSnapshot {
     let processes = crate::tmux::parse_all_tty_processes(
         "  501 ttys003 /Users/x/.local/bin/claude claude --resume abc\n  600 ttys004 -zsh -zsh\n  700 ??   /sbin/launchd /sbin/launchd\n",
     );
-    let mut tokens = HashMap::new();
-    tokens.insert("dev:1".to_string(), "tok-1".to_string());
-    TickSnapshot::with_extras("ok", panes, extras, Some(tokens), Some(processes))
+    let windows =
+        crate::tmux::parse_windows_snapshot("dev:1\t@1\t$0\tdev\tteam-a\t/tmp\t1\ttok-1\n");
+    TickSnapshot::with_extras("ok", panes, extras, Some(windows), Some(processes))
 }
 
 #[test]
@@ -6563,6 +7032,7 @@ fn test_ensure_hived_uses_old_generation_when_graceful_shutdown_is_deferred() {
                     "hiveHome",
                     Value::from(crate::paths::hive_home().to_string_lossy().to_string()),
                 ),
+                ("apiVersion", Value::from(HIVED_API_VERSION)),
                 ("buildHash", Value::from("old")),
                 ("hived", Value::Object(hived_metadata("start"))),
             ]))
@@ -6600,16 +7070,11 @@ fn test_ensure_hived_uses_old_generation_when_graceful_shutdown_is_deferred() {
 fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
     let _guard = testhook::install(Hook::default());
     let tmp = short_workspace();
-    admission().lock().unwrap().leases += 1;
-    let lease = RequestLease::default();
-    let server = RecServer {
-        calls: Arc::new(Mutex::new(Vec::new())),
-    };
+    let lease = RequestLease::reserve(&mut admission().lock().unwrap());
     SHUTDOWN.store(true, Ordering::SeqCst);
     close_admission();
     assert!(!finish_shutdown(
         tmp.path().to_str().unwrap(),
-        &server,
         Duration::ZERO
     ));
     assert!(!SHUTDOWN.load(Ordering::SeqCst));
@@ -6617,7 +7082,6 @@ fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
     FORCE_SHUTDOWN.store(true, Ordering::SeqCst);
     assert!(finish_shutdown(
         tmp.path().to_str().unwrap(),
-        &server,
         Duration::ZERO
     ));
     drop(lease);
@@ -6625,29 +7089,24 @@ fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
 
 fn sleep_probe_env() -> LoopProbeEnv {
     let env = loop_probe_env("no-server");
-    crate::registry::record_team("probe", &env.workspace, "123", &[], "").unwrap();
     testhook::update(|h| {
         h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
-        h.is_tmux_window_alive = Some(Arc::new(|_| false));
+        // The sleep commit takes the real startup lock on the probe
+        // workspace; the lock it releases is real too.
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
     });
     env
 }
 
-fn sleep_server() -> RecServer {
-    RecServer {
-        calls: Arc::new(Mutex::new(Vec::new())),
-    }
-}
-
 /// A team window the display probe sees, on a session nobody watches
-/// unless the test says so.
+/// unless the test says so. The viewer count is asked by session id.
 fn unwatched_probe_env(watching: Option<usize>) -> LoopProbeEnv {
     let env = loop_probe_env("ok");
-    crate::registry::record_team("probe", &env.workspace, "123", &[], "").unwrap();
     testhook::update(|h| {
         h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
         h.watching_clients = Some(Arc::new(move |session| {
-            assert_eq!(session, "probe");
+            assert_eq!(session, "$1");
             watching
         }));
     });
@@ -6692,15 +7151,14 @@ fn test_hived_sleeps_when_its_window_id_now_belongs_to_another_team() {
     let serves = Arc::clone(&env.serves);
     let clock = Arc::clone(&serves);
     crate::registry::set_display("probe", "@1").unwrap();
+    let workspace = env.workspace.clone();
     testhook::update(|h| {
         h.list_panes_all_status = Some(Arc::new(|| (Some(Vec::new()), "ok")));
-        // The id exists on the server…
-        h.is_tmux_window_alive = Some(Arc::new(|_| true));
-        // …but the window is not this team's any more.
-        h.team_window_alive = Some(Arc::new(|window, team| {
-            assert_eq!(window, "@1");
-            assert_eq!(team, "probe");
-            false
+        // The id exists on the server, but the window is another team's.
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let mut window = probe_window("other:0", "@1", "$0", &workspace);
+            window.team = "other".to_string();
+            (Some(vec![window]), "ok")
         }));
         h.monotonic = Some(Arc::new(move || {
             *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
@@ -6724,13 +7182,312 @@ fn test_a_starting_hived_installs_the_wake_hooks_on_its_team_session() {
     let installed = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&installed);
     testhook::update(|h| {
-        h.install_wake_hooks = Some(Arc::new(move |team| {
-            sink.lock().unwrap().push(team.to_string())
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(session.to_string());
+            Ok(())
         }));
         h.wait_tick = Some(Arc::new(|| false));
     });
     hived_loop(&env.workspace, "probe", "probe:1", "@1");
-    assert_eq!(*installed.lock().unwrap(), vec!["probe".to_string()]);
+    // Installed where the display was found, by session id.
+    assert_eq!(*installed.lock().unwrap(), vec!["$1".to_string()]);
+}
+
+/// An unwatched desk retires only behind wake hooks that installed: while
+/// tmux refuses the install the idle clock keeps running, the failure is
+/// reported and the install retried, and the first success lets the
+/// desk go.
+#[test]
+fn test_install_failure_blocks_unwatched_sleep_until_it_succeeds() {
+    let env = unwatched_probe_env(Some(0));
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    let installs = Arc::new(AtomicUsize::new(0));
+    let attempts = Arc::clone(&installs);
+    testhook::update(|h| {
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            assert_eq!(session, "$1");
+            if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                Err("set-hook refused".to_string())
+            } else {
+                Ok(())
+            }
+        }));
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.wait_tick = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(*n <= 3, "a desk whose hooks installed failed to sleep");
+            true
+        }));
+    });
+    hived_loop(&env.workspace, "probe", "probe:1", "@1");
+
+    assert_eq!(installs.load(Ordering::SeqCst), 3);
+    let failed = display_events(&env, "hived.wake_hooks_failed");
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert_eq!(failed[0]["session"], "$1");
+    assert_eq!(failed[0]["error"], "set-hook refused");
+    assert_eq!(failed[0]["retryInSeconds"], WAKE_HOOK_RETRY_SECONDS);
+    let slept = display_events(&env, "hived.sleep");
+    assert_eq!(slept.len(), 1, "{slept:?}");
+    assert_eq!(slept[0]["reason"], "unwatched");
+    // The clock was never reset by the refusals: idle since the first tick.
+    assert_eq!(slept[0]["idleSeconds"], 2.0 * HIVED_SLEEP_AFTER_SECONDS);
+    let order: Vec<String> = env
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(event, _)| event.clone())
+        .filter(|event| event == "hived.sleep" || event == "hived.wake_hooks_failed")
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            "hived.wake_hooks_failed",
+            "hived.wake_hooks_failed",
+            "hived.sleep"
+        ]
+    );
+    let marker = fs::read_to_string(asleep_marker_path(&env.workspace)).unwrap();
+    assert_eq!(asleep_reason(&marker).as_deref(), Some("unwatched"));
+}
+
+/// This home's wake hooks follow the display from session to session,
+/// and leave a session behind only when no team of this home shows there
+/// any more; the same location again installs nothing.
+#[test]
+fn test_wake_hooks_follow_display_and_remove_only_owned_entries() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    // Another team of this home, whose window sits in `$2` from tick 2 on.
+    let other_ws = env
+        ._tmp
+        .path()
+        .join("other-ws")
+        .to_string_lossy()
+        .into_owned();
+    crate::registry::record_team("other", &other_ws, "50", &[], "").unwrap();
+    let mut other = probe_window("main:4", "@5", "$2", &other_ws);
+    other.team = "other".to_string();
+    other.created = "50".to_string();
+    // A same-named window of another instance in `$3`: not this home's.
+    let mut stale = probe_window("work:2", "@6", "$3", &ws);
+    stale.created = "99".to_string();
+    let listings: Vec<Vec<WindowExtra>> = vec![
+        vec![probe_window("probe:1", "@1", "$1", &ws)],
+        vec![probe_window("main:3", "@1", "$2", &ws)],
+        vec![probe_window("main:3", "@1", "$2", &ws), other.clone()],
+        vec![
+            probe_window("work:3", "@1", "$3", &ws),
+            other.clone(),
+            stale.clone(),
+        ],
+        vec![other.clone(), stale.clone()],
+        vec![probe_window("probe:1", "@9", "$1", &ws), other.clone()],
+        vec![probe_window("probe:1", "@9", "$1", &ws), other.clone()],
+    ];
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    testhook::update(|h| {
+        let sink = Arc::clone(&log);
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("install {session}"));
+            Ok(())
+        }));
+        let sink = Arc::clone(&log);
+        h.remove_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("remove {session}"));
+        }));
+        let tick = Arc::clone(&ticks);
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let listing = listings[tick.load(Ordering::SeqCst).min(listings.len() - 1)].clone();
+            (Some(listing), "ok")
+        }));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            tick.fetch_add(1, Ordering::SeqCst) + 1 < 7
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec![
+            "install $1", // born
+            "remove $1",  // moved: nothing of this home's left in $1
+            "install $2",
+            // `other` arrives in $2: the same location, nothing to do
+            "install $3", // moved again: $2 still shows `other`, kept
+            "remove $3",  // windowless: the stale instance in $3 is not this home's
+            "install $1", // rebuilt; the repeated snapshot installs nothing
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>()
+    );
+}
+
+/// A second window of the instance arrives in another session while the
+/// primary stays put: that session gets this home's wake hooks too — a
+/// terminal arriving there is a viewer the sleep gate counts, so it must
+/// be able to bring the desk back — and loses them again once the window
+/// leaves it. The primary's monitor is not restarted for either.
+#[test]
+fn test_a_second_session_of_the_display_gets_the_wake_hooks_while_the_primary_stays() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let primary = probe_window("probe:1", "@1", "$1", &ws);
+    let second = probe_window("human:3", "@2", "$2", &ws);
+    let listings: Vec<Vec<WindowExtra>> = vec![
+        vec![primary.clone()],
+        vec![primary.clone(), second.clone()],
+        vec![primary.clone(), second.clone()],
+        vec![primary.clone()],
+        vec![primary.clone()],
+    ];
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let hooks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let monitors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    testhook::update(|h| {
+        h.make_busy_monitor = Some(tracked_monitors(&monitors));
+        let sink = Arc::clone(&hooks);
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("install {session}"));
+            Ok(())
+        }));
+        let sink = Arc::clone(&hooks);
+        h.remove_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(format!("remove {session}"));
+        }));
+        let tick = Arc::clone(&ticks);
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let listing = listings[tick.load(Ordering::SeqCst).min(listings.len() - 1)].clone();
+            (Some(listing), "ok")
+        }));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            tick.fetch_add(1, Ordering::SeqCst) + 1 < 5
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *hooks.lock().unwrap(),
+        vec!["install $1", "install $2", "remove $2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        "the second session is armed on arrival and released when the window leaves it"
+    );
+    assert_eq!(
+        *monitors.lock().unwrap(),
+        vec!["make $1", "start $1", "stop $1"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        "the primary did not move: one monitor, stopped at teardown"
+    );
+    let sessions: Vec<Value> = display_events(&env, "hived.display")
+        .into_iter()
+        .map(|e| e["sessions"].clone())
+        .collect();
+    assert_eq!(
+        sessions,
+        vec![json!(["$1"]), json!(["$1", "$2"]), json!(["$1"])]
+    );
+}
+
+/// The display sits in two sessions and nobody watches either: the desk
+/// may retire unwatched only once *both* carry this home's wake hooks.
+/// While the second session refuses the install the primary's hooks are
+/// not enough — a terminal arriving at the second alone could not wake
+/// the desk — so the idle clock keeps running, the failure is reported
+/// per session and retried, and the first success there lets the desk go.
+#[test]
+fn test_unwatched_sleep_waits_for_the_second_sessions_wake_hooks() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let serves = Arc::clone(&env.serves);
+    let clock = Arc::clone(&serves);
+    let installs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let windows = vec![
+        probe_window("probe:1", "@1", "$1", &ws),
+        probe_window("human:3", "@2", "$2", &ws),
+    ];
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
+        h.list_windows_snapshot = Some(Arc::new(move || (Some(windows.clone()), "ok")));
+        h.watching_clients = Some(Arc::new(|session| {
+            assert!(session == "$1" || session == "$2", "{session}");
+            Some(0)
+        }));
+        let sink = Arc::clone(&installs);
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            let mut installs = sink.lock().unwrap();
+            installs.push(session.to_string());
+            let refusals = installs.iter().filter(|s| *s == "$2").count();
+            if session == "$2" && refusals <= 2 {
+                Err("set-hook refused".to_string())
+            } else {
+                Ok(())
+            }
+        }));
+        h.monotonic = Some(Arc::new(move || {
+            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.wait_tick = Some(Arc::new(move || {
+            let mut n = serves.lock().unwrap();
+            *n += 1;
+            assert!(
+                *n <= 3,
+                "a desk whose every session is armed failed to sleep"
+            );
+            true
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *installs.lock().unwrap(),
+        vec!["$1", "$2", "$2", "$2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        "the primary armed at once; the second session was retried until it took"
+    );
+    let failed = display_events(&env, "hived.wake_hooks_failed");
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert!(failed.iter().all(|e| e["session"] == "$2"), "{failed:?}");
+    assert_eq!(failed[0]["error"], "set-hook refused");
+    let slept = display_events(&env, "hived.sleep");
+    assert_eq!(slept.len(), 1, "{slept:?}");
+    assert_eq!(slept[0]["reason"], "unwatched");
+    // Not a tick earlier: the primary's hooks alone did not let it go, and
+    // the refusals never reset the clock — idle since the first tick.
+    assert_eq!(slept[0]["idleSeconds"], 2.0 * HIVED_SLEEP_AFTER_SECONDS);
+    let order: Vec<String> = env
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(event, _)| event.clone())
+        .filter(|event| event == "hived.sleep" || event == "hived.wake_hooks_failed")
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            "hived.wake_hooks_failed",
+            "hived.wake_hooks_failed",
+            "hived.sleep"
+        ]
+    );
+    let marker = fs::read_to_string(asleep_marker_path(&ws)).unwrap();
+    assert_eq!(asleep_reason(&marker).as_deref(), Some("unwatched"));
 }
 
 #[test]
@@ -6780,7 +7537,6 @@ fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
     let observed = Arc::clone(&backfills);
     let swept = Arc::new(Mutex::new(Vec::new()));
     let dropped = Arc::clone(&swept);
-    let killed = Arc::clone(&swept);
     testhook::update(|h| {
         h.monotonic = Some(Arc::new(move || {
             *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
@@ -6802,9 +7558,6 @@ fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
         h.gl_pool_drop_key = Some(Arc::new(move |key| {
             dropped.lock().unwrap().push(format!("drop {key}"))
         }));
-        h.gl_park_daemon_key = Some(Arc::new(move |key| {
-            killed.lock().unwrap().push(format!("park {key}"))
-        }));
     });
     hived_loop(&env.workspace, "probe", "probe:1", "@1");
     assert_eq!(*env.serves.lock().unwrap(), 2);
@@ -6818,26 +7571,128 @@ fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
     assert!(crate::registry::load("probe").is_some());
     assert!(!hooked_run_dir(&env.workspace).join("operations").exists());
     assert_eq!(*backfills.lock().unwrap(), 3);
+    assert_eq!(*swept.lock().unwrap(), ["drop m-probe.worker"]);
+}
+
+/// Sleep gives up this desk's own clients and nothing else. The leader on
+/// a member's socket is grok's own process and the TUI in its pane is one
+/// of that leader's clients: a reap here would take a human's session down
+/// with the desk. The cost is a leader that outlives the hived, which the
+/// next send finds already up.
+#[test]
+fn test_sleep_drops_owned_clients_without_parking_leaders() {
+    use crate::adapters::grok_leader as gl;
+    let env = sleep_probe_env();
+    // The real pool answers which keys are idle and takes the drops.
+    testhook::update(|h| h.gl_idle_owned_keys = None);
+    let alpha = "m-probe.alpha";
+    let beta = "m-probe.beta";
+    let foreign = "m-other.worker";
+    let mut table = Vec::new();
+    for (key, pid) in [(alpha, 4100), (beta, 4200), (foreign, 4300)] {
+        let (leader, tui) = gl::tests::socket_process_args(key);
+        table.push((pid, leader));
+        table.push((pid + 1, tui));
+    }
+    let signalled = gl::tests::watch_process_signals(table);
+    let alpha_proc = gl::tests::pool_idle_fake_client(alpha);
+    let beta_proc = gl::tests::pool_idle_fake_client(beta);
+    let foreign_proc = gl::tests::pool_idle_fake_client(foreign);
+    for (key, pid) in [(alpha, 4100), (beta, 4200), (foreign, 4300)] {
+        let sock = gl::socket_path_for_key(key);
+        fs::write(&sock, "").unwrap();
+        fs::write(sock.with_extension("pid"), pid.to_string()).unwrap();
+    }
     assert_eq!(
-        *swept.lock().unwrap(),
-        ["drop m-probe.worker", "park m-probe.worker"]
+        gl::pool().idle_owned_keys("probe").map(|mut keys| {
+            keys.sort();
+            keys
+        }),
+        Some(vec![alpha.to_string(), beta.to_string()])
     );
+
+    let mut state = SleepState::default();
+    // A member mid-turn is not idle: no sleep, however long the desk sits.
+    gl::tests::feed_turn_open(&alpha_proc, alpha, true);
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
+    // A key whose alias rebound it elsewhere is evidence nobody can read.
+    gl::tests::feed_turn_open(&alpha_proc, alpha, false);
+    fs::write(gl::alias_path_for_key(beta), "l-rebound").unwrap();
+    assert_eq!(gl::pool().idle_owned_keys("probe"), None);
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1202.0));
+    fs::remove_file(gl::alias_path_for_key(beta)).unwrap();
+    assert!(!alpha_proc.terminated() && !beta_proc.terminated());
+
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1800.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 2401.0));
+
+    assert_eq!(display_events(&env, "hived.sleep").len(), 1);
+    // The commit names the clients; they go only once the loop's teardown
+    // has closed the listener, still under the startup lock it holds.
+    let retirement = state.take_retirement().expect("the commit holds the lock");
+    assert!(
+        !alpha_proc.terminated() && !beta_proc.terminated(),
+        "no client is dropped before the listener closes"
+    );
+    let lock_fd = retirement.lock_fd;
+    retirement.drop_clients();
+    release_reexec_lock_fd_impl(Some(lock_fd));
+    assert!(
+        alpha_proc.terminated() && beta_proc.terminated(),
+        "both owned clients are closed"
+    );
+    assert!(
+        !foreign_proc.terminated(),
+        "another team's client is not this desk's to drop"
+    );
+    assert_eq!(
+        gl::pool().idle_owned_keys("other"),
+        Some(vec![foreign.to_string()])
+    );
+    assert!(
+        signalled.lock().unwrap().is_empty(),
+        "no leader or TUI was signalled: {:?}",
+        signalled.lock().unwrap()
+    );
+    for key in [alpha, beta] {
+        let sock = gl::socket_path_for_key(key);
+        assert!(sock.exists(), "{key} keeps its leader socket");
+        assert!(sock.with_extension("pid").exists());
+        assert!(
+            gl::read_session_key(key).is_some(),
+            "{key} keeps its session"
+        );
+    }
 }
 
 #[test]
-fn test_sleep_timer_resets_when_display_or_registry_window_returns() {
+fn test_sleep_timer_resets_when_display_returns() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
-    let server = sleep_server();
     let snap = TickSnapshot::with_extras("ok", Vec::new(), HashMap::new(), None, None);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
-    crate::registry::set_display("probe", "@2").unwrap();
-    testhook::update(|h| h.is_tmux_window_alive = Some(Arc::new(|id| id == "@2")));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 599.0));
-    testhook::update(|h| h.is_tmux_window_alive = Some(Arc::new(|_| false)));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 601.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 1200.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", Some(&snap), &server, 1201.0));
+    let location = DisplayLocation {
+        window: "probe:1".into(),
+        window_id: "@2".into(),
+        session_id: "$1".into(),
+        sessions: vec!["$1".into()],
+    };
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    assert_eq!(state.idle_since(), Some(0.0));
+    // The display comes back: the clock is dropped.
+    assert!(!state.tick(
+        &env.workspace,
+        "probe",
+        Some(&snap),
+        Some(&location),
+        true,
+        "",
+        599.0
+    ));
+    assert_eq!(state.idle_since(), None);
+    assert!(!state.tick(&env.workspace, "probe", Some(&snap), None, true, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", Some(&snap), None, true, "", 1200.0));
+    assert!(state.tick(&env.workspace, "probe", Some(&snap), None, true, "", 1201.0));
     assert_eq!(
         display_events(&env, "hived.sleep")[0]["reason"],
         "window-gone"
@@ -6847,14 +7702,13 @@ fn test_sleep_timer_resets_when_display_or_registry_window_returns() {
 #[test]
 fn test_sleep_obligations_reset_the_timer() {
     let env = sleep_probe_env();
-    let server = sleep_server();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
-    admission().lock().unwrap().leases += 1;
-    let lease = RequestLease::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
+    lease.classify("send");
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 600.0));
     drop(lease);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1200.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1200.0));
     let path = prepare_operation(
         &env.workspace,
         "probe",
@@ -6864,22 +7718,21 @@ fn test_sleep_obligations_reset_the_timer() {
         "node",
     )
     .unwrap();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1800.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1800.0));
     operation_terminal(&path, Map::new()).unwrap();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 2400.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 2400.0));
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| None)));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 3000.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 3000.0));
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 3600.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", None, &server, 4200.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 3600.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 4200.0));
 }
 
 #[test]
 fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
     let env = sleep_probe_env();
-    let server = sleep_server();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
     for action in [
         "ping",
         "doctor",
@@ -6888,71 +7741,78 @@ fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
         "node-result",
         "turn-open",
     ] {
-        admission().lock().unwrap().leases += 1;
-        let mut lease = RequestLease::default();
+        let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
         lease.classify(action);
-        assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 599.0));
+        assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 599.0));
         drop(lease);
     }
-    admission().lock().unwrap().leases += 1;
-    let mut usage = RequestLease::default();
+    let mut usage = RequestLease::reserve(&mut admission().lock().unwrap());
     usage.classify("send");
     drop(usage);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 601.0));
-    admission().lock().unwrap().leases += 1;
-    let mut reader = RequestLease::default();
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
+    let mut reader = RequestLease::reserve(&mut admission().lock().unwrap());
     reader.classify("ping");
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1201.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1201.0));
     drop(reader);
-    assert!(state.tick(&env.workspace, "probe", "@1", None, &server, 1201.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 1201.0));
 }
 
 #[test]
 fn test_sleep_drain_new_connection_cancels_retirement() {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-    struct Queued(Mutex<Option<UnixStream>>);
-    impl HivedServerApi for Queued {
-        fn wait_readable(&self, _: f64) -> bool {
-            self.0.lock().unwrap().is_some()
-        }
-        fn close(&self) {
-            panic!("must continue serving");
-        }
-        fn accept_timeout(&self, _: f64) -> Option<UnixStream> {
-            self.0.lock().unwrap().take()
-        }
-    }
+    // A connection that arrives once the gate is shut is refused by the
+    // accept worker with notAdmitted — nothing of it is served — and its
+    // arrival cancels the retirement at the final commit, so the retry
+    // finds this desk up. The idle clock is kept: the refused request was
+    // never classified, and a real use shows up as usage on the next tick.
     let env = sleep_probe_env();
-    let (mut client, accepted) = UnixStream::pair().unwrap();
-    client.write_all(b"{\"action\":\"send\"}").unwrap();
-    client.shutdown(std::net::Shutdown::Write).unwrap();
-    let server = Queued(Mutex::new(Some(accepted)));
+    let workspace = env.workspace.clone();
+    let raw = open_server_socket(&workspace).unwrap();
+    let server = RequestServer::start(Box::new(raw), &workspace, "probe", "", "", "start").unwrap();
+    let refused = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&refused);
+    let ws = workspace.clone();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(move |_| {
+            // Asked again under the shut gate, before the commit: that is
+            // when a send arrives.
+            if admission().lock().unwrap().closed && sink.lock().unwrap().is_empty() {
+                let err = request_admitted(&ws, &action_payload("send"), 2.0).unwrap_err();
+                sink.lock().unwrap().push(err);
+            }
+            Some(Vec::new())
+        }));
+    });
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 600.0));
     assert!(!admission().lock().unwrap().closed);
     assert!(display_events(&env, "hived.sleep").is_empty());
-    let mut answer = String::new();
-    client.read_to_string(&mut answer).unwrap();
-    assert_eq!(
-        serde_json::from_str::<Value>(&answer).unwrap()["notAdmitted"],
-        true
+    assert!(
+        matches!(
+            refused.lock().unwrap().as_slice(),
+            [RequestFailure::NotAdmitted(_)]
+        ),
+        "{:?}",
+        refused.lock().unwrap()
     );
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 601.0));
+    assert_eq!(admission().lock().unwrap().usage, 0);
     assert_eq!(
-        handle_request(
-            &env.workspace,
-            "probe",
-            "",
-            "",
-            "start",
-            &action_payload("ping")
-        )
-        .0["ok"],
-        true
+        state.idle_since(),
+        Some(0.0),
+        "a refused arrival keeps the clock"
     );
+    assert!(!requests_in_flight());
+    // The desk serves again at once.
+    let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+    assert_eq!(ping["ok"], true);
+    settle_leases();
+    testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
+    assert_eq!(display_events(&env, "hived.sleep").len(), 1);
+    let retirement = state.take_retirement().expect("the commit holds the lock");
+    server.close();
+    release_reexec_lock_fd_impl(Some(retirement.lock_fd));
 }
 
 #[test]
@@ -7046,30 +7906,30 @@ fn test_send_wakes_a_sleeping_hived_and_delivers_once() {
 
 #[test]
 fn test_sleep_drain_new_node_cancels_without_interrupting_it() {
-    struct LateNode(String);
-    impl HivedServerApi for LateNode {
-        fn wait_readable(&self, _: f64) -> bool {
-            false
-        }
-        fn close(&self) {
-            panic!("new node keeps the desk awake");
-        }
-        fn accept_timeout(&self, _: f64) -> Option<UnixStream> {
-            prepare_operation(&self.0, "probe", "123", "nd-late", "worker", "node").unwrap();
-            None
-        }
-    }
+    // A node that becomes pending after the gate shut but before the
+    // commit — one an admitted handler journaled while the coordinator
+    // was between its checks — cancels the retirement and is left as it
+    // is: no interruption, no terminal result written for it.
     let env = sleep_probe_env();
-    let server = LateNode(env.workspace.clone());
+    let workspace = env.workspace.clone();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(move |_| {
+            if admission().lock().unwrap().closed && pending_operations(&workspace) == 0 {
+                prepare_operation(&workspace, "probe", "123", "nd-late", "worker", "node").unwrap();
+            }
+            Some(Vec::new())
+        }));
+    });
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 600.0));
     assert!(!admission().lock().unwrap().closed);
     assert_eq!(pending_operations(&env.workspace), 1);
     let record = saved_operation(Path::new(&env.workspace), "nd-late");
     assert_eq!(record["state"], "prepared");
     assert!(record.get("result").is_none());
     assert!(display_events(&env, "hived.sleep").is_empty());
+    assert!(state.take_retirement().is_none());
 }
 
 #[test]
@@ -7134,7 +7994,7 @@ fn assert_hived_answers_while_sampling(reexec: bool) {
 }
 
 #[test]
-fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
+fn test_idle_accept_worker_holds_no_lease_and_refuses_closed_arrival() {
     use std::io::{Read, Write};
     struct Observed {
         server: ServerSocket,
@@ -7152,7 +8012,10 @@ fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
             self.server.accept_timeout(timeout)
         }
     }
-    let _guard = testhook::install(Hook::default());
+    let _guard = testhook::install(Hook {
+        handle_request: Some(Arc::new(|_| panic!("closed arrival was admitted"))),
+        ..Default::default()
+    });
     let tmp = short_workspace();
     let workspace = tmp.path().to_str().unwrap();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -7170,9 +8033,8 @@ fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
     client
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
-    client.write_all(b"{\"action\":\"send\"}").unwrap();
+    client.write_all(b"{\"action\":\"send\"}\n").unwrap();
     client.shutdown(std::net::Shutdown::Write).unwrap();
-    assert!(reject_draining_request(server.as_ref()));
     let mut reply = String::new();
     client.read_to_string(&mut reply).unwrap();
     assert_eq!(
@@ -7180,5 +8042,2531 @@ fn test_idle_accept_worker_holds_no_lease_and_leaves_closed_arrival_queued() {
         true
     );
     assert!(!requests_in_flight());
+    assert_eq!(admission().lock().unwrap().arrivals, 1);
     server.close();
+}
+
+// --------------------------------------------------------------------------
+// admission: the preflight, the lease it holds, what a shut gate refuses,
+// and the generation change a retiring desk makes under its lock
+// --------------------------------------------------------------------------
+
+/// A team whose node dispatches land on a codex member whose turn ends at
+/// once, so the journal reaches terminal on the next flush. Returns the
+/// count of turns handed to the engine.
+fn wire_node_dispatch(hook: &mut Hook, workspace: &str, team: &str) -> Arc<AtomicUsize> {
+    let dispatches = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&dispatches);
+    let t = Team {
+        name: team.to_string(),
+        workspace: workspace.to_string(),
+        created_at: 123.0,
+        tmux_session: "dev".to_string(),
+        tmux_window: "dev:0".to_string(),
+        ..Default::default()
+    };
+    let loaded = t.clone();
+    hook.team_load = Some(Arc::new(move |_| Ok(loaded.clone())));
+    hook.resolve_live_agent = Some(Arc::new(move |_team, _agent| {
+        Ok((t.clone(), fake_agent("b", "%9", "codex")))
+    }));
+    hook.check_send_gate = Some(Arc::new(|_target| Ok(())));
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, _text| {
+        counted.fetch_add(1, Ordering::SeqCst);
+        Ok(TurnHandle::Codex {
+            thread_id: "thr-1".to_string(),
+            turn_id: "turn-9".to_string(),
+        })
+    }));
+    hook.cas_turn_result = Some(Arc::new(|_turn| {
+        Some(TurnResult {
+            thread_id: "thr-1".to_string(),
+            status: Some("completed".to_string()),
+            error: None,
+            messages: vec!["done".to_string()],
+        })
+    }));
+    dispatches
+}
+
+/// A point inside the hived a test can hold: the hook reports it was
+/// reached and waits to be released, so the test asserts on a state that
+/// is not moving. A one-off point releases itself after its first pass.
+struct Checkpoint {
+    reached: Mutex<std::sync::mpsc::Receiver<()>>,
+    release: Mutex<std::sync::mpsc::Sender<()>>,
+    hook: testhook::F0<()>,
+}
+
+impl Checkpoint {
+    fn new() -> Checkpoint {
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let hook: testhook::F0<()> = Arc::new(move || {
+            let _ = reached_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+        });
+        Checkpoint {
+            reached: Mutex::new(reached_rx),
+            release: Mutex::new(release_tx),
+            hook,
+        }
+    }
+
+    fn hook(&self) -> testhook::F0<()> {
+        Arc::clone(&self.hook)
+    }
+
+    fn wait_reached(&self) {
+        self.reached
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10))
+            .expect("checkpoint reached");
+    }
+
+    fn release(&self) {
+        self.release.lock().unwrap().send(()).unwrap();
+    }
+}
+
+/// The node journal records written for the team incarnation the tests
+/// wire (`created_at` 123).
+fn journal_records(workspace: &str) -> Vec<String> {
+    let dir = hooked_run_dir(workspace).join("operations/123");
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".json"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+fn node_dispatch_payload(team: &str, dispatch_id: &str) -> Map<String, Value> {
+    let mut payload = action_payload("node-dispatch");
+    payload.insert("team".to_string(), Value::from(team));
+    payload.insert("targetAgent".to_string(), Value::from("b"));
+    payload.insert(
+        "body".to_string(),
+        Value::from(format!("task {dispatch_id}")),
+    );
+    payload.insert("artifact".to_string(), Value::from(""));
+    payload.insert("dispatchId".to_string(), Value::from(dispatch_id));
+    payload
+}
+
+/// A raw client's preflight: connect, send the admit line for `action`,
+/// and hand back the connection with the answer line it got (None at EOF
+/// or reset). No business byte is ever written by this helper.
+fn raw_preflight(workspace: &str, action: &str) -> (UnixStream, Option<Value>) {
+    use std::io::BufRead;
+    let conn = UnixStream::connect(socket_path(workspace)).unwrap();
+    conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut preflight = action_payload(ADMIT_ACTION);
+    preflight.insert("forAction".to_string(), Value::from(action));
+    (&conn)
+        .write_all(format!("{}\n", Value::Object(preflight)).as_bytes())
+        .unwrap();
+    let mut line = String::new();
+    let answer = match std::io::BufReader::new(&conn).read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => serde_json::from_str(&line).ok(),
+    };
+    (conn, answer)
+}
+
+fn request_server(workspace: &str, team: &str) -> Box<dyn HivedServerApi> {
+    let raw = open_server_socket(workspace).unwrap();
+    RequestServer::start(Box::new(raw), workspace, team, "", "", "start").unwrap()
+}
+
+#[test]
+fn test_preflight_lease_spans_admission_body_and_reply() {
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    bus::init_workspace(tmp.path()).unwrap();
+    let mut hook = Hook::default();
+    let dispatches = wire_node_dispatch(&mut hook, &workspace, "team-x");
+    let admitted = Checkpoint::new();
+    let handling = Checkpoint::new();
+    let replying = Checkpoint::new();
+    hook.after_admit = Some(admitted.hook());
+    hook.before_handler = Some(handling.hook());
+    hook.before_reply = Some(replying.hook());
+    hook.execv = Some(Arc::new(|_| panic!("a leased request must block reexec")));
+    let _guard = testhook::install(hook);
+    let server = request_server(&workspace, "team-x");
+    let side_effects = || {
+        (
+            dispatches.load(Ordering::SeqCst),
+            bus::read_all_events(tmp.path()).unwrap().len(),
+            journal_records(&workspace).len(),
+        )
+    };
+    let client = {
+        let ws = workspace.clone();
+        thread::spawn(move || {
+            request_node_dispatch(&ws, "team-x", "b", "task one", "", "nd-aaaaaaaaaaaa")
+        })
+    };
+
+    // The admission line is out, the body not yet read: one lease, and
+    // nothing of the request has happened.
+    admitted.wait_reached();
+    assert_eq!(admission().lock().unwrap().leases, 1);
+    assert_eq!(side_effects(), (0, 0, 0));
+    assert!(
+        !drain_ready(&workspace),
+        "sleep cannot pass a leased preflight"
+    );
+    reopen_admission();
+    assert!(
+        reexec_hived(&workspace, "team-x", "", "", server.as_ref(), None, None).is_none(),
+        "reexec cannot pass a leased preflight"
+    );
+    assert!(!admission().lock().unwrap().closed);
+    admitted.release();
+
+    // The body is in and classified, the handler about to run.
+    handling.wait_reached();
+    assert_eq!(admission().lock().unwrap().leases, 1);
+    assert_eq!(side_effects(), (0, 0, 0));
+    handling.release();
+
+    // The handler ran: the lease still holds until the reply is out.
+    replying.wait_reached();
+    assert_eq!(admission().lock().unwrap().leases, 1);
+    assert_eq!(side_effects(), (1, 1, 1));
+    replying.release();
+    let answer = client.join().unwrap().unwrap();
+    assert!(answer["seq"].as_i64().unwrap() > 0);
+    assert_eq!(answer["dispatchId"], "nd-aaaaaaaaaaaa");
+    settle_leases();
+    assert_eq!(admission().lock().unwrap().leases, 0);
+
+    testhook::update(|h| {
+        h.after_admit = None;
+        h.before_handler = None;
+        h.before_reply = None;
+    });
+    // A body whose action is not the one admitted is not served.
+    let (conn, answer) = raw_preflight(&workspace, "send");
+    assert_eq!(answer.unwrap()["admitted"], true);
+    (&conn)
+        .write_all(
+            format!(
+                "{}\n",
+                Value::Object(node_dispatch_payload("team-x", "nd-bbbbbbbbbbbb"))
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    conn.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut reply = String::new();
+    (&conn).read_to_string(&mut reply).unwrap();
+    let reply: Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(reply["ok"], false);
+    assert!(reply["error"]
+        .as_str()
+        .unwrap()
+        .contains("admitted for 'send'"));
+    settle_leases();
+    assert_eq!(side_effects(), (1, 1, 1));
+
+    // A malformed prelude is answered and never reaches a handler.
+    let mut conn = UnixStream::connect(socket_path(&workspace)).unwrap();
+    conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    conn.write_all(b"{\"action\":\"admit\"}\n").unwrap();
+    let mut reply = String::new();
+    conn.read_to_string(&mut reply).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&reply).unwrap()["ok"], false);
+    settle_leases();
+    assert_eq!(side_effects(), (1, 1, 1));
+
+    // A client that hangs up after the handshake releases the lease with
+    // nothing served.
+    let (conn, answer) = raw_preflight(&workspace, "node-dispatch");
+    assert_eq!(answer.unwrap()["admitted"], true);
+    assert_eq!(admission().lock().unwrap().leases, 1);
+    drop(conn);
+    settle_leases();
+    assert_eq!(admission().lock().unwrap().leases, 0);
+    assert_eq!(side_effects(), (1, 1, 1));
+    assert_eq!(admission().lock().unwrap().usage, 1, "one classified write");
+    server.close();
+}
+
+#[test]
+fn test_answer_lost_after_business_body_remains_unknown() {
+    // The handler took the dispatch and the reply is held past the
+    // client's budget: the client hears a lost answer, not a refusal, and
+    // the journal keeps the dispatch as with the member.
+    let tmp = short_workspace();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    bus::init_workspace(tmp.path()).unwrap();
+    crate::registry::record_team("team-x", &workspace, "123", &[], "").unwrap();
+    let mut hook = Hook::default();
+    let dispatches = wire_node_dispatch(&mut hook, &workspace, "team-x");
+    let replying = Checkpoint::new();
+    hook.before_reply = Some(replying.hook());
+    let _guard = testhook::install(hook);
+    let server = request_server(&workspace, "team-x");
+
+    let err = request_admitted(
+        &workspace,
+        &node_dispatch_payload("team-x", "nd-cccccccccccc"),
+        0.3,
+    )
+    .unwrap_err();
+    assert!(matches!(err, RequestFailure::AnswerLost(_)), "{err:?}");
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(journal_records(&workspace), ["nd-cccccccccccc.json"]);
+    replying.wait_reached();
+    replying.release();
+    settle_leases();
+    assert_eq!(admission().lock().unwrap().leases, 0);
+    // The runner's read-back finds the dispatch: it ended, once.
+    let result = durable_node_result(&workspace, "team-x", "nd-cccccccccccc");
+    assert_eq!(result["state"], "ended");
+    assert_eq!(result["text"], "done");
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    server.close();
+}
+
+/// A stand-in desk for one production client: the workspace socket,
+/// bound here so the client's connect finds it, and one accepted
+/// connection handed to `serve` with a recorder of every byte the client
+/// put on the wire. No hived is involved: what `serve` answers is the
+/// whole protocol the client sees. Returns what was received.
+fn one_peer(
+    workspace: &str,
+    serve: impl FnOnce(&UnixStream, &mut Vec<u8>) + Send + 'static,
+) -> thread::JoinHandle<Vec<u8>> {
+    let path = socket_path(workspace);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _ = fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        let mut received = Vec::new();
+        serve(&conn, &mut received);
+        received
+    })
+}
+
+/// The peer's read of one line: whatever arrives up to a newline goes
+/// onto `received`.
+fn peer_take_line(conn: &UnixStream, received: &mut Vec<u8>) {
+    conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut byte = [0u8; 1];
+    loop {
+        match (&*conn).read(&mut byte) {
+            Ok(1) => {
+                received.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+/// The peer listens for `hold` without answering: whatever the client
+/// sends meanwhile goes onto `received`.
+fn peer_hold(conn: &UnixStream, received: &mut Vec<u8>, hold: Duration) {
+    let until = std::time::Instant::now() + hold;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        conn.set_read_timeout(Some(left)).unwrap();
+        match (&*conn).read(&mut chunk) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => received.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// The peer drips one byte of a line it never finishes every 100ms until
+/// the client hangs up — the write fails — or `cap` bytes went out;
+/// returns how many did. No read probe: a client that shut its write
+/// side after the body looks like a hangup to one.
+fn peer_drip(conn: &UnixStream, cap: usize) -> usize {
+    let mut sent = 0;
+    while sent < cap {
+        if (&*conn).write_all(b" ").is_err() {
+            break;
+        }
+        sent += 1;
+        thread::sleep(Duration::from_millis(100));
+    }
+    sent
+}
+
+fn preflight_line(action: &str) -> Vec<u8> {
+    let mut preflight = action_payload(ADMIT_ACTION);
+    preflight.insert("forAction".to_string(), Value::from(action));
+    format!("{}\n", Value::Object(preflight)).into_bytes()
+}
+
+#[test]
+fn test_request_admitted_writes_no_business_byte_before_admission() {
+    // The production client against a desk that takes its preflight and
+    // does not answer: nothing but the preflight is on the wire while it
+    // waits, whether the desk then hangs up, refuses, or admits — and
+    // only after the admission does the body follow.
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let frames: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&frames);
+    let _guard = testhook::install(Hook {
+        client_wrote: Some(Arc::new(move |frame| {
+            sink.lock().unwrap().push(frame.to_string())
+        })),
+        ..Default::default()
+    });
+    let payload = node_dispatch_payload("team-x", "nd-eeeeeeeeeeee");
+    let body_line = format!("{}\n", Value::Object(payload.clone())).into_bytes();
+    let preflight = preflight_line("node-dispatch");
+    let hold = Duration::from_millis(300);
+
+    // The desk hangs up without a word.
+    let peer = one_peer(&workspace, move |conn, received| {
+        peer_take_line(conn, received);
+        peer_hold(conn, received, hold);
+    });
+    let err = request_admitted(&workspace, &payload, 2.0).unwrap_err();
+    assert_eq!(
+        err,
+        RequestFailure::NotAdmitted("hived closed the connection before admitting".to_string())
+    );
+    assert_eq!(
+        peer.join().unwrap(),
+        preflight,
+        "the preflight and nothing else"
+    );
+
+    // The desk refuses.
+    let peer = one_peer(&workspace, move |conn, received| {
+        peer_take_line(conn, received);
+        peer_hold(conn, received, hold);
+        (&*conn)
+            .write_all(b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining\"}\n")
+            .unwrap();
+        conn.shutdown(std::net::Shutdown::Write).unwrap();
+        peer_hold(conn, received, Duration::from_secs(5));
+    });
+    let err = request_admitted(&workspace, &payload, 2.0).unwrap_err();
+    assert_eq!(
+        err,
+        RequestFailure::NotAdmitted("hived is draining".to_string())
+    );
+    assert_eq!(
+        peer.join().unwrap(),
+        preflight,
+        "refused: still only the preflight"
+    );
+
+    // The desk admits: the body follows, and only then.
+    let peer = one_peer(&workspace, move |conn, received| {
+        peer_take_line(conn, received);
+        peer_hold(conn, received, hold);
+        received.extend_from_slice(b"<admitted>");
+        (&*conn)
+            .write_all(
+                format!("{{\"ok\":true,\"admitted\":true,\"apiVersion\":{HIVED_API_VERSION}}}\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        peer_take_line(conn, received);
+        (&*conn)
+            .write_all(b"{\"ok\":true,\"dispatchId\":\"nd-eeeeeeeeeeee\"}\n")
+            .unwrap();
+        conn.shutdown(std::net::Shutdown::Write).unwrap();
+    });
+    let answer = request_admitted(&workspace, &payload, 2.0).unwrap();
+    assert_eq!(answer["dispatchId"], "nd-eeeeeeeeeeee");
+    let mut expected = preflight.clone();
+    expected.extend_from_slice(b"<admitted>");
+    expected.extend_from_slice(&body_line);
+    assert_eq!(
+        peer.join().unwrap(),
+        expected,
+        "the body came after the admission"
+    );
+
+    // The client's own writes agree: one preflight per attempt, one body.
+    let frames = frames.lock().unwrap();
+    let preflight = String::from_utf8(preflight).unwrap();
+    let body_line = String::from_utf8(body_line).unwrap();
+    assert_eq!(
+        *frames,
+        vec![preflight.clone(), preflight.clone(), preflight, body_line]
+    );
+}
+
+#[test]
+fn test_request_admitted_gives_up_on_answers_that_never_end() {
+    // A desk that drips an admission line, or an answer, a byte at a time
+    // and never finishes it: each read fits the socket timeout, and the
+    // caller is released at the budget's end — the identity budget for
+    // the admission, the request's for the answer — not held forever.
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let payload = node_dispatch_payload("team-x", "nd-ffffffffffff");
+    let preflight = preflight_line("node-dispatch");
+
+    let peer = one_peer(&workspace, |conn, received| {
+        peer_take_line(conn, received);
+        let dripped = peer_drip(conn, 90);
+        received.extend_from_slice(format!("<dripped {dripped}>").as_bytes());
+    });
+    let began = std::time::Instant::now();
+    let err = request_admitted(&workspace, &payload, 0.5).unwrap_err();
+    let waited = began.elapsed();
+    assert!(
+        matches!(&err, RequestFailure::NotAdmitted(why) if why.starts_with("preflight answer lost")),
+        "{err:?}"
+    );
+    assert!(
+        waited >= Duration::from_secs_f64(IDENTITY_PING_TIMEOUT - 0.5)
+            && waited < Duration::from_secs_f64(IDENTITY_PING_TIMEOUT + 2.0),
+        "released at the identity budget, not per byte: {waited:?}"
+    );
+    let received = String::from_utf8(peer.join().unwrap()).unwrap();
+    let dripped: usize = received
+        .rsplit("<dripped ")
+        .next()
+        .unwrap()
+        .trim_end_matches('>')
+        .parse()
+        .unwrap();
+    assert!(
+        dripped < 90,
+        "the client hung up before the drip ran out: {dripped}"
+    );
+    assert!(
+        received.as_bytes().starts_with(&preflight) && !received.contains("nd-ffffffffffff"),
+        "no business byte went out: {received}"
+    );
+
+    // Admitted, body sent, then an answer that never ends.
+    let peer = one_peer(&workspace, |conn, received| {
+        peer_take_line(conn, received);
+        (&*conn)
+            .write_all(
+                format!("{{\"ok\":true,\"admitted\":true,\"apiVersion\":{HIVED_API_VERSION}}}\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        peer_take_line(conn, received);
+        peer_drip(conn, 40);
+    });
+    let began = std::time::Instant::now();
+    let err = request_admitted(&workspace, &payload, 0.5).unwrap_err();
+    let waited = began.elapsed();
+    assert!(matches!(err, RequestFailure::AnswerLost(_)), "{err:?}");
+    assert!(
+        waited >= Duration::from_millis(400) && waited < Duration::from_secs(2),
+        "released at the request budget: {waited:?}"
+    );
+    assert!(String::from_utf8(peer.join().unwrap())
+        .unwrap()
+        .contains("nd-ffffffffffff"));
+}
+
+#[test]
+fn test_busy_identity_does_not_restart_matching_hived() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    let run_tmp = tempfile::Builder::new()
+        .prefix("hbsy")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let run_dir = run_tmp.path().to_path_buf();
+    // Anything the CLI sends besides its hooked ping lands here: a
+    // shutdown for the desk would be a connection in this backlog.
+    let listener = UnixListener::bind(run_dir.join("hived.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    fn busy() -> Map<String, Value> {
+        json_obj(&[
+            ("ok", Value::Bool(false)),
+            ("notAdmitted", Value::Bool(true)),
+            (
+                "error",
+                Value::from("hived is draining; request not admitted; retry later"),
+            ),
+        ])
+    }
+    let pings = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&pings);
+    let _guard = testhook::install(Hook {
+        run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
+        request_ping: Some(Arc::new(move |_ws, _timeout| {
+            if counted.fetch_add(1, Ordering::SeqCst) == 0 {
+                Some(busy())
+            } else {
+                Some(matching_identity())
+            }
+        })),
+        popen: Some(Arc::new(|_, _| panic!("a busy desk was replaced"))),
+        cleanup_socket: Some(Arc::new(|_| panic!("a busy desk's socket was unlinked"))),
+        ..Default::default()
+    });
+    assert_eq!(
+        ensure_hived("/tmp/ws-busy", "team-a", "dev:3", "@99").unwrap(),
+        None
+    );
+    assert_eq!(pings.load(Ordering::SeqCst), 2, "asked again after busy");
+
+    // Busy for the whole identity budget: an error that says so, and
+    // still no restart.
+    testhook::update(|h| {
+        h.monotonic = Some(stepping_clock(10.0));
+        h.request_ping = Some(Arc::new(move |_ws, _timeout| Some(busy())));
+    });
+    let err = ensure_hived("/tmp/ws-busy", "team-a", "dev:3", "@99")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("busy"), "{err}");
+    assert!(err.contains("team-a"), "{err}");
+
+    // A foreign home is refused first, busy or not.
+    testhook::update(|h| {
+        h.monotonic = None;
+        h.request_ping = Some(Arc::new(|_ws, _timeout| {
+            let mut answer = busy();
+            answer.insert("hiveHome".to_string(), Value::from("/elsewhere/.hive"));
+            Some(answer)
+        }));
+    });
+    let err = ensure_hived("/tmp/ws-busy", "team-a", "dev:3", "@99")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("/elsewhere/.hive"), "{err}");
+
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "no shutdown or other request reached the socket"
+    );
+}
+
+#[test]
+fn test_identity_ping_spends_one_budget_across_busy_retries() {
+    // One identity budget for the whole exchange: the first ping gets all
+    // of it, each ping after a busy answer what is left. A desk that was
+    // busy and then gave no answer by the budget's end is still busy — an
+    // error, nothing replaced — while an empty answer that came back with
+    // budget to spare is a desk gone, which the connect guard then checks.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    let run_tmp = tempfile::Builder::new()
+        .prefix("hbdg")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let run_dir = run_tmp.path().to_path_buf();
+    let listener = UnixListener::bind(run_dir.join("hived.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let busy = json_obj(&[
+        ("ok", Value::Bool(false)),
+        ("notAdmitted", Value::Bool(true)),
+        ("error", Value::from("hived is draining")),
+    ]);
+    let clock = Arc::new(Mutex::new(0.0f64));
+    let budgets: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+    // Each answer with the time it took on the desk's clock.
+    type Exchange = Vec<(f64, Option<Map<String, Value>>)>;
+    let script: Arc<Mutex<Exchange>> = Arc::new(Mutex::new(Vec::new()));
+    let reading = Arc::clone(&clock);
+    let ticking = Arc::clone(&clock);
+    let asked = Arc::clone(&budgets);
+    let answers = Arc::clone(&script);
+    let _guard = testhook::install(Hook {
+        run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
+        monotonic: Some(Arc::new(move || *reading.lock().unwrap())),
+        request_ping: Some(Arc::new(move |_ws, timeout| {
+            asked.lock().unwrap().push(timeout);
+            let mut answers = answers.lock().unwrap();
+            assert!(!answers.is_empty(), "pinged past the scripted exchange");
+            let (took, answer) = answers.remove(0);
+            *ticking.lock().unwrap() += took;
+            answer
+        })),
+        popen: Some(Arc::new(|_, _| panic!("a busy desk was replaced"))),
+        cleanup_socket: Some(Arc::new(|_| panic!("a busy desk's socket was unlinked"))),
+        ..Default::default()
+    });
+    let close_enough = |got: &[f64], want: &[f64]| {
+        assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-6, "{got:?} vs {want:?}");
+        }
+    };
+
+    // Busy at 0.5s, busy again at 4.9s, then the last 0.1s of budget run
+    // out with no answer: still busy, not gone.
+    *script.lock().unwrap() = vec![
+        (0.5, Some(busy.clone())),
+        (4.4, Some(busy.clone())),
+        (0.2, None),
+    ];
+    let err = ensure_hived("/tmp/ws-budget", "team-a", "dev:3", "@99")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("busy"), "{err}");
+    assert!(err.contains("team-a"), "{err}");
+    assert!(
+        script.lock().unwrap().is_empty(),
+        "every scripted ping went out"
+    );
+    close_enough(&budgets.lock().unwrap(), &[5.0, 4.5, 0.1]);
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "no shutdown or other request reached the socket"
+    );
+
+    // Busy, then an empty answer with budget to spare: no desk answers,
+    // and the connect guard — not the ping — decides against replacing
+    // one whose socket still accepts.
+    *clock.lock().unwrap() = 0.0;
+    budgets.lock().unwrap().clear();
+    *script.lock().unwrap() = vec![(0.5, Some(busy)), (0.1, None)];
+    let err = ensure_hived("/tmp/ws-budget", "team-a", "dev:3", "@99")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("still accepts connections"), "{err}");
+    close_enough(&budgets.lock().unwrap(), &[5.0, 4.5]);
+}
+
+#[test]
+fn test_busy_identity_waits_out_a_sleep_rejection_on_a_real_socket() {
+    // The desk is at its sleep commit, gate shut, when a CLI's ensure
+    // pings it over the real socket: the ping is refused (busy), asked
+    // again, and answered by the same generation once the commit is
+    // cancelled — the same pid and owner token, nothing spawned.
+    let env = sleep_probe_env();
+    let workspace = env.workspace.clone();
+    let (shut_tx, shut_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let go_rx = Mutex::new(go_rx);
+    let ticks = Arc::clone(&env.serves);
+    let clock = Arc::clone(&ticks);
+    // The clock runs a sleep's worth per tick to reach the commit; ensure's
+    // identity budget reads the same clock, so it stops at the tick the
+    // commit is held on — the desk stays awake after it on the pool's
+    // unknown answer, not on the clock.
+    let held_at = Arc::new(AtomicUsize::new(usize::MAX));
+    let cap = Arc::clone(&held_at);
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let spawned = Arc::clone(&spawns);
+    testhook::update(|h| {
+        h.open_server_socket = Some(Arc::new(|workspace| {
+            Ok(Box::new(open_server_socket(workspace)?) as Box<dyn HivedServerApi>)
+        }));
+        h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
+        h.monotonic = Some(Arc::new(move || {
+            let ticks = *clock.lock().unwrap();
+            ticks.min(cap.load(Ordering::SeqCst)) as f64 * HIVED_SLEEP_AFTER_SECONDS
+        }));
+        h.wait_tick = Some(Arc::new(move || {
+            *ticks.lock().unwrap() += 1;
+            !SHUTDOWN.load(Ordering::SeqCst)
+        }));
+        let held = AtomicUsize::new(0);
+        let ticks_held = Arc::clone(&env.serves);
+        h.gl_idle_owned_keys = Some(Arc::new(move |_| {
+            // The first commit is held under the shut gate; after it the
+            // pool answers unknown, which keeps the desk awake.
+            match held.fetch_add(1, Ordering::SeqCst) {
+                0 if !admission().lock().unwrap().closed => {
+                    held.store(0, Ordering::SeqCst);
+                    Some(Vec::new())
+                }
+                0 => {
+                    held_at.store(*ticks_held.lock().unwrap(), Ordering::SeqCst);
+                    let _ = shut_tx.send(());
+                    let _ = go_rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
+                    Some(Vec::new())
+                }
+                _ => None,
+            }
+        }));
+        h.popen = Some(Arc::new(move |_, _| {
+            spawned.fetch_add(1, Ordering::SeqCst);
+            4242
+        }));
+    });
+    let owner_file = hooked_run_dir(&workspace).join("hived.owner.json");
+    thread::scope(|scope| {
+        let ws = workspace.clone();
+        let serving = scope.spawn(move || hived_loop(&ws, "probe", "probe:1", "@1"));
+        shut_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let owner_before = fs::read_to_string(&owner_file).unwrap();
+        // The gate is shut: a raw ping now is refused, not answered.
+        let refused = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+        assert_eq!(refused["notAdmitted"], true);
+        assert_eq!(hived_identity(Some(&refused), "probe"), HivedIdentity::Busy);
+        let ensure = {
+            let ws = workspace.clone();
+            scope.spawn(move || ensure_hived(&ws, "probe", "", ""))
+        };
+        // ensure holds the startup lock and keeps asking; release the
+        // commit, which then fails on the lock and cancels.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while admission().lock().unwrap().arrivals < 2 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            admission().lock().unwrap().arrivals >= 2,
+            "ensure's ping was refused"
+        );
+        go_tx.send(()).unwrap();
+        assert_eq!(ensure.join().unwrap().unwrap(), None);
+        assert_eq!(fs::read_to_string(&owner_file).unwrap(), owner_before);
+        assert_eq!(spawns.load(Ordering::SeqCst), 0);
+        assert!(display_events(&env, "hived.sleep").is_empty());
+        let bye = request_hived(&workspace, &action_payload("shutdown"), 2.0).unwrap();
+        assert_eq!(bye["ok"], true);
+        serving.join().unwrap();
+    });
+    assert!(!socket_path(&workspace).exists());
+}
+
+#[test]
+fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
+    let env = sleep_probe_env();
+    let mut state = SleepState::default();
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 0.0));
+    assert_eq!(state.idle_since(), Some(0.0));
+    // Accepted, action not yet read: the clock runs on, the exit waits.
+    let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 599.0));
+    assert_eq!(state.idle_since(), Some(0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
+    assert_eq!(
+        state.idle_since(),
+        Some(0.0),
+        "an unread action does not renew"
+    );
+    assert_eq!(admission().lock().unwrap().usage, 0);
+    // Classified as a read: still no renewal, still delays the exit.
+    lease.classify("ping");
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
+    assert_eq!(state.idle_since(), Some(0.0));
+    assert_eq!(admission().lock().unwrap().usage, 0);
+    drop(lease);
+    // A refused arrival during the commit cancels it and keeps the clock.
+    let arrived = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&arrived);
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(move |_| {
+            if admission().lock().unwrap().closed && count.fetch_add(1, Ordering::SeqCst) == 0 {
+                admission().lock().unwrap().arrivals += 1;
+            }
+            Some(Vec::new())
+        }));
+    });
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 601.0));
+    assert_eq!(arrived.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        state.idle_since(),
+        Some(0.0),
+        "a refused arrival keeps the clock"
+    );
+    assert!(!admission().lock().unwrap().closed);
+    // The next tick retires on the original deadline.
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 602.0));
+    assert_eq!(display_events(&env, "hived.sleep")[0]["idleSeconds"], 602.0);
+    let retirement = state.take_retirement().unwrap();
+    release_reexec_lock_fd_impl(Some(retirement.lock_fd));
+    SHUTDOWN.store(false, Ordering::SeqCst);
+    reopen_admission();
+
+    // A classified send is use: the clock resets and runs the full 600s.
+    let mut state = SleepState::default();
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1000.0));
+    let mut send = RequestLease::reserve(&mut admission().lock().unwrap());
+    send.classify("send");
+    assert_eq!(admission().lock().unwrap().usage, 1);
+    drop(send);
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1601.0));
+    assert_eq!(state.idle_since(), None, "use resets the clock");
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 1602.0));
+    assert_eq!(state.idle_since(), Some(1602.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, true, "", 2201.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, true, "", 2202.0));
+    assert_eq!(display_events(&env, "hived.sleep")[1]["idleSeconds"], 600.0);
+    let retirement = state.take_retirement().unwrap();
+    release_reexec_lock_fd_impl(Some(retirement.lock_fd));
+}
+
+#[test]
+fn test_closed_admission_rejects_multiple_connections_without_business_usage() {
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let _guard = testhook::install(Hook {
+        handle_request: Some(Arc::new(|_| panic!("a request passed the shut gate"))),
+        ..Default::default()
+    });
+    let server = request_server(&workspace, "t");
+    close_admission();
+    let began = std::time::Instant::now();
+    let clients: Vec<_> = (0..8)
+        .map(|n| {
+            let ws = workspace.clone();
+            thread::spawn(move || {
+                request_node_dispatch(&ws, "t", "b", "task", "", &format!("nd-{n:012}"))
+            })
+        })
+        .collect();
+    for client in clients {
+        let err = client.join().unwrap().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                RequestFailure::NotAdmitted(_) | RequestFailure::NotSent(_)
+            ),
+            "{err:?}"
+        );
+    }
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "refusals are bounded: {:?}",
+        began.elapsed()
+    );
+    {
+        let state = admission().lock().unwrap();
+        assert_eq!(state.usage, 0);
+        assert_eq!(state.leases, 0);
+        assert_eq!(state.arrivals, 8);
+    }
+    assert!(!hooked_run_dir(&workspace).join("operations").exists());
+
+    // A peer that sends half a line and keeps the connection open: the
+    // refusal comes at the read budget, holds no lease, and the next
+    // request goes through once the gate reopens.
+    let mut half = UnixStream::connect(socket_path(&workspace)).unwrap();
+    half.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    half.write_all(b"{\"action\":\"adm").unwrap();
+    let mut reply = String::new();
+    half.read_to_string(&mut reply).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&reply).unwrap()["notAdmitted"],
+        true
+    );
+    assert_eq!(admission().lock().unwrap().leases, 0);
+    reopen_admission();
+    testhook::update(|h| {
+        h.handle_request = Some(Arc::new(|_| (json_obj(&[("ok", Value::Bool(true))]), true)));
+    });
+    let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+    assert_eq!(ping["ok"], true);
+    settle_leases();
+    drop(half);
+    // Closing the worker does not wait for a peer still being drained.
+    close_admission();
+    let mut draining = UnixStream::connect(socket_path(&workspace)).unwrap();
+    draining.write_all(b"{\"action\":\"adm").unwrap();
+    let began = std::time::Instant::now();
+    server.close();
+    assert!(
+        began.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        began.elapsed()
+    );
+    drop(draining);
+}
+
+/// A client that drips one byte of a line it never finishes every 100ms
+/// — each byte within the desk's socket timeout — until the desk hangs
+/// up or `cap` bytes went out. How many went out, and how long the
+/// connection lived.
+fn drip_until_dropped(conn: &UnixStream, cap: usize) -> (usize, Duration) {
+    let began = std::time::Instant::now();
+    let mut sent = 0;
+    let mut probe = [0u8; 64];
+    conn.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    while sent < cap {
+        if (&*conn).write_all(b"{").is_err() {
+            break;
+        }
+        sent += 1;
+        if matches!((&*conn).read(&mut probe), Ok(0)) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    (sent, began.elapsed())
+}
+
+/// The desk under test hangs up on a dripping frame at the read budget
+/// (one second on the accept worker), with nothing served and no lease
+/// left; `cap` bytes at 100ms apiece would outlive that several times.
+fn assert_dropped_at_budget(sent: usize, lived: Duration, cap: usize) {
+    assert!(
+        sent < cap,
+        "the desk hung up before the drip ran out: {sent} of {cap} bytes"
+    );
+    assert!(
+        lived >= Duration::from_millis(800) && lived < Duration::from_millis(2500),
+        "dropped at the read budget, not per byte: {lived:?}"
+    );
+}
+
+#[test]
+fn test_open_gate_drops_a_dripping_prelude_at_the_read_budget() {
+    // The gate is open and a client drips its first line a byte at a
+    // time, each within the socket timeout, never the newline: the desk
+    // ends the connection at the frame budget, calls no handler, keeps
+    // no lease, and serves the next request.
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let handled = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&handled);
+    let _guard = testhook::install(Hook {
+        handle_request: Some(Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            (json_obj(&[("ok", Value::Bool(true))]), true)
+        })),
+        ..Default::default()
+    });
+    let server = request_server(&workspace, "t");
+    let conn = UnixStream::connect(socket_path(&workspace)).unwrap();
+    let (sent, lived) = drip_until_dropped(&conn, 40);
+    assert_dropped_at_budget(sent, lived, 40);
+    settle_leases();
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        0,
+        "no handler for a frame that never came"
+    );
+    {
+        let state = admission().lock().unwrap();
+        assert_eq!(state.leases, 0);
+        assert_eq!(state.usage, 0);
+    }
+    drop(conn);
+    let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+    assert_eq!(ping["ok"], true);
+    settle_leases();
+    assert_eq!(handled.load(Ordering::SeqCst), 1);
+    assert!(drain_ready(&workspace), "nothing holds the desk");
+    reopen_admission();
+    server.close();
+}
+
+#[test]
+fn test_open_gate_drops_a_dripping_body_at_the_read_budget() {
+    // Admitted, then the body dripped a byte at a time and never
+    // finished: the desk ends the connection at the body's budget, the
+    // dispatch never reaches the engine, bus or journal, the lease goes,
+    // and the next dispatch on a fresh connection lands.
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    bus::init_workspace(tmp.path()).unwrap();
+    let mut hook = Hook::default();
+    let dispatches = wire_node_dispatch(&mut hook, &workspace, "team-x");
+    let _guard = testhook::install(hook);
+    let server = request_server(&workspace, "team-x");
+    let (conn, answer) = raw_preflight(&workspace, "node-dispatch");
+    assert_eq!(answer.unwrap()["admitted"], true);
+    assert_eq!(admission().lock().unwrap().leases, 1);
+    let (sent, lived) = drip_until_dropped(&conn, 40);
+    assert_dropped_at_budget(sent, lived, 40);
+    settle_leases();
+    assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+    assert_eq!(bus::read_all_events(tmp.path()).unwrap().len(), 0);
+    assert_eq!(journal_records(&workspace).len(), 0);
+    {
+        let state = admission().lock().unwrap();
+        assert_eq!(state.leases, 0);
+        assert_eq!(state.usage, 0, "an unfinished body is no classified write");
+    }
+    drop(conn);
+    let answer =
+        request_node_dispatch(&workspace, "team-x", "b", "task", "", "nd-dddddddddddd").unwrap();
+    assert_eq!(answer["dispatchId"], "nd-dddddddddddd");
+    settle_leases();
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(admission().lock().unwrap().leases, 0);
+    assert!(drain_ready(&workspace), "nothing holds the desk");
+    reopen_admission();
+    server.close();
+}
+
+/// A listener whose `close` — reached by `RequestServer::close` only once
+/// the accept worker is joined — holds at a checkpoint before the listener
+/// itself goes: what arrives in between is queued behind nobody.
+struct HeldClose {
+    inner: ServerSocket,
+    at_close: testhook::F0<()>,
+    closed: Arc<AtomicUsize>,
+}
+
+impl HivedServerApi for HeldClose {
+    fn close(&self) {
+        (self.at_close)();
+        self.inner.close();
+        self.closed.fetch_add(1, Ordering::SeqCst);
+    }
+    fn wait_readable(&self, timeout: f64) -> bool {
+        self.inner.wait_readable(timeout)
+    }
+    fn accept_timeout(&self, timeout: f64) -> Option<UnixStream> {
+        self.inner.accept_timeout(timeout)
+    }
+}
+
+/// A clock and tick counter for a loop under test: `monotonic` reads
+/// `ticks * 600`, and `wait_tick` advances it after running `at_tick` with
+/// the tick number about to start.
+fn drive_ticks(h: &mut Hook, at_tick: impl Fn(usize) + Send + Sync + 'static) -> Arc<AtomicUsize> {
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let clock = Arc::clone(&ticks);
+    let counter = Arc::clone(&ticks);
+    h.monotonic = Some(Arc::new(move || {
+        clock.load(Ordering::SeqCst) as f64 * HIVED_SLEEP_AFTER_SECONDS
+    }));
+    h.wait_tick = Some(Arc::new(move || {
+        let next = counter.load(Ordering::SeqCst) + 1;
+        at_tick(next);
+        counter.store(next, Ordering::SeqCst);
+        !SHUTDOWN.load(Ordering::SeqCst)
+    }));
+    ticks
+}
+
+/// The fresh generation after a retirement, in this process: a serve loop
+/// on a new listener, answering until told to shut down.
+fn next_generation(workspace: &str, team: &str) -> thread::JoinHandle<()> {
+    SHUTDOWN.store(false, Ordering::SeqCst);
+    reopen_admission();
+    let server = open_server_socket(workspace).unwrap();
+    let ws = workspace.to_string();
+    let team = team.to_string();
+    thread::spawn(move || {
+        while serve_requests(&server, &ws, &team, "", "", "next-generation", 0.1) {}
+        server.close();
+        cleanup_socket_impl(&ws);
+    })
+}
+
+fn stop_generation(workspace: &str, generation: thread::JoinHandle<()>) {
+    let bye = request_hived(workspace, &action_payload("shutdown"), 2.0).unwrap();
+    assert_eq!(bye["ok"], true);
+    generation.join().unwrap();
+    settle_leases();
+    SHUTDOWN.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn test_sleep_backlog_before_close_is_retryable_without_dispatch() {
+    // Eight dispatches around one retirement: two admitted before the
+    // gate, two refused at the shut gate (the retirement cancels for
+    // them), two queued between the worker's last accept and the
+    // listener close, two arriving at the slow cleanup. None that was not
+    // admitted has a payload byte on the wire; each retries under its own
+    // nonce and every nonce lands exactly once.
+    let env = sleep_probe_env();
+    let workspace = env.workspace.clone();
+    bus::init_workspace(Path::new(&workspace)).unwrap();
+    let before_close = Checkpoint::new();
+    let slow_cleanup = Checkpoint::new();
+    let closed = Arc::new(AtomicUsize::new(0));
+    let (phase_a_tx, phase_a_rx) = std::sync::mpsc::channel::<()>();
+    let phase_a_rx = Mutex::new(phase_a_rx);
+    let refused_b: Arc<Mutex<Vec<RequestFailure>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut dispatches = None;
+    testhook::update(|h| {
+        dispatches = Some(wire_node_dispatch(h, &workspace, "probe"));
+        let at_close = before_close.hook();
+        let closed = Arc::clone(&closed);
+        h.open_server_socket = Some(Arc::new(move |ws| {
+            Ok(Box::new(HeldClose {
+                inner: open_server_socket(ws)?,
+                at_close: Arc::clone(&at_close),
+                closed: Arc::clone(&closed),
+            }) as Box<dyn HivedServerApi>)
+        }));
+        h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
+        let drop_hook = slow_cleanup.hook();
+        h.gl_pool_drop_key = Some(Arc::new(move |_key| drop_hook()));
+        let ws_b = workspace.clone();
+        let sink = Arc::clone(&refused_b);
+        h.gl_idle_owned_keys = Some(Arc::new(move |_| {
+            if admission().lock().unwrap().closed && sink.lock().unwrap().is_empty() {
+                // B: arrive at the shut gate, before the commit.
+                let clients: Vec<_> = ["nd-b00000000001", "nd-b00000000002"]
+                    .into_iter()
+                    .map(|id| {
+                        let ws = ws_b.clone();
+                        thread::spawn(move || {
+                            request_node_dispatch(&ws, "probe", "b", &format!("task {id}"), "", id)
+                        })
+                    })
+                    .collect();
+                let mut sink = sink.lock().unwrap();
+                for client in clients {
+                    sink.push(client.join().unwrap().unwrap_err());
+                }
+            }
+            Some(vec!["m-probe.w".to_string()])
+        }));
+        let ws_tick = workspace.clone();
+        drive_ticks(h, move |tick| match tick {
+            // A: admitted and answered before the gate shuts.
+            1 => phase_a_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap(),
+            // B retries under the same nonces, on the same generation.
+            4 => {
+                for id in ["nd-b00000000001", "nd-b00000000002"] {
+                    let answer = request_node_dispatch(
+                        &ws_tick,
+                        "probe",
+                        "b",
+                        &format!("task {id}"),
+                        "",
+                        id,
+                    )
+                    .unwrap();
+                    assert_eq!(answer["dispatchId"], id);
+                }
+            }
+            _ => {}
+        });
+    });
+    let dispatches = dispatches.unwrap();
+    let ws = workspace.clone();
+    let serving = thread::spawn(move || hived_loop(&ws, "probe", "probe:1", "@1"));
+    wait_for_desk(&workspace);
+    for id in ["nd-a00000000001", "nd-a00000000002"] {
+        let answer =
+            request_node_dispatch(&workspace, "probe", "b", &format!("task {id}"), "", id).unwrap();
+        assert!(answer["seq"].as_i64().unwrap() > 0);
+    }
+    settle_leases();
+    phase_a_tx.send(()).unwrap();
+
+    // C: the worker has stopped accepting, the listener is still bound.
+    before_close.wait_reached();
+    assert!(
+        SHUTDOWN.load(Ordering::SeqCst),
+        "the retirement is committed"
+    );
+    assert!(socket_path(&workspace).exists());
+    let (queued_raw, _) = {
+        let (conn, _) = (UnixStream::connect(socket_path(&workspace)).unwrap(), ());
+        conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut preflight = action_payload(ADMIT_ACTION);
+        preflight.insert("forAction".to_string(), Value::from("node-dispatch"));
+        (&conn)
+            .write_all(format!("{}\n", Value::Object(preflight)).as_bytes())
+            .unwrap();
+        (conn, ())
+    };
+    // The production client: the receipt of its preflight write says it
+    // is in the backlog before the close goes on, and the recorder keeps
+    // every frame it puts on the wire from here.
+    let frames: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&frames);
+    testhook::update(|h| {
+        h.client_wrote = Some(Arc::new(move |frame| {
+            sink.lock().unwrap().push(frame.to_string())
+        }));
+    });
+    let queued_real = {
+        let ws = workspace.clone();
+        thread::spawn(move || {
+            request_node_dispatch(
+                &ws,
+                "probe",
+                "b",
+                "task nd-c00000000002",
+                "",
+                "nd-c00000000002",
+            )
+        })
+    };
+    let receipt = std::time::Instant::now();
+    while frames.lock().unwrap().is_empty() {
+        assert!(
+            receipt.elapsed() < Duration::from_secs(10),
+            "the production client never wrote its preflight"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    before_close.release();
+
+    // D: the listener is closed and the socket unlinked; the lock is held.
+    slow_cleanup.wait_reached();
+    assert_eq!(
+        closed.load(Ordering::SeqCst),
+        1,
+        "the listener closed before the pool drop"
+    );
+    assert!(!socket_path(&workspace).exists());
+    assert!(
+        try_acquire_reexec_lock_impl(&workspace).is_none(),
+        "the startup lock is held through the slow cleanup"
+    );
+    let refused_d: Vec<RequestFailure> = ["nd-d00000000001", "nd-d00000000002"]
+        .into_iter()
+        .map(|id| {
+            request_node_dispatch(&workspace, "probe", "b", &format!("task {id}"), "", id)
+                .unwrap_err()
+        })
+        .collect();
+    slow_cleanup.release();
+    serving.join().unwrap();
+    assert_eq!(display_events(&env, "hived.sleep").len(), 1);
+
+    // What the queued and late arrivals heard: nothing admitted, no
+    // payload sent.
+    let mut line = String::new();
+    let queued_answer = {
+        use std::io::BufRead;
+        std::io::BufReader::new(&queued_raw).read_line(&mut line)
+    };
+    assert!(
+        matches!(queued_answer, Ok(0) | Err(_)),
+        "the queued preflight was reset unanswered: {line:?}"
+    );
+    let queued_real = queued_real.join().unwrap().unwrap_err();
+    assert!(
+        matches!(queued_real, RequestFailure::NotAdmitted(_)),
+        "queued behind the close, the production client stopped at its preflight: {queued_real:?}"
+    );
+    let queued_frames = std::mem::take(&mut *frames.lock().unwrap());
+    testhook::update(|h| h.client_wrote = None);
+    assert_eq!(
+        queued_frames,
+        vec![String::from_utf8(preflight_line("node-dispatch")).unwrap()],
+        "the only frame on the wire from the backlog on was that preflight; \
+         the late arrivals found no socket to write to"
+    );
+    for err in refused_b.lock().unwrap().iter() {
+        assert!(matches!(err, RequestFailure::NotAdmitted(_)), "{err:?}");
+    }
+    for err in &refused_d {
+        assert_eq!(*err, RequestFailure::NoListener);
+    }
+    assert_eq!(
+        dispatches.load(Ordering::SeqCst),
+        4,
+        "a, b and their retries only"
+    );
+
+    // The next generation takes the retries of C and D under their nonces.
+    let generation = next_generation(&workspace, "probe");
+    for id in [
+        "nd-c00000000001",
+        "nd-c00000000002",
+        "nd-d00000000001",
+        "nd-d00000000002",
+    ] {
+        let answer =
+            request_node_dispatch(&workspace, "probe", "b", &format!("task {id}"), "", id).unwrap();
+        assert_eq!(answer["dispatchId"], id);
+    }
+    stop_generation(&workspace, generation);
+    assert_eq!(dispatches.load(Ordering::SeqCst), 8);
+    let mut nonces: Vec<String> = bus::read_all_events(Path::new(&workspace))
+        .unwrap()
+        .iter()
+        .map(|event| event.body.trim_start_matches("task ").to_string())
+        .collect();
+    nonces.sort();
+    let mut expected: Vec<String> = [
+        "nd-a00000000001",
+        "nd-a00000000002",
+        "nd-b00000000001",
+        "nd-b00000000002",
+        "nd-c00000000001",
+        "nd-c00000000002",
+        "nd-d00000000001",
+        "nd-d00000000002",
+    ]
+    .iter()
+    .map(|id| id.to_string())
+    .collect();
+    expected.sort();
+    assert_eq!(nonces, expected, "one bus dispatch per nonce");
+    assert_eq!(
+        journal_records(&workspace),
+        expected
+            .iter()
+            .map(|id| format!("{id}.json"))
+            .collect::<Vec<_>>(),
+        "one journal record per nonce"
+    );
+}
+
+#[test]
+fn test_retirement_closes_listener_before_slow_cleanup_under_owner_lock() {
+    struct HeldMonitor {
+        at_stop: testhook::F0<()>,
+        stops: Arc<AtomicUsize>,
+    }
+    impl OutputMonitor for HeldMonitor {
+        fn is_busy(&self, _pane_id: &str, _threshold_seconds: f64) -> bool {
+            false
+        }
+        fn last_output_age(&self, _pane_id: &str) -> Option<f64> {
+            None
+        }
+        fn stop(&self) {
+            (self.at_stop)();
+            self.stops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let env = unwatched_probe_env(Some(0));
+    let workspace = env.workspace.clone();
+    let monitor_stop = Checkpoint::new();
+    let pool_drop = Checkpoint::new();
+    let closed = Arc::new(AtomicUsize::new(0));
+    let stops = Arc::new(AtomicUsize::new(0));
+    let flock_refusals = Arc::new(AtomicUsize::new(0));
+    let spawned_at: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+    let generation: Arc<Mutex<Option<thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    testhook::update(|h| {
+        let closed = Arc::clone(&closed);
+        h.open_server_socket = Some(Arc::new(move |ws| {
+            Ok(Box::new(HeldClose {
+                inner: open_server_socket(ws)?,
+                at_close: Arc::new(|| {}),
+                closed: Arc::clone(&closed),
+            }) as Box<dyn HivedServerApi>)
+        }));
+        h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
+        let at_stop = monitor_stop.hook();
+        let stops = Arc::clone(&stops);
+        h.make_busy_monitor = Some(Arc::new(move |_session| {
+            Some(Arc::new(HeldMonitor {
+                at_stop: Arc::clone(&at_stop),
+                stops: Arc::clone(&stops),
+            }) as Arc<dyn OutputMonitor>)
+        }));
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(vec!["m-probe.w".to_string()])));
+        let drop_hook = pool_drop.hook();
+        h.gl_pool_drop_key = Some(Arc::new(move |_key| drop_hook()));
+        let refusals = Arc::clone(&flock_refusals);
+        h.flock_nb = Some(Arc::new(move |fd| {
+            let result = flock_nb_impl(fd);
+            if result.is_err() {
+                refusals.fetch_add(1, Ordering::SeqCst);
+            }
+            result
+        }));
+        let spawned = Arc::clone(&spawned_at);
+        let generation = Arc::clone(&generation);
+        let ws = workspace.clone();
+        h.popen = Some(Arc::new(move |argv, _| {
+            assert!(argv.iter().any(|arg| arg == "--hived"));
+            *spawned.lock().unwrap() = Some(std::time::Instant::now());
+            write_hived_owner_impl(&ws, getpid(), "next", "next-token");
+            *generation.lock().unwrap() = Some(next_generation(&ws, "probe"));
+            4242
+        }));
+        drive_ticks(h, |_| {});
+    });
+    let owner_file = hooked_run_dir(&workspace).join("hived.owner.json");
+    let released_at = thread::scope(|scope| {
+        let ws = workspace.clone();
+        let serving = scope.spawn(move || hived_loop(&ws, "probe", "probe:1", "@1"));
+
+        // At the monitor join: the worker is joined, the listener closed,
+        // the socket gone, and the startup lock held.
+        monitor_stop.wait_reached();
+        assert_eq!(display_events(&env, "hived.sleep").len(), 1);
+        assert_eq!(
+            closed.load(Ordering::SeqCst),
+            1,
+            "listener closed before monitor.stop"
+        );
+        assert!(!socket_path(&workspace).exists());
+        assert!(try_acquire_reexec_lock_impl(&workspace).is_none());
+        let ensure = {
+            let ws = workspace.clone();
+            scope.spawn(move || ensure_hived(&ws, "probe", "", ""))
+        };
+        // ensure is refused the lock while the old generation cleans up.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while flock_refusals.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            flock_refusals.load(Ordering::SeqCst) >= 2,
+            "ensure waited on the lock"
+        );
+        assert!(
+            spawned_at.lock().unwrap().is_none(),
+            "nothing spawned under the old lock"
+        );
+        monitor_stop.release();
+
+        // At the pool drop: the lock is still held, still nothing spawned.
+        pool_drop.wait_reached();
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(try_acquire_reexec_lock_impl(&workspace).is_none());
+        assert!(spawned_at.lock().unwrap().is_none());
+        let released_at = std::time::Instant::now();
+        pool_drop.release();
+        serving.join().unwrap();
+
+        assert_eq!(ensure.join().unwrap().unwrap(), Some(4242));
+        released_at
+    });
+    let spawned_at = spawned_at
+        .lock()
+        .unwrap()
+        .expect("the next generation was spawned");
+    assert!(
+        spawned_at > released_at,
+        "spawned only once the old lock was released"
+    );
+    // The old generation's cleanup left the new owner and socket alone.
+    let owner: Value = serde_json::from_str(&fs::read_to_string(&owner_file).unwrap()).unwrap();
+    assert_eq!(owner["token"], "next-token");
+    assert!(socket_path(&workspace).exists());
+    let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+    assert_eq!(ping["hived"]["started_at"], "next-generation");
+    let generation = generation.lock().unwrap().take().unwrap();
+    stop_generation(&workspace, generation);
+    assert!(try_acquire_reexec_lock_impl(&workspace)
+        .map(|fd| release_reexec_lock_fd_impl(Some(fd)))
+        .is_some());
+}
+
+/// An old generation's stand-in on the workspace socket: answers a
+/// shutdown as told and records every line it is sent.
+struct OldGeneration {
+    lines: Arc<Mutex<Vec<Value>>>,
+    shutdown_answer: Arc<Mutex<Value>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+    path: PathBuf,
+}
+
+impl OldGeneration {
+    fn bind(workspace: &str, api: i64) -> OldGeneration {
+        use std::io::BufRead;
+        let path = socket_path(workspace);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&path).unwrap();
+        let lines: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let shutdown_answer = Arc::new(Mutex::new(serde_json::json!({"ok": true})));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (log, answer, stop_seen) = (
+            Arc::clone(&lines),
+            Arc::clone(&shutdown_answer),
+            Arc::clone(&stop),
+        );
+        let thread = thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop_seen.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(stream) = stream else { break };
+                let mut reader = std::io::BufReader::new(&stream);
+                let mut line = String::new();
+                let _ = reader.read_line(&mut line);
+                let Ok(request) = serde_json::from_str::<Value>(&line) else {
+                    continue;
+                };
+                log.lock().unwrap().push(request.clone());
+                let reply = match request["action"].as_str() {
+                    Some("shutdown") => answer.lock().unwrap().clone(),
+                    Some(ADMIT_ACTION) => {
+                        let admitted =
+                            serde_json::json!({"ok": true, "admitted": true, "apiVersion": api});
+                        let _ = (&stream).write_all(format!("{admitted}\n").as_bytes());
+                        line.clear();
+                        let _ = reader.read_line(&mut line);
+                        if let Ok(body) = serde_json::from_str::<Value>(&line) {
+                            log.lock().unwrap().push(body);
+                        }
+                        serde_json::json!({"ok": true, "seq": 1})
+                    }
+                    _ => serde_json::json!({"ok": true}),
+                };
+                let _ = (&stream).write_all(format!("{reply}\n").as_bytes());
+            }
+        });
+        OldGeneration {
+            lines,
+            shutdown_answer,
+            stop,
+            thread: Some(thread),
+            path,
+        }
+    }
+
+    fn actions(&self) -> Vec<String> {
+        self.lines
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|line| line["action"].as_str().unwrap_or("").to_string())
+            .collect()
+    }
+}
+
+impl Drop for OldGeneration {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = UnixStream::connect(&self.path);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[test]
+fn test_deferred_upgrade_requires_compatible_api() {
+    let tmp = short_workspace();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let home = crate::paths::hive_home().to_string_lossy().to_string();
+    let identity = |api: i64, build: &str, team: &str, home: &str| {
+        json_obj(&[
+            ("ok", Value::Bool(true)),
+            ("apiVersion", Value::from(api)),
+            ("buildHash", Value::from(build)),
+            ("team", Value::from(team)),
+            ("hiveHome", Value::from(home)),
+            ("hived", Value::Object(hived_metadata("old"))),
+        ])
+    };
+    let team = Team {
+        name: "t".to_string(),
+        workspace: workspace.clone(),
+        tmux_window: "dev:1".to_string(),
+        tmux_window_id: "@7".to_string(),
+        ..Default::default()
+    };
+    // The identities the ping hook hands out, in order; the last repeats.
+    let pings: Arc<Mutex<std::collections::VecDeque<Map<String, Value>>>> =
+        Arc::new(Mutex::new(Default::default()));
+    let queue = Arc::clone(&pings);
+    let _guard = testhook::install(Hook {
+        request_ping: Some(Arc::new(move |_ws, _timeout| {
+            let mut queue = queue.lock().unwrap();
+            if queue.len() > 1 {
+                queue.pop_front()
+            } else {
+                queue.front().cloned()
+            }
+        })),
+        // Deferred and timed-out stops return at once on this clock; the
+        // identity ping is never busy here, so its budget is untouched.
+        monotonic: Some(stepping_clock(10.0)),
+        popen: Some(Arc::new(|_, _| panic!("the old generation was replaced"))),
+        cleanup_socket: Some(Arc::new(|_| {
+            panic!("the old generation's socket was unlinked")
+        })),
+        ..Default::default()
+    });
+    let set_pings = |sequence: &[Map<String, Value>]| {
+        *pings.lock().unwrap() = sequence.iter().cloned().collect();
+    };
+    let draining = serde_json::json!({"ok": false, "draining": true, "pendingOperations": 1});
+
+    // Deferred, same api: the old build keeps serving and takes the
+    // payload it can read.
+    let old = OldGeneration::bind(&workspace, HIVED_API_VERSION);
+    *old.shutdown_answer.lock().unwrap() = draining.clone();
+    set_pings(&[identity(HIVED_API_VERSION, "old", "t", &home)]);
+    assert_eq!(ensure_hived(&workspace, "t", "", "").unwrap(), None);
+    assert_eq!(old.actions(), ["shutdown"]);
+    let answer =
+        crate::send::request_node_dispatch(&workspace, &team, "b", "task", "", "nd-000000000001")
+            .unwrap();
+    assert_eq!(answer["seq"], 1);
+    assert_eq!(
+        old.actions(),
+        ["shutdown", "shutdown", ADMIT_ACTION, "node-dispatch"]
+    );
+    drop(old);
+
+    // Deferred, another api: refused, and no payload goes out.
+    let old = OldGeneration::bind(&workspace, HIVED_API_VERSION - 1);
+    *old.shutdown_answer.lock().unwrap() = draining.clone();
+    set_pings(&[identity(HIVED_API_VERSION - 1, "old", "t", &home)]);
+    let err = ensure_hived(&workspace, "t", "", "")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(&format!("api {}", HIVED_API_VERSION - 1)),
+        "{err}"
+    );
+    assert!(err.contains(&format!("api {HIVED_API_VERSION}")), "{err}");
+    let err =
+        crate::send::request_node_dispatch(&workspace, &team, "b", "task", "", "nd-000000000002")
+            .unwrap_err();
+    assert!(
+        matches!(err, crate::send::DispatchFailure::Refused(_)),
+        "{err:?}"
+    );
+    assert_eq!(
+        old.actions(),
+        ["shutdown", "shutdown"],
+        "no admit, no node-dispatch reached the old generation"
+    );
+    drop(old);
+
+    // Timed out: the stop was accepted but the generation is still there.
+    let old = OldGeneration::bind(&workspace, HIVED_API_VERSION);
+    set_pings(&[identity(HIVED_API_VERSION, "old", "t", &home)]);
+    assert_eq!(ensure_hived(&workspace, "t", "", "").unwrap(), None);
+    set_pings(&[identity(HIVED_API_VERSION - 1, "old", "t", &home)]);
+    let err = ensure_hived(&workspace, "t", "", "")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("api"), "{err}");
+    // Whoever answers after the stop must still be this team under this
+    // home.
+    set_pings(&[
+        identity(HIVED_API_VERSION, "old", "t", &home),
+        identity(HIVED_API_VERSION, "old", "t", "/elsewhere/.hive"),
+    ]);
+    let err = ensure_hived(&workspace, "t", "", "")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("/elsewhere/.hive"), "{err}");
+    set_pings(&[
+        identity(HIVED_API_VERSION, "old", "t", &home),
+        identity(HIVED_API_VERSION, "old", "u", &home),
+    ]);
+    let err = ensure_hived(&workspace, "t", "", "")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("'u'"), "{err}");
+    drop(old);
+}
+
+#[test]
+fn test_new_hived_refuses_old_format_side_effects_but_answers_ping_and_shutdown() {
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let handled = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&handled);
+    let _guard = testhook::install(Hook {
+        handle_request: Some(Arc::new(move |request| {
+            let action = request.get("action").and_then(Value::as_str).unwrap_or("");
+            assert!(
+                !admission_required(action),
+                "{action} reached the handler without a preflight"
+            );
+            counted.fetch_add(1, Ordering::SeqCst);
+            (json_obj(&[("ok", Value::Bool(true))]), action != "shutdown")
+        })),
+        ..Default::default()
+    });
+    let server = request_server(&workspace, "t");
+    for action in ["send", "node-dispatch", "connect-codex", "connect-grok"] {
+        let reply = request_hived(&workspace, &action_payload(action), 2.0).unwrap();
+        assert_eq!(reply["ok"], false, "{action}");
+        assert!(
+            reply["error"].as_str().unwrap().contains("preflight"),
+            "{action}: {reply:?}"
+        );
+    }
+    assert_eq!(handled.load(Ordering::SeqCst), 0);
+    // The old-format control entries still complete: identification and
+    // a graceful stop.
+    let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+    assert_eq!(ping["ok"], true);
+    let bye = request_hived(&workspace, &action_payload("shutdown"), 2.0).unwrap();
+    assert_eq!(bye["ok"], true);
+    assert!(SHUTDOWN.load(Ordering::SeqCst));
+    assert_eq!(handled.load(Ordering::SeqCst), 2);
+    settle_leases();
+    server.close();
+    SHUTDOWN.store(false, Ordering::SeqCst);
+}
+
+#[test]
+fn test_generation_change_keeps_one_dispatch_and_its_terminal_result() {
+    // The reexec branch: a dispatch admitted before the build changed is
+    // delivered once, its result persisted before the exec, and read back
+    // under the same dispatch id by the next generation.
+    let env = sleep_probe_env();
+    let workspace = env.workspace.clone();
+    bus::init_workspace(Path::new(&workspace)).unwrap();
+    let execs: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut dispatches = None;
+    testhook::update(|h| {
+        dispatches = Some(wire_node_dispatch(h, &workspace, "probe"));
+        h.open_server_socket = Some(Arc::new(|ws| {
+            Ok(Box::new(open_server_socket(ws)?) as Box<dyn HivedServerApi>)
+        }));
+        h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
+        h.current_exe = Some(Arc::new(|| "/tmp/fake-hive".to_string()));
+        let stale = AtomicUsize::new(0);
+        h.stale_disk_build_hash = Some(Arc::new(move || {
+            (stale.fetch_add(1, Ordering::SeqCst) >= 1).then(|| "new-build".to_string())
+        }));
+        let ws = workspace.clone();
+        let sink = Arc::clone(&execs);
+        h.execv = Some(Arc::new(move |argv| {
+            assert!(admission().lock().unwrap().closed);
+            assert!(!requests_in_flight());
+            let record = saved_operation(Path::new(&ws), "nd-000000000001");
+            assert_eq!(record["state"], "terminal", "persisted before the exec");
+            sink.lock().unwrap().push(argv.to_vec());
+            ExecOutcome::Replaced
+        }));
+        let ws = workspace.clone();
+        let sink = Arc::clone(&execs);
+        h.wait_tick = Some(Arc::new(move || {
+            if sink.lock().unwrap().is_empty() && dispatches_so_far(&ws) == 0 {
+                let answer =
+                    request_node_dispatch(&ws, "probe", "b", "task", "", "nd-000000000001")
+                        .unwrap();
+                assert_eq!(answer["dispatchId"], "nd-000000000001");
+                settle_leases();
+            }
+            sink.lock().unwrap().is_empty()
+        }));
+    });
+    let dispatches = dispatches.unwrap();
+    hived_loop(&workspace, "probe", "probe:1", "@1");
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    // The display never answered this generation: the next one is told
+    // of no window, not of the birth target.
+    assert_eq!(
+        *execs.lock().unwrap(),
+        vec![hived_reexec_argv(&workspace, "probe", "", "")]
+    );
+    let generation = next_generation(&workspace, "probe");
+    let result = request_node_result(&workspace, "nd-000000000001").unwrap();
+    assert_eq!(result["state"], "ended");
+    assert_eq!(result["text"], "done");
+    stop_generation(&workspace, generation);
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+
+    // The restart branch: the CLI finds a stale build, stops it gracefully
+    // and starts the next generation, which reads the same terminal
+    // result; nothing is dispatched again.
+    let old_socket = Arc::new(open_server_socket(&workspace).unwrap());
+    let old = {
+        let server = Arc::clone(&old_socket);
+        let ws = workspace.clone();
+        SHUTDOWN.store(false, Ordering::SeqCst);
+        reopen_admission();
+        thread::spawn(move || {
+            while serve_requests(server.as_ref(), &ws, "probe", "", "", "old-generation", 0.1) {}
+            server.close();
+            cleanup_socket_impl(&ws);
+        })
+    };
+    let answer =
+        request_node_dispatch(&workspace, "probe", "b", "task", "", "nd-000000000002").unwrap();
+    assert_eq!(answer["dispatchId"], "nd-000000000002");
+    settle_leases();
+    assert_eq!(dispatches.load(Ordering::SeqCst), 2);
+    let spawns = Arc::new(AtomicUsize::new(0));
+    let generation: Arc<Mutex<Option<thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    testhook::update(|h| {
+        let stale = json_obj(&[
+            ("ok", Value::Bool(true)),
+            ("apiVersion", Value::from(HIVED_API_VERSION)),
+            ("buildHash", Value::from("old")),
+            ("team", Value::from("probe")),
+            (
+                "hiveHome",
+                Value::from(crate::paths::hive_home().to_string_lossy().to_string()),
+            ),
+            ("hived", Value::Object(hived_metadata("old-generation"))),
+        ]);
+        let started = Arc::clone(&spawns);
+        h.request_ping = Some(Arc::new(move |ws, timeout| {
+            if started.load(Ordering::SeqCst) > 0 {
+                request_ping_impl(ws, timeout)
+            } else if socket_path(ws).exists() {
+                Some(stale.clone())
+            } else {
+                None
+            }
+        }));
+        let spawned = Arc::clone(&spawns);
+        let generation = Arc::clone(&generation);
+        let ws = workspace.clone();
+        h.popen = Some(Arc::new(move |_, _| {
+            spawned.fetch_add(1, Ordering::SeqCst);
+            *generation.lock().unwrap() = Some(next_generation(&ws, "probe"));
+            4242
+        }));
+        h.monotonic = None;
+    });
+    assert_eq!(
+        ensure_hived(&workspace, "probe", "", "").unwrap(),
+        Some(4242)
+    );
+    old.join().unwrap();
+    assert_eq!(spawns.load(Ordering::SeqCst), 1);
+    let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+    assert_eq!(ping["hived"]["started_at"], "next-generation");
+    for id in ["nd-000000000001", "nd-000000000002"] {
+        let result = request_node_result(&workspace, id).unwrap();
+        assert_eq!(result["state"], "ended", "{id}");
+        assert_eq!(result["text"], "done", "{id}");
+    }
+    assert_eq!(
+        dispatches.load(Ordering::SeqCst),
+        2,
+        "nothing dispatched again"
+    );
+    let generation = generation.lock().unwrap().take().unwrap();
+    stop_generation(&workspace, generation);
+}
+
+/// The desk under test answers on its socket.
+fn wait_for_desk(workspace: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if request_hived(workspace, &action_payload("ping"), 1.0).is_some() {
+            settle_leases();
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("the desk never answered");
+}
+
+fn dispatches_so_far(workspace: &str) -> usize {
+    journal_records(workspace).len()
+}
+
+#[test]
+fn test_admission_handshake_latency_within_budget() {
+    // The desk's coordinator is stuck sampling the display; the accept
+    // worker answers alone. One hundred pings and one hundred preflights,
+    // each a round trip on the local socket: the handshake adds one such
+    // trip to a request with a side effect, and neither budget is
+    // approached.
+    let env = loop_probe_env("ok");
+    let workspace = env.workspace.clone();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = Mutex::new(release_rx);
+    testhook::update(|h| {
+        h.open_server_socket = Some(Arc::new(|workspace| {
+            Ok(Box::new(open_server_socket(workspace)?) as Box<dyn HivedServerApi>)
+        }));
+        h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
+        h.list_panes_all_status = Some(Arc::new(move || {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(60))
+                .unwrap();
+            (None, "no-server")
+        }));
+        h.wait_tick = Some(Arc::new(|| !SHUTDOWN.load(Ordering::SeqCst)));
+    });
+    let stats = |mut samples: Vec<f64>| {
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let at = |q: f64| samples[((samples.len() as f64 - 1.0) * q).round() as usize];
+        (at(0.5), at(0.95), *samples.last().unwrap())
+    };
+    thread::scope(|scope| {
+        let serving = scope.spawn(|| hived_loop(&workspace, "probe", "probe:1", "@1"));
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Warm up: the first connection pays for thread creation.
+        for _ in 0..5 {
+            request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+            raw_preflight(&workspace, "send");
+        }
+        let mut pings = Vec::new();
+        let mut preflights = Vec::new();
+        for _ in 0..100 {
+            let began = std::time::Instant::now();
+            let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+            pings.push(began.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(ping["ok"], true);
+            let began = std::time::Instant::now();
+            let (_conn, answer) = raw_preflight(&workspace, "send");
+            preflights.push(began.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(answer.unwrap()["admitted"], true);
+        }
+        let (ping_median, ping_p95, ping_max) = stats(pings);
+        let (admit_median, admit_p95, admit_max) = stats(preflights);
+        eprintln!(
+            "ping ms median={ping_median:.3} p95={ping_p95:.3} max={ping_max:.3}; \
+             preflight-to-admitted ms median={admit_median:.3} p95={admit_p95:.3} max={admit_max:.3}"
+        );
+        let shutdown = request_hived(&workspace, &action_payload("shutdown"), 0.5);
+        SHUTDOWN.store(true, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        serving.join().unwrap();
+        assert_eq!(
+            shutdown.expect("shutdown answers while sampling is blocked")["ok"],
+            true
+        );
+        assert!(ping_p95 < 50.0, "ping p95 {ping_p95:.3}ms");
+        assert!(admit_p95 < 50.0, "preflight p95 {admit_p95:.3}ms");
+    });
+    settle_leases();
+}
+
+// --------------------------------------------------------------------------
+// the display: where the team's windows are now, tick by tick
+// --------------------------------------------------------------------------
+
+/// A busy monitor that records its life on *log*, as `make`/`start`/`stop`
+/// with the session it was made for.
+struct TrackedMonitor {
+    session: String,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl OutputMonitor for TrackedMonitor {
+    fn is_busy(&self, _pane_id: &str, _threshold_seconds: f64) -> bool {
+        false
+    }
+    fn last_output_age(&self, _pane_id: &str) -> Option<f64> {
+        None
+    }
+    fn start(&self) {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("start {}", self.session));
+    }
+    fn stop(&self) {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("stop {}", self.session));
+    }
+}
+
+fn tracked_monitors(log: &Arc<Mutex<Vec<String>>>) -> testhook::S1<Option<Arc<dyn OutputMonitor>>> {
+    let log = Arc::clone(log);
+    Arc::new(move |session| {
+        log.lock().unwrap().push(format!("make {session}"));
+        Some(Arc::new(TrackedMonitor {
+            session: session.to_string(),
+            log: Arc::clone(&log),
+        }) as Arc<dyn OutputMonitor>)
+    })
+}
+
+fn owner_bytes(workspace: &str) -> String {
+    fs::read_to_string(hooked_run_dir(workspace).join("hived.owner.json")).unwrap_or_default()
+}
+
+#[test]
+fn test_display_location_tracks_move_rename_and_rebuild() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    // The window listing the display answers on each tick: born in the
+    // team session, moved whole into `main`, that session renamed, gone,
+    // rebuilt in a new team session, then held while an upgrade fails.
+    let listings: Vec<Vec<WindowExtra>> = vec![
+        vec![probe_window("probe:1", "@1", "$1", &ws)],
+        vec![probe_window("probe:1", "@1", "$1", &ws)],
+        vec![probe_window("main:3", "@1", "$2", &ws)],
+        vec![probe_window("work:3", "@1", "$2", &ws)],
+        vec![],
+        vec![probe_window("probe:1", "@9", "$3", &ws)],
+        vec![probe_window("probe:1", "@9", "$3", &ws)],
+    ];
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let monitors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let hooks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let viewers_asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let notify_sessions: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let execs: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let owners: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        // The failed exec takes and releases the real reexec lock.
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
+        h.make_busy_monitor = Some(tracked_monitors(&monitors));
+        let sink = Arc::clone(&hooks);
+        h.install_wake_hooks = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(session.to_string());
+            Ok(())
+        }));
+        let sink = Arc::clone(&viewers_asked);
+        h.watching_clients = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(session.to_string());
+            Some(1)
+        }));
+        let sink = Arc::clone(&notify_sessions);
+        h.get_most_recent_client_window = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(session.to_string());
+            None
+        }));
+        let tick = Arc::clone(&ticks);
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let listing = listings[tick.load(Ordering::SeqCst).min(listings.len() - 1)].clone();
+            (Some(listing), "ok")
+        }));
+        let tick = Arc::clone(&ticks);
+        h.stale_disk_build_hash = Some(Arc::new(move || {
+            (tick.load(Ordering::SeqCst) == 6).then(|| "next-build".to_string())
+        }));
+        h.current_exe = Some(Arc::new(|| "/opt/hive".to_string()));
+        let sink = Arc::clone(&execs);
+        h.execv = Some(Arc::new(move |argv| {
+            sink.lock().unwrap().push(argv.to_vec());
+            ExecOutcome::Failed(std::io::Error::other("exec refused by the test"))
+        }));
+        let tick = Arc::clone(&ticks);
+        let owners = Arc::clone(&owners);
+        let owner_ws = ws.clone();
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            owners.lock().unwrap().push(owner_bytes(&owner_ws));
+            next < 7
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *monitors.lock().unwrap(),
+        vec![
+            "make $1", "start $1", // born
+            "stop $1", "make $2", "start $2", // moved: the same window, another session
+            "stop $2",  // windowless
+            "make $3", "start $3", // rebuilt
+            "stop $3", "start $3", // the failed exec rebinds the same monitor
+            "stop $3",  // teardown
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>(),
+        "a rename keeps the session and restarts nothing; a repeated snapshot changes nothing"
+    );
+    assert_eq!(
+        *hooks.lock().unwrap(),
+        vec!["$1", "$2", "$3"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        "the wake hooks follow the display into each new session"
+    );
+    // The last tick ends at `wait_tick`, before the idle and sleep checks.
+    assert_eq!(
+        *viewers_asked.lock().unwrap(),
+        vec!["$1", "$1", "$2", "$2", "$3"],
+        "the sleep gate counts viewers on the display's current session, by id, and none without a display"
+    );
+    assert_eq!(
+        *notify_sessions.lock().unwrap(),
+        vec!["$1", "$1", "$2", "$2", "", "$3"],
+        "the idle notifier reads the active window from the current session"
+    );
+    let moves: Vec<(Value, Value, Value)> = display_events(&env, "hived.display")
+        .into_iter()
+        .map(|e| {
+            (
+                e["window"].clone(),
+                e["windowId"].clone(),
+                e["session"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        moves,
+        vec![
+            (json!("probe:1"), json!("@1"), json!("$1")),
+            (json!("main:3"), json!("@1"), json!("$2")),
+            (json!("work:3"), json!("@1"), json!("$2")),
+            (Value::Null, Value::Null, Value::Null),
+            (json!("probe:1"), json!("@9"), json!("$3")),
+        ]
+    );
+    assert_eq!(
+        *execs.lock().unwrap(),
+        vec![hived_reexec_argv(&ws, "probe", "probe:1", "@9")],
+        "the next generation is told of the display as last seen, not the birth target"
+    );
+    let reexec = display_events(&env, "hived.reexec");
+    assert_eq!(reexec.len(), 1);
+    assert_eq!(reexec[0]["tmux_window"], "probe:1");
+    assert_eq!(reexec[0]["tmux_window_id"], "@9");
+    let owners = owners.lock().unwrap();
+    assert_eq!(owners.len(), 7);
+    assert!(
+        owners[0].contains(&format!("{}", getpid())),
+        "{}",
+        owners[0]
+    );
+    assert!(
+        owners.iter().all(|owner| *owner == owners[0]),
+        "the hived's pid and token outlive every display change: {owners:?}"
+    );
+    assert!(display_events(&env, "hived.sleep").is_empty());
+}
+
+#[test]
+fn test_display_location_prefers_the_registry_display_among_several_windows() {
+    let env = sleep_probe_env();
+    let ws = env.workspace.clone();
+    let instance = TeamInstance::from_registry("probe", &ws);
+    assert_eq!(instance.created, "123");
+    let mut other = probe_window("dev:2", "@4", "$0", &ws);
+    other.team = "other".to_string();
+    let mut stale = probe_window("dev:3", "@5", "$0", &ws);
+    stale.created = "99".to_string();
+    let mut elsewhere = probe_window("dev:4", "@6", "$0", &ws);
+    elsewhere.workspace = "/ws/elsewhere".to_string();
+    let listing = |windows: Vec<WindowExtra>| {
+        TickSnapshot::with_extras(
+            "ok",
+            Vec::new(),
+            HashMap::new(),
+            Some(windows.into_iter().map(|w| (w.window.clone(), w)).collect()),
+            None,
+        )
+    };
+    let asked = std::cell::Cell::new(0);
+    let preferred = |id: &'static str| {
+        let asked = &asked;
+        move || {
+            asked.set(asked.get() + 1);
+            Some(id.to_string())
+        }
+    };
+
+    // Same-name windows of another instance, and other teams' windows,
+    // are not this display; nothing to prefer among one candidate.
+    let snap = listing(vec![
+        other.clone(),
+        stale.clone(),
+        elsewhere.clone(),
+        probe_window("main:3", "@8", "$2", &ws),
+    ]);
+    let location = snap.display_location(&instance, preferred("@5")).unwrap();
+    assert_eq!(asked.get(), 0, "one window needs no tie-break");
+    assert_eq!(location.window, "main:3");
+    assert_eq!(location.window_id, "@8");
+    assert_eq!(location.session_id, "$2");
+    assert_eq!(location.sessions, vec!["$2"]);
+    assert_eq!(
+        listing(vec![other, stale, elsewhere]).display_location(&instance, preferred("@5")),
+        None
+    );
+
+    // Two windows across two sessions: the registry's display is the
+    // primary, every session is a viewer session.
+    let snap = listing(vec![
+        probe_window("main:3", "@8", "$2", &ws),
+        probe_window("probe:1", "@1", "$1", &ws),
+    ]);
+    let location = snap.display_location(&instance, preferred("@8")).unwrap();
+    assert_eq!(asked.get(), 1);
+    assert_eq!(
+        (location.window.as_str(), location.session_id.as_str()),
+        ("main:3", "$2")
+    );
+    assert_eq!(location.sessions, vec!["$1", "$2"]);
+    // A cache naming neither: the first in id order, stably.
+    let location = snap.display_location(&instance, preferred("@77")).unwrap();
+    assert_eq!(
+        (location.window.as_str(), location.session_id.as_str()),
+        ("probe:1", "$1")
+    );
+    let location = snap.display_location(&instance, || None).unwrap();
+    assert_eq!(location.window_id, "@1");
+
+    // The createdAt tag matches numerically, in whatever spelling.
+    let mut spelled = probe_window("probe:1", "@1", "$1", &ws);
+    spelled.created = "123.0".to_string();
+    assert!(listing(vec![spelled])
+        .display_location(&instance, || None)
+        .is_some());
+    let mut untagged = probe_window("probe:1", "@1", "$1", &ws);
+    untagged.created = String::new();
+    assert!(listing(vec![untagged])
+        .display_location(&instance, || None)
+        .is_none());
+}
+
+#[test]
+fn test_viewers_use_exact_current_sessions() {
+    let env = sleep_probe_env();
+    let snap = TickSnapshot::with_extras("ok", Vec::new(), HashMap::new(), None, None);
+    let location = DisplayLocation {
+        window: "probe:1".into(),
+        window_id: "@1".into(),
+        session_id: "$1".into(),
+        sessions: vec!["$1".into(), "$2".into()],
+    };
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let answers: Arc<Mutex<HashMap<String, Option<usize>>>> = Arc::new(Mutex::new(HashMap::new()));
+    testhook::update(|h| {
+        let asked = Arc::clone(&asked);
+        let answers = Arc::clone(&answers);
+        h.watching_clients = Some(Arc::new(move |session| {
+            asked.lock().unwrap().push(session.to_string());
+            answers.lock().unwrap()[session]
+        }));
+    });
+    let set = |a: Option<usize>, b: Option<usize>| {
+        let mut answers = answers.lock().unwrap();
+        answers.insert("$1".to_string(), a);
+        answers.insert("$2".to_string(), b);
+    };
+    let tick = |state: &mut SleepState, now: f64| {
+        state.tick(
+            &env.workspace,
+            "probe",
+            Some(&snap),
+            Some(&location),
+            true,
+            "",
+            now,
+        )
+    };
+
+    // A terminal on either session is a viewer.
+    set(Some(0), Some(1));
+    let mut state = SleepState::default();
+    assert!(!tick(&mut state, 0.0));
+    assert!(!tick(&mut state, 601.0));
+    assert_eq!(state.idle_since(), None);
+
+    // A session tmux would not count is not "nobody".
+    set(Some(0), None);
+    let mut state = SleepState::default();
+    assert!(!tick(&mut state, 0.0));
+    assert!(!tick(&mut state, 601.0));
+    assert_eq!(state.idle_since(), None);
+
+    // Every session known empty: unwatched, at the threshold.
+    set(Some(0), Some(0));
+    let mut state = SleepState::default();
+    assert!(!tick(&mut state, 0.0));
+    assert_eq!(state.idle_since(), Some(0.0));
+    assert!(!tick(&mut state, 599.0));
+    assert!(tick(&mut state, 601.0));
+    let events = display_events(&env, "hived.sleep");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["reason"], "unwatched");
+    let lock_fd = state.take_retirement().unwrap().lock_fd;
+    release_reexec_lock_fd_impl(Some(lock_fd));
+
+    let asked = asked.lock().unwrap();
+    assert!(!asked.is_empty());
+    assert!(
+        asked.iter().all(|s| s == "$1" || s == "$2"),
+        "only the display's sessions are asked, by id: {asked:?}"
+    );
+}
+
+#[test]
+fn test_removed_team_ignores_recycled_foreign_window_id() {
+    // An external workspace outlives its registry entry; the tmux server
+    // restarted since this hived was born, and its `@1` is another team's
+    // window now — with a pane still tagged for this team by name.
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let entry = crate::registry::entry_path("probe").unwrap();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.cv_journal_signature = Some(Arc::new(Vec::new));
+        let recycled = ws.clone();
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let mut window = probe_window("other:0", "@1", "$0", &recycled);
+            window.team = "other".to_string();
+            (Some(vec![window]), "ok")
+        }));
+        h.list_panes_all_status = Some(Arc::new(|| {
+            (
+                Some(vec![PaneInfo {
+                    pane_id: "%7".to_string(),
+                    role: "agent".to_string(),
+                    team: "probe".to_string(),
+                    ..Default::default()
+                }]),
+                "ok",
+            )
+        }));
+        let clock = Arc::clone(&ticks);
+        h.monotonic = Some(Arc::new(move || clock.load(Ordering::SeqCst) as f64 * 30.0));
+        let tick = Arc::clone(&ticks);
+        let entry = entry.clone();
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            if next == 1 {
+                fs::remove_file(&entry).unwrap();
+            }
+            next < 4
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    assert_eq!(
+        ticks.load(Ordering::SeqCst),
+        1,
+        "the next 30s check retires the desk, not the 600s sleep"
+    );
+    assert!(display_events(&env, "hived.sleep").is_empty());
+    assert!(!asleep_marker_path(&ws).exists());
+    assert!(
+        Path::new(&ws).is_dir(),
+        "the external workspace is left alone"
+    );
+}
+
+#[test]
+fn test_removed_team_with_its_display_up_keeps_the_idle_policy() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let entry = crate::registry::entry_path("probe").unwrap();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        let clock = Arc::clone(&ticks);
+        h.monotonic = Some(Arc::new(move || clock.load(Ordering::SeqCst) as f64 * 30.0));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            if next == 1 {
+                fs::remove_file(&entry).unwrap();
+            }
+            next < 4
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    assert_eq!(
+        ticks.load(Ordering::SeqCst),
+        4,
+        "a window of this instance still on screen keeps the desk on the sleep policy"
+    );
+    assert!(display_events(&env, "hived.sleep").is_empty());
+}
+
+#[test]
+fn test_orphan_interrupts_owned_node_without_unlinking_new_owner() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let path = prepare_operation(&ws, "probe", "123", "nd-orphan", "worker", "node").unwrap();
+    assert_eq!(
+        saved_operation(Path::new(&ws), "nd-orphan")["state"],
+        "prepared"
+    );
+    testhook::update(|h| {
+        h.open_server_socket = Some(Arc::new(|workspace| {
+            Ok(Box::new(open_server_socket(workspace)?) as Box<dyn HivedServerApi>)
+        }));
+        h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
+        // Another generation took the owner file right after this one
+        // published itself.
+        h.write_hived_owner = Some(Arc::new(|workspace, pid, started_at, token| {
+            write_hived_owner_impl(workspace, pid, started_at, token);
+            write_hived_owner_impl(workspace, pid + 1, "next", "next-token");
+        }));
+        h.wait_tick = Some(Arc::new(|| panic!("an orphan never serves a tick")));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    let retire = display_events(&env, "hived.retire_orphan");
+    assert_eq!(retire.len(), 1);
+    assert_eq!(retire[0]["socketPid"], Value::from(getpid() + 1));
+    let record = saved_operation(Path::new(&ws), "nd-orphan");
+    assert_eq!(record["state"], "terminal");
+    assert_eq!(record["result"]["status"], "interrupted");
+    assert_eq!(record["result"]["reason"], "hived replaced");
+    assert_eq!(
+        serde_json::from_str::<Value>(&owner_bytes(&ws)).unwrap()["token"],
+        "next-token",
+        "the new owner's file is not touched"
+    );
+    assert!(
+        socket_path(&ws).exists(),
+        "the socket is the new owner's; the orphan unlinks nothing"
+    );
+    drop(path);
+    cleanup_socket_impl(&ws);
+}
+
+#[test]
+fn test_team_removed_interrupts_node_in_external_workspace() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    prepare_operation(&ws, "probe", "123", "nd-removed", "worker", "node").unwrap();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let entry = crate::registry::entry_path("probe").unwrap();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.list_windows_snapshot = Some(Arc::new(|| (Some(Vec::new()), "ok")));
+        let clock = Arc::clone(&ticks);
+        h.monotonic = Some(Arc::new(move || clock.load(Ordering::SeqCst) as f64 * 30.0));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            if next == 1 {
+                fs::remove_file(&entry).unwrap();
+            }
+            next < 4
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    assert_eq!(ticks.load(Ordering::SeqCst), 1);
+    let record = saved_operation(Path::new(&ws), "nd-removed");
+    assert_eq!(record["state"], "terminal");
+    assert_eq!(record["result"]["status"], "interrupted");
+    assert_eq!(record["result"]["reason"], "team removed");
+    assert!(Path::new(&ws).is_dir());
+}
+
+#[test]
+fn test_workspace_removed_does_not_recreate_journal() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    prepare_operation(&ws, "probe", "123", "nd-gone", "worker", "node").unwrap();
+    let journal = hooked_run_dir(&ws).join("operations");
+    assert!(journal.is_dir());
+    let ticks = Arc::new(AtomicUsize::new(0));
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        let tick = Arc::clone(&ticks);
+        let gone = ws.clone();
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            if next == 1 {
+                fs::remove_dir_all(&gone).unwrap();
+            }
+            next < 4
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    assert_eq!(
+        ticks.load(Ordering::SeqCst),
+        1,
+        "the next tick retires the desk"
+    );
+    assert!(
+        !Path::new(&ws).exists(),
+        "nothing of the removed workspace is written back: no journal, no lock, no marker"
+    );
+    assert!(display_events(&env, "hived.sleep").is_empty());
 }

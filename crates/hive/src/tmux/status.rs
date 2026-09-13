@@ -4,6 +4,11 @@
 //! option the CLI or the hived wrote — no `#()` shell-outs, the bar never
 //! forks.
 
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
+use std::thread;
+use std::time::{Duration, Instant};
+
 use super::run::run;
 
 /// The bar's colours, one set per appearance. The bar follows the same
@@ -290,35 +295,367 @@ fn install_status_rows(session_id: &str) -> Vec<Vec<String>> {
     let mut rows = team_status_argv(session_id, crate::view_theme::active_theme_kind());
     rows.push(status_click_binding(&hive, &status_click_fallback()));
     rows.push(mirror_key_binding(&hive, &prefix_m_fallback()));
-    rows.extend(wake_hook_argv(session_id, &hive));
     rows
 }
 
-/// The two session hooks that fire when a terminal arrives at the team
-/// session — a fresh attach, or a client switching over from another
-/// session — each running `hive wake` on the session's current window.
-/// A desk that retired because nobody was watching (`hived.sleep
+/// The two session hooks that fire when a terminal arrives at a session
+/// showing a team window — a fresh attach, or a client switching over from
+/// another session — each running `hive wake` on the client's session. A
+/// desk that retired because nobody was watching (`hived.sleep
 /// unwatched`) comes back the moment someone looks, so the bar and the
 /// colours are live again without a hive verb being typed.
+///
+/// Each hook is an indexed array: hive takes one index per hive home and
+/// leaves every other entry — the human's own hook, another hive home's
+/// wake — untouched, so a session that lends a team its window keeps
+/// what the human configured on it.
 pub(crate) const WAKE_HOOKS: [&str; 2] = ["client-attached", "client-session-changed"];
 
-pub(crate) fn wake_run_shell(hive: &str) -> String {
-    format!("run-shell -b \"{hive} wake --window '#{{q:session_name}}:#{{window_index}}' >/dev/null 2>&1 || true\"")
+/// The engine homes a hook carries when the installing process has them
+/// set: the wake runs under the tmux server's environment, which is
+/// whatever its first client had, not the caller's.
+const WAKE_ENGINE_HOMES: [&str; 4] = [
+    "CLAUDE_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "GROK_HOME",
+];
+
+/// The hive home a wake hook is installed for: the resolved absolute path,
+/// which is also how the installer and the remover recognise their own
+/// entries, so a relative `HIVE_HOME` spelling finds the entry it baked.
+fn wake_hive_home() -> String {
+    std::path::absolute(crate::paths::hive_home())
+        .unwrap_or_else(|_| crate::paths::hive_home())
+        .to_string_lossy()
+        .into_owned()
 }
 
-pub(crate) fn wake_hook_argv(session_id: &str, hive: &str) -> Vec<Vec<String>> {
-    WAKE_HOOKS
-        .iter()
-        .map(|hook| {
-            vec![
-                "set-hook".to_string(),
-                "-t".to_string(),
-                session_id.to_string(),
-                hook.to_string(),
-                wake_run_shell(hive),
-            ]
+/// `HIVE_HOME`, the caller's `HOME` and its engine homes, as the `VAR=value`
+/// assignments the wake command starts with. The hive home is the
+/// resolved absolute path, set whether or not the caller had it in its
+/// environment: the hook must name the home it was installed for, never
+/// resolve one from the server's environment.
+pub(crate) fn wake_environment() -> Vec<(String, String)> {
+    let mut env = vec![("HIVE_HOME".to_string(), wake_hive_home())];
+    if let Ok(user_home) = std::env::var("HOME") {
+        if !user_home.is_empty() {
+            env.push(("HOME".to_string(), user_home));
+        }
+    }
+    for key in WAKE_ENGINE_HOMES {
+        if let Ok(value) = std::env::var(key) {
+            if !value.is_empty() {
+                env.push((key.to_string(), value));
+            }
+        }
+    }
+    env
+}
+
+/// The shell line a wake hook runs: the environment assignments, the
+/// binary and `wake --session` naming the client's session by id.
+/// `#{q:session_id}` is tmux format quoting — run-shell expands it to
+/// `\$3`, which reaches `sh` as the id itself; a shell quote around it
+/// would keep the backslash. Every argv piece is shell-quoted here; the
+/// tmux double-quote escaping of the whole line is `wake_run_shell`'s.
+/// Output is discarded: run-shell shows any stdout in view mode over the
+/// active pane — a member's TUI — until someone presses q, and a nonzero
+/// exit the same way; the hook must never do that to a member.
+pub(crate) fn wake_shell_line(hive: &str, env: &[(String, String)]) -> String {
+    let mut line = String::new();
+    for (key, value) in env {
+        line.push_str(key);
+        line.push('=');
+        line.push_str(&crate::shell::shlex_quote(value));
+        line.push(' ');
+    }
+    line.push_str(&crate::shell::shlex_quote(hive));
+    line.push_str(" wake --session #{q:session_id} >/dev/null 2>&1 || true");
+    line
+}
+
+pub(crate) fn wake_run_shell(shell_line: &str) -> String {
+    format!(
+        "run-shell -b \"{}\"",
+        crate::shell::tmux_dquote_escape(shell_line)
+    )
+}
+
+/// The `HIVE_HOME=<home>` assignment a wake hook of *home* starts with —
+/// the mark that tells this hive home's entries from every other.
+fn wake_home_token(home: &str) -> String {
+    format!("HIVE_HOME={} ", crate::shell::shlex_quote(home))
+}
+
+/// One entry of a session's hook array as `show-hooks` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HookEntry {
+    pub hook: String,
+    pub index: u32,
+    /// The command as tmux prints it (`run-shell -b "…"`).
+    pub command: String,
+}
+
+/// `show-hooks -t <session>` output → the entries of the wake hooks.
+/// tmux prints each array item as `name[index] command`; an entry set
+/// without an index sits at 0.
+pub(crate) fn parse_hook_entries(listing: &str) -> Vec<HookEntry> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let (name, command) = line.split_once(' ')?;
+            let (hook, index) = match name.split_once('[') {
+                Some((hook, rest)) => (hook, rest.strip_suffix(']')?.parse::<u32>().ok()?),
+                None => (name, 0),
+            };
+            WAKE_HOOKS.contains(&hook).then(|| HookEntry {
+                hook: hook.to_string(),
+                index,
+                command: command.to_string(),
+            })
         })
         .collect()
+}
+
+/// The shell line inside a listed `run-shell -b "…"` entry, with tmux's
+/// printing escapes undone; None for any other shape of command. An older
+/// tmux may print the whole command as one quoted string: that layer is
+/// undone first.
+pub(crate) fn run_shell_body(command: &str) -> Option<String> {
+    let unwrap = |text: &str| -> Option<String> {
+        let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+        Some(crate::shell::tmux_dquote_unescape(inner))
+    };
+    let whole = if command.starts_with('"') {
+        unwrap(command)?
+    } else {
+        command.to_string()
+    };
+    let rest = whole.strip_prefix("run-shell -b ")?;
+    unwrap(rest)
+}
+
+/// Whether a listed entry is this hive home's wake: one whose command
+/// starts with this home's `HIVE_HOME` assignment. The home an entry
+/// bakes is the only proof of whose it is — an older, home-less
+/// `wake --window` entry names a binary, and a binary is shared by every
+/// home installed from it, so such an entry is nobody's to claim, update
+/// or remove.
+pub(crate) fn owned_wake_entry(entry: &HookEntry, home: &str) -> bool {
+    run_shell_body(&entry.command)
+        .is_some_and(|body| body.starts_with(&wake_home_token(home)) && body.contains(" wake --"))
+}
+
+/// How long an installer or remover waits for the server's hook lock, and
+/// how often it retries inside that budget. A holder is another hive
+/// process mid-install on the same server, gone within milliseconds; a
+/// budget rather than a blocking wait keeps a stuck one a loud failure.
+const HOOK_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const HOOK_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(20);
+
+/// The socket the tmux client hive runs reaches, resolved the way that
+/// client resolves it and without asking it: the one `TMUX` names inside
+/// tmux, else the default server's under `TMUX_TMPDIR` (or `/tmp`).
+fn reached_socket_path() -> PathBuf {
+    if let Some(path) = std::env::var("TMUX")
+        .ok()
+        .and_then(|tmux| tmux.split(',').next().map(str::trim).map(str::to_owned))
+        .filter(|path| !path.is_empty())
+    {
+        return PathBuf::from(path);
+    }
+    let tmpdir = std::env::var("TMUX_TMPDIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or_else(|| "/tmp".to_string());
+    PathBuf::from(tmpdir)
+        .join(format!("tmux-{}", unsafe { libc::getuid() }))
+        .join("default")
+}
+
+/// Where the wake hook lock of the reached server lives: beside its
+/// socket, named after it, so every hive home on that server finds the
+/// same file and no home's own tree could hold it.
+fn hook_lock_path() -> PathBuf {
+    let socket = reached_socket_path();
+    let name = socket
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    socket.with_file_name(format!("{name}.hive-hooks.lock"))
+}
+
+/// The lock every installer and remover of a wake hook holds while it
+/// reads a session's hook arrays and writes its entry back: the arrays
+/// are read-modify-write state shared by every hive home on the server,
+/// and two homes that each read index N free would each write it, the
+/// second wiping the first's wake. The lock is the server's, not any
+/// home's (`hook_lock_path`), and the flock goes with the descriptor, so
+/// a holder that dies holds nothing. Held for the whole of one install
+/// or remove, released on drop.
+struct HookArrayLock {
+    file: std::fs::File,
+}
+
+impl HookArrayLock {
+    /// The reached server's lock, within `HOOK_LOCK_TIMEOUT`; an error
+    /// when the file cannot be opened or the lock is still held at the
+    /// deadline. The socket directory is made the way tmux makes it (the
+    /// user's, mode 0700) when no server has made it yet.
+    fn acquire() -> anyhow::Result<HookArrayLock> {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = hook_lock_path();
+        if let Some(dir) = path.parent() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .map_err(|err| {
+                    anyhow::anyhow!(
+                        "cannot make the tmux socket directory {}: {err}",
+                        dir.display()
+                    )
+                })?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|err| {
+                anyhow::anyhow!("cannot open the wake hook lock {}: {err}", path.display())
+            })?;
+        let deadline = Instant::now() + HOOK_LOCK_TIMEOUT;
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(HookArrayLock { file });
+            }
+            let err = std::io::Error::last_os_error();
+            // EINTR retries on the same deadline; a busy lock is the only
+            // other reason to keep trying.
+            if !matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) {
+                anyhow::bail!("cannot lock the wake hook lock {}: {err}", path.display());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "the wake hook lock {} is still held after {}s",
+                    path.display(),
+                    HOOK_LOCK_TIMEOUT.as_secs()
+                );
+            }
+            thread::sleep(HOOK_LOCK_RETRY_INTERVAL);
+        }
+    }
+}
+
+impl Drop for HookArrayLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+/// The wake hook entries on *session_id*, or the error when tmux does not
+/// answer for it.
+fn wake_hook_entries(session_id: &str) -> anyhow::Result<Vec<HookEntry>> {
+    let listed = run(&["show-hooks", "-t", session_id], true, 5)?;
+    Ok(parse_hook_entries(&listed.stdout))
+}
+
+/// Install this hive home's wake on *session_id* — the session the team's
+/// display sits in, hive's own or one the human lent — one indexed entry
+/// per hook: its own entry is updated in place, a first install takes the
+/// lowest free index, and nothing else in the array is written. The read
+/// of the arrays and the writes back are one critical section under the
+/// server's hook lock, so another home's installer sees this entry before
+/// it picks an index. Every tmux command is checked: a hook that failed to
+/// install is reported, because a desk retiring unwatched behind it could
+/// not be woken.
+pub fn install_wake_hooks(session_id: &str) -> anyhow::Result<()> {
+    if session_id.is_empty() {
+        anyhow::bail!("no session to install the wake hooks on");
+    }
+    let hive = crate::paths::self_exe();
+    let home = wake_hive_home();
+    let command = wake_run_shell(&wake_shell_line(&hive, &wake_environment()));
+    let _lock = HookArrayLock::acquire()?;
+    let entries = wake_hook_entries(session_id)?;
+    for hook in WAKE_HOOKS {
+        let of_hook: Vec<&HookEntry> = entries.iter().filter(|e| e.hook == hook).collect();
+        let mut own = of_hook
+            .iter()
+            .filter(|e| owned_wake_entry(e, &home))
+            .map(|e| e.index);
+        let index = match own.next() {
+            Some(index) => index,
+            None => (0..)
+                .find(|i| of_hook.iter().all(|e| e.index != *i))
+                .unwrap_or(0),
+        };
+        // A second entry of this home's is an older install's leftover.
+        for extra in own {
+            run(
+                &[
+                    "set-hook",
+                    "-u",
+                    "-t",
+                    session_id,
+                    &format!("{hook}[{extra}]"),
+                ],
+                true,
+                5,
+            )?;
+        }
+        run(
+            &[
+                "set-hook",
+                "-t",
+                session_id,
+                &format!("{hook}[{index}]"),
+                &command,
+            ],
+            true,
+            5,
+        )?;
+    }
+    Ok(())
+}
+
+/// Remove this hive home's wake entries from *session_id*, and only those:
+/// what `hive delete` and a display that moved on do once no team of this
+/// home shows in the session. The entries are read and unset under the
+/// server's hook lock, so an index is never unset from a listing another
+/// home has since written to. A session that is gone has nothing to
+/// remove.
+pub fn remove_wake_hooks(session_id: &str) -> anyhow::Result<()> {
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    let home = wake_hive_home();
+    let _lock = HookArrayLock::acquire()?;
+    let Ok(entries) = wake_hook_entries(session_id) else {
+        return Ok(());
+    };
+    for entry in entries.iter().filter(|e| owned_wake_entry(e, &home)) {
+        run(
+            &[
+                "set-hook",
+                "-u",
+                "-t",
+                session_id,
+                &format!("{}[{}]", entry.hook, entry.index),
+            ],
+            true,
+            5,
+        )?;
+    }
+    Ok(())
 }
 
 pub fn install_team_status(session_id: &str) {
@@ -326,24 +663,8 @@ pub fn install_team_status(session_id: &str) {
         let args: Vec<&str> = row.iter().map(String::as_str).collect();
         let _ = run(&args, false, 5);
     }
-}
-
-/// The wake hooks alone, on the team session *team* named itself: what a
-/// hived (re)installs at start, so a session built by an older binary —
-/// or one whose hooks were unset by hand — wakes its desk too. Idempotent;
-/// a session that is not hive's own (a team built in the human's session)
-/// is left alone, its client is the human's already.
-pub fn install_wake_hooks(team: &str) {
-    if !crate::team_display::owns_team_session(team) {
-        return;
-    }
-    let Some(session_id) = crate::tmux::display_value(&format!("{team}:"), "#{session_id}") else {
-        return;
-    };
-    let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
-    for row in wake_hook_argv(&session_id, &hive) {
-        let args: Vec<&str> = row.iter().map(String::as_str).collect();
-        let _ = run(&args, false, 5);
+    if let Err(err) = install_wake_hooks(session_id) {
+        eprintln!("warning: wake hooks on session {session_id}: {err}");
     }
 }
 
@@ -352,5 +673,5 @@ pub(crate) fn install_team_status_checked(session_id: &str) -> anyhow::Result<()
         let args: Vec<&str> = row.iter().map(String::as_str).collect();
         run(&args, true, 5)?;
     }
-    Ok(())
+    install_wake_hooks(session_id)
 }

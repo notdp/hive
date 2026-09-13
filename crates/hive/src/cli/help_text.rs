@@ -272,6 +272,12 @@ Options:
   team also records, or one that is a symlink, is refused before anything
   is stopped. The two exclude each other.
 
+  The stop is forced: unlike the graceful stop an upgrade or `hive gc`
+  asks for, it is not deferred by a workflow node whose result has not
+  been read — every unresolved node is recorded interrupted before the
+  desk exits. The display's session keeps this hive home's wake hooks
+  only while another team of this home still shows a window there.
+
   A member mid-turn refuses the delete: let it finish, or --down. --down is
   the teardown of a workflow run (`hive create RUN`, `hive workflow run`
   nodes, `hive delete RUN --down`): every member is retired first, and the
@@ -377,9 +383,12 @@ Options:
   Logical ownership and OS parentage are separate columns. Missing observations
   are unknown. Tmux display observations use the caller's tmux server; engine
   records use the configured homes. Process discovery covers the OS snapshot.
-  A registered team is running while its hived is up and asleep without one,
-  window or no window (`displayPresent` says which); an unknown hived
-  observation stays unknown.
+  A registered team is running while a `hive --hived` process for exactly its
+  team and workspace is in the process table, and asleep without one, window
+  or no window (`displayPresent` says which); an unknown hived observation
+  stays unknown. Presence is not health. `asleepReason` repeats what the last
+  desk wrote when it retired, or null when there is none to read: a recorded
+  reason, never a promise that the desk comes back on its own.
 
 Options:
   --json      Print a JSON array, one resource object per line.
@@ -393,6 +402,9 @@ Options:
 
   With no argument, probes yourself. With an agent name, probes that peer —
   pane liveness, transcript readability, hived heartbeat, runtime input state.
+
+  The heartbeat is asked of a running desk, so this starts one where none
+  is up: it is a diagnosis, not a read-only look (`hive ps` is that).
 
   Examples:
     hive doctor                  # probe self
@@ -647,20 +659,26 @@ Commands:
 "#
         }
         ["wake"] => {
-            r#"Usage: hive wake --window TARGET
+            r#"Usage: hive wake (--session ID | --window TARGET)
 
-  Bring the team window's hived back.
+  Bring back the hiveds of the teams a tmux session shows.
 
-  Run by the two hooks the team session carries (`client-attached`,
-  `client-session-changed`) with the session's current window as TARGET:
-  a desk that retired because no terminal was attached to its window
-  (`hived.sleep unwatched`) is started again the moment someone looks, so
-  the status bar and the pane colours are live without a hive verb being
-  typed. A window that is not a team window, or a team whose hived is
-  already up, is left alone; prints nothing and exits 0 either way.
+  Hidden: run by the two hooks hive installs on a session showing a team
+  window (`client-attached`, `client-session-changed`), which name the
+  client's session by id. Every window of that session carrying a full
+  instance tag set (team, workspace, createdAt) that names a team of this
+  hive home is looked at, once per team: a desk that retired because no
+  terminal was attached (`hived.sleep unwatched`, the `run/desk.asleep`
+  marker) is started again the moment someone looks, so the status bar
+  and the pane colours are live without a hive verb being typed. Left
+  alone: a window that is not a team window, a same-named window of
+  another hive home or an earlier instance, a team whose hived is up, and
+  a team whose desk never ran or retired for another reason (the marker
+  is missing or says otherwise). Prints nothing and exits 0 either way.
 
 Options:
-  --window TARGET  The window the client arrived at (`session:index`)
+  --session ID     The session the client arrived at (`$3`)
+  --window TARGET  A window of it (`session:index`); its session is scanned
   -h, --help       Show this message and exit.
 "#
         }
@@ -801,6 +819,10 @@ Options:
   docs/runtime-model.md for semantics. `self` is a string pointer: look
   yourself up in `members[]` for your own state.
 
+  Those fields come from the team's hived, so this verb starts one where
+  none is up and the desk then stays for its own idle stretch. `hive ps`
+  is the inventory that starts nothing.
+
   If the current tmux window has no team bound, returns a bootstrap payload
   instead: `team=null`, a pane list, and a `hint` telling you to run `hive
   create`.
@@ -858,7 +880,13 @@ Options:
 
   Nothing else moves: no receipt, no PATH edit, no plugin sync, no restart
   of the hived or of any member. An already-running hived keeps its own
-  image until it picks the new bytes up on its own.
+  image until it picks the new bytes up, which happens one of two ways and
+  the wall clock does not decide which: the desk itself re-execs in place
+  (same pid) at one of its 5s checks, once two of them agree on the new
+  binary and no request or unfinished workflow node is outstanding; or a
+  hive verb gets there first, finds a build that is not its own on the
+  socket and replaces that generation with a new pid. Either way the
+  in-memory state — engine clients, idle clock, idle-notify — starts over.
 
   Exit codes: without --check, 0 whenever nothing is wrong (installed,
   already latest, ahead of the release) and non-zero on failure. With

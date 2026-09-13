@@ -6,6 +6,13 @@
 //! runtime owns it from there; what a codex/grok delivery leaves behind is
 //! the engine's turn handle in the dispatch journal (`operations.rs`), read
 //! at the engine's own turn end for `node-result`.
+//!
+//! The desk's own life — who starts one and what a start refuses
+//! (`lifecycle.rs`), the six ways a running one leaves, the periods of the
+//! checks that find them, the admission preflight a side-effect request
+//! goes through (`server.rs`, `state.rs`) and the three sleep reasons of
+//! which only `unwatched` is woken by a session hook (`sleep.rs`) — is
+//! documented whole under "The team's desk" in `docs/runtime-model.md`.
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -59,6 +66,9 @@ pub const NOTIFY_DEBUG_HEARTBEAT_SECONDS: f64 = 30.0;
 pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_SLEEP_AFTER_SECONDS: f64 = 600.0;
+/// How long a desk waits before asking tmux again to install the wake
+/// hooks a failed install left off its session.
+pub const WAKE_HOOK_RETRY_SECONDS: f64 = 30.0;
 // The display (tmux server) is probed every tick while it answers — that
 // listing is the pane snapshot the status and view ticks read — and on a
 // doubling schedule capped here while it does not. A dead server must not
@@ -77,7 +87,11 @@ pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
 // scheduling and payload plumbing. A send blocks on nothing else: it
 // returns the moment the transport accepts.
 pub const REQUEST_SLACK: f64 = 5.0;
-pub const HIVED_API_VERSION: i64 = 5;
+// The socket protocol's own version, for identification only: a request
+// with a side effect is admitted on its connection first (`admit`), and a
+// hived of another api is not sent one. Bumped with the wire format, never
+// with the crate's release.
+pub const HIVED_API_VERSION: i64 = 6;
 pub const BUSY_OUTPUT_THRESHOLD_SECONDS: f64 = 3.0;
 // A probed session id only speaks for the session it saw: nothing tells the
 // hived that the human typed `/new` in an unmanaged pane, so the snapshot
