@@ -182,9 +182,15 @@ impl SleepState {
             reopen_admission();
             return false;
         }
+        // Only this desk's own clients go. A grok leader is the member's
+        // own process, and the TUI in its pane is one of its clients: a
+        // reap here would take the human's session down with it. Retiring
+        // for want of a viewer is not authority to collect someone else's
+        // engine. The price is a leader that outlives the desk; the next
+        // send reuses it if it is still up, else starts one from the
+        // session record.
         for key in keys {
             hooked_gl_pool_drop_key(&key);
-            hooked_gl_park_daemon_key(&key);
         }
         true
     }

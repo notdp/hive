@@ -46,7 +46,6 @@ pub struct FakeAdapter {
 #[derive(Default)]
 pub struct Hook {
     pub monotonic: Option<F0<f64>>,
-    pub gl_park_daemon_key: Option<S1<()>>,
     pub gl_idle_owned_keys: Option<S1<Option<Vec<String>>>>,
     pub after_accept: Option<F0<()>>,
     // adapters / gate
