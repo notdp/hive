@@ -18,92 +18,49 @@ use crate::adapters::base::washed_spawner_env;
 // daemon lifecycle
 // --------------------------------------------------------------------------
 
-/// Connect budget for a liveness probe: a unix connect to a listening
-/// socket completes in microseconds; anything longer is not a live leader.
-const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
-
-/// True when a listener accepts a connection on the socket.
+/// True when a leader holds the key's lock and its socket is on disk.
 ///
-/// No ACP traffic: the leader's socket protocol is private, so the probe is
-/// the connect alone. A socket file whose leader died refuses; a pidfile is
-/// not consulted, because a pid can be dead or reused by an unrelated
-/// process while the file still names it.
+/// Not a connection. grok (1.0.30) takes every connection on the socket
+/// for a client and, until its first client has registered, stalls that
+/// registration about ten seconds for each bare connection it accepted:
+/// a connect-and-close probe in the window between a leader's spawn and
+/// its first client put the hived's revive handshake past its budget
+/// every time (an established leader, one client registered, shrugs a
+/// probe off). The leader takes an flock on `<key>.lock`, its pid inside,
+/// before it binds the socket and holds it until it exits, so the lock is
+/// the liveness signal and costs the leader nothing. The socket file alone
+/// is not it: a leader that died leaves the file, and a bare listener on
+/// the path is no leader. The pid in the file is not consulted either — a
+/// pid can be dead or reused while the file still names it.
 pub fn probe_socket(socket_path: &Path) -> bool {
-    socket_path.exists() && connect_within(socket_path, PROBE_TIMEOUT).is_ok()
+    socket_path.exists() && leader_holds_lock(socket_path).unwrap_or(false)
 }
 
-/// The probe's connect with its error kept: a refused or missing socket is
-/// a leader that died, anything else (a timeout, a permission error) a
-/// socket the caller cannot judge.
-pub(crate) fn probe_connect(socket_path: &Path) -> io::Result<()> {
-    connect_within(socket_path, PROBE_TIMEOUT)
-}
+/// Whether a leader holds the lock beside *socket_path*: `Ok(false)` when
+/// no file or nobody holds it (a leader that died or never came), `Err`
+/// when the lock cannot be tried (a permission error — a leader the
+/// caller cannot judge).
+pub(crate) fn leader_holds_lock(socket_path: &Path) -> io::Result<bool> {
+    use std::os::unix::io::AsRawFd;
 
-/// Non-blocking unix connect that gives up after *timeout*.
-fn connect_within(socket_path: &Path, timeout: Duration) -> io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::io::{FromRawFd, OwnedFd};
-
-    let bytes = socket_path.as_os_str().as_bytes();
-    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    if bytes.len() >= addr.sun_path.len() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "socket path too long",
-        ));
-    }
-    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
-        *dst = *src as libc::c_char;
-    }
-    let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
-    if raw < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let _fd = unsafe { OwnedFd::from_raw_fd(raw) }; // closed on every return
-    let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-    let rc = unsafe { libc::connect(raw, &addr as *const _ as *const libc::sockaddr, len) };
-    if rc == 0 {
-        return Ok(());
-    }
-    let err = io::Error::last_os_error();
-    if err.raw_os_error() != Some(libc::EINPROGRESS) {
-        return Err(err);
-    }
-    let mut pfd = libc::pollfd {
-        fd: raw,
-        events: libc::POLLOUT,
-        revents: 0,
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(socket_path.with_extension("lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
     };
-    let ready = unsafe { libc::poll(&mut pfd, 1, timeout.as_millis() as libc::c_int) };
-    if ready < 0 {
-        return Err(io::Error::last_os_error());
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+        return Ok(false);
     }
-    if ready == 0 {
-        return Err(io::Error::new(io::ErrorKind::TimedOut, "connect timed out"));
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return Ok(true);
     }
-    let mut so_err: libc::c_int = 0;
-    let mut so_len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-    let rc = unsafe {
-        libc::getsockopt(
-            raw,
-            libc::SOL_SOCKET,
-            libc::SO_ERROR,
-            &mut so_err as *mut _ as *mut libc::c_void,
-            &mut so_len,
-        )
-    };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if so_err != 0 {
-        return Err(io::Error::from_raw_os_error(so_err));
-    }
-    Ok(())
+    Err(error)
 }
 
 /// The spawned leader as `spawn_daemon_key` sees it: pid, exit poll, terminate.
@@ -479,10 +436,10 @@ fn spawn_daemon_key(key: &str, env: HashMap<String, String>, grok_bin: &str, tim
         if child.poll().is_some() {
             return false; // died before binding
         }
-        if sock.exists() {
+        if probe_socket(&sock) {
             // Names only a leader hive spawned: `leader_pid` trusts it after
             // an identity check, and the hived reads its mtime as the newborn
-            // grace. Liveness is the socket connect, never this pid.
+            // grace. Liveness is the leader's lock, never this pid.
             let _ = fs::write(sock.with_extension("pid"), child.pid().to_string());
             return true;
         }

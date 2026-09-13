@@ -98,6 +98,7 @@ mod tests {
         let sock = tmp.path().join("g/hive/l-ab12.sock");
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
         let _leader = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let _lock = grok_leader::tests::hold_leader_lock(&sock);
         grok_leader::write_session_key("l-ab12", "sid-1", "/w", None).unwrap();
         let target = Target {
             team: "honey".into(),

@@ -1005,19 +1005,16 @@ fn codex_turn_open(thread_id: &str) -> Result<Option<bool>, String> {
         .ok_or_else(|| "codex daemon did not answer".to_string())
 }
 
-/// Whether a grok leader listens on *socket*: Ok(false) when the path is
-/// gone or refuses (a leader that died), Err for any other failure (a
-/// timeout, a permission error — a socket the collector cannot judge).
+/// Whether a grok leader serves *socket*: Ok(false) when the socket is
+/// gone or nobody holds the leader's lock beside it (a leader that died),
+/// Err when the lock cannot be tried (a permission error — a socket the
+/// collector cannot judge). Never a connection (`grok_leader::probe_socket`).
 fn grok_leader_listens(socket: &Path) -> Result<bool, String> {
     if !socket.exists() {
         return Ok(false);
     }
-    match crate::adapters::grok_leader::probe_connect(socket) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => Ok(false),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(format!("grok leader socket {}: {e}", socket.display())),
-    }
+    crate::adapters::grok_leader::leader_holds_lock(socket)
+        .map_err(|e| format!("grok leader lock beside {}: {e}", socket.display()))
 }
 
 /// Everything one run of the collector reads once and shares: the tmux
