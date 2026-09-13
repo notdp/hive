@@ -1839,6 +1839,61 @@ fn test_resolve_pane_key_uses_member_tags() {
 }
 
 #[test]
+fn test_write_pane_session_keeps_the_mint_binding_on_the_same_session() {
+    let _bed = setup();
+    let mut tags = HashMap::new();
+    tags.insert(
+        ("%9".to_string(), "hive-team".to_string()),
+        "honey".to_string(),
+    );
+    tags.insert(
+        ("%9".to_string(), "hive-agent".to_string()),
+        "rex".to_string(),
+    );
+    set_pane_options(tags);
+    let binding = RecordBinding {
+        team: "honey".to_string(),
+        created_at: "1700000000".to_string(),
+        member: "rex".to_string(),
+    };
+    write_session_key("m-honey.rex", "sid-1", "/w", Some(&binding)).unwrap();
+    // the pane TUI launched onto the minted session writes its record
+    write_pane_session("%9", "sid-1", "/w2").unwrap();
+    let record = read_session_key("m-honey.rex").unwrap();
+    assert_eq!(record.session_id, "sid-1");
+    assert_eq!(record.cwd, "/w2");
+    assert_eq!(record.binding, Some(binding));
+}
+
+#[test]
+fn test_write_pane_session_unbinds_another_session_on_a_member_key() {
+    let _bed = setup();
+    let mut tags = HashMap::new();
+    tags.insert(
+        ("%9".to_string(), "hive-team".to_string()),
+        "honey".to_string(),
+    );
+    tags.insert(
+        ("%9".to_string(), "hive-agent".to_string()),
+        "rex".to_string(),
+    );
+    set_pane_options(tags);
+    let binding = RecordBinding {
+        team: "honey".to_string(),
+        created_at: "1700000000".to_string(),
+        member: "rex".to_string(),
+    };
+    write_session_key("m-honey.rex", "sid-1", "/w", Some(&binding)).unwrap();
+    write_pane_session("%9", "sid-2", "/w").unwrap();
+    let record = read_session_key("m-honey.rex").unwrap();
+    assert_eq!(record.session_id, "sid-2");
+    assert_eq!(record.binding, None);
+    // an untagged pane never carries a binding
+    write_pane_session("%7", "sid-3", "/w").unwrap();
+    assert_eq!(read_session_key("p7").unwrap().binding, None);
+}
+
+#[test]
 fn test_list_daemon_keys_filters_to_daemon_sockets() {
     let bed = setup();
     let hive_dir = bed.tmp.path().join("hive");

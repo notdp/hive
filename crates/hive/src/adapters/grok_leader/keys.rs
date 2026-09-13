@@ -220,8 +220,18 @@ pub fn bind_session_key(key: &str, binding: Option<&RecordBinding>) -> Result<()
     Ok(())
 }
 
+/// The pane TUI's record write at launch (`hive grok` on a pane). A member
+/// pane resolves to its member key, whose record the mint has already
+/// written with its binding before the TUI is launched onto the session:
+/// that binding stays when the TUI carries the same session, so the record
+/// the mint bound is not unbound by the launch that follows it. Another
+/// session on the key is a record the mint did not write; it starts unbound.
 pub fn write_pane_session(pane: &str, session_id: &str, cwd: &str) -> Result<()> {
-    write_session_key(&resolve_pane_key(pane), session_id, cwd, None)
+    let key = resolve_pane_key(pane);
+    let binding = read_session_key(&key)
+        .filter(|record| record.session_id == session_id)
+        .and_then(|record| record.binding);
+    write_session_key(&key, session_id, cwd, binding.as_ref())
 }
 
 /// The session hive minted for a key, with the cwd recorded at spawn and
