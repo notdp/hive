@@ -1687,6 +1687,20 @@ fn matching_ping(ws: &std::path::Path, team: &str, home: &std::path::Path) -> bo
     })
 }
 
+/// The `hive wake` jobs still running: both session hooks fire on an
+/// attach, and the second one waits on the startup lock until the first
+/// has the desk up — a straggler that a delete must not race.
+fn wake_jobs() -> usize {
+    let out = Command::new("ps")
+        .args(["-axo", "command="])
+        .output()
+        .expect("ps runs");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| line.contains(" wake --session "))
+        .count()
+}
+
 fn marker_path(ws: &std::path::Path) -> PathBuf {
     hive::hived::asleep_marker_path(ws.to_str().unwrap())
 }
@@ -1958,5 +1972,6 @@ fn test_wake_after_a_failed_bind_keeps_the_marker_then_succeeds() {
         marker(&rig.ws()).is_none(),
         "the ready desk cleared the marker"
     );
+    wait_until("the wake jobs to finish", || wake_jobs() == 0);
     rig.delete();
 }
