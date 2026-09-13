@@ -431,20 +431,15 @@ pub(crate) fn run_shell_body(command: &str) -> Option<String> {
     unwrap(rest)
 }
 
-/// Whether a listed entry is this hive home's wake — one carrying this
-/// home's `HIVE_HOME` assignment, or the older unindexed form that named
-/// this binary and no home at all (installed before homes were baked in).
-pub(crate) fn owned_wake_entry(entry: &HookEntry, home: &str, hive: &str) -> bool {
-    let Some(body) = run_shell_body(&entry.command) else {
-        return false;
-    };
-    if body.starts_with(&wake_home_token(home)) {
-        return body.contains(" wake --");
-    }
-    body.starts_with(&format!(
-        "{} wake --window ",
-        crate::shell::shlex_quote(hive)
-    ))
+/// Whether a listed entry is this hive home's wake: one whose command
+/// starts with this home's `HIVE_HOME` assignment. The home an entry
+/// bakes is the only proof of whose it is — an older, home-less
+/// `wake --window` entry names a binary, and a binary is shared by every
+/// home installed from it, so such an entry is nobody's to claim, update
+/// or remove.
+pub(crate) fn owned_wake_entry(entry: &HookEntry, home: &str) -> bool {
+    run_shell_body(&entry.command)
+        .is_some_and(|body| body.starts_with(&wake_home_token(home)) && body.contains(" wake --"))
 }
 
 /// The wake hook entries on *session_id*, or the error when tmux does not
@@ -472,7 +467,7 @@ pub fn install_wake_hooks(session_id: &str) -> anyhow::Result<()> {
         let of_hook: Vec<&HookEntry> = entries.iter().filter(|e| e.hook == hook).collect();
         let mut own = of_hook
             .iter()
-            .filter(|e| owned_wake_entry(e, &home, &hive))
+            .filter(|e| owned_wake_entry(e, &home))
             .map(|e| e.index);
         let index = match own.next() {
             Some(index) => index,
@@ -517,12 +512,11 @@ pub fn remove_wake_hooks(session_id: &str) -> anyhow::Result<()> {
     if session_id.is_empty() {
         return Ok(());
     }
-    let hive = crate::paths::self_exe();
     let home = wake_hive_home();
     let Ok(entries) = wake_hook_entries(session_id) else {
         return Ok(());
     };
-    for entry in entries.iter().filter(|e| owned_wake_entry(e, &home, &hive)) {
+    for entry in entries.iter().filter(|e| owned_wake_entry(e, &home)) {
         run(
             &[
                 "set-hook",
