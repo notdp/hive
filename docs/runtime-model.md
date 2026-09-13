@@ -106,10 +106,11 @@ Consequences across modules:
   `run/desk.asleep` for the next generation's start to remove, and performs
   owner-checked socket cleanup. The leader on a member's socket is grok's
   own process and the TUI in that member's pane is one of the leader's
-  clients, so retiring signals neither: a leader outliving the desk is the
-  price of the pane's session surviving it. Session records and aliases
-  survive either way; the next send reuses a leader still up, or starts one
-  and loads the recorded session. Runtime reads start no leader. Codex
+  clients, so retiring signals neither: the leader lives by its client
+  references (see "Grok: the leader daemon"), and closing the desk's own
+  client is the desk's whole part in its exit. Session records and aliases
+  survive either way; the next send reuses a leader still up, or revives
+  one from the recorded session. Runtime reads start no leader. Codex
   shared daemons are left to their home. The existing ensure
   path starts the next generation on demand, including a subsequent send or
   attach — and including `hive team` and `hive doctor`, which augment their
@@ -598,6 +599,21 @@ runner refuses a claude member before anything is spawned.
   `dispatchUnknown`, which the runner treats as a lost answer, not a
   refusal. It cannot recover a turn id from that response, so result
   queries remain unknown.
+- **Reuse of a retained member.** A member of the node's name still alive
+  is reused, and for grok "alive" includes `retained` — the roster row's
+  leader has exited and its session record still names it. Such a member
+  has no leader to ask about its turn, so before the readiness wait the
+  runner sends the hived one admitted `revive` (`WorkflowOp::Revive`): the
+  hived re-checks the binding, raises the leader and `session/load`s the
+  recorded session under its own client, and answers with the loaded
+  state. The `retained` the runtime reported is a snapshot; the revive's
+  own check is the authority. A revive the hived refuses (binding no
+  longer holds, leader did not start, load failed) ends the run with that
+  reason before anything is dispatched — the member is not retired and
+  not replaced, its session not discarded. A successful revive changes
+  nothing about readiness: the wait below still opens the dispatch only on
+  the engine's own "no turn open", and an unknown answer after a revive
+  holds the dispatch exactly as it would for any member.
 - **Readiness.** The runner dispatches only between turns, and only on a
   positive reading from the engine's own daemon that no turn is open. The
   runner asks the hived's `turn-open` for the member and the hived queries
@@ -825,8 +841,8 @@ home shows a window there any more.
 
 ### Admission: a side effect is admitted before it is sent
 
-`send`, `node-dispatch`, `connect-codex` and `connect-grok` are sent in two
-steps on one connection. The client writes `{"action":"admit","forAction":…}`
+`send`, `node-dispatch`, `connect-codex`, `connect-grok` and `revive` are
+sent in two steps on one connection. The client writes `{"action":"admit","forAction":…}`
 and waits; the hived reserves the request's lease at accept, answers
 `{"ok":true,"admitted":true,"apiVersion":N}`, and only then does the client
 write the real payload. The lease spans the preflight, the body and the
@@ -885,6 +901,21 @@ member has no TTY to read; there the evidence is the daemon's own state for
 the threadId or the member key, and its absence reports the runtime dead. For
 claude the evidence is the bg job's engine state and not the pane TTY at all:
 a viewer gap (reattach window, closed viewer) is not member death.
+
+**`retained`** — grok only, and only on a member with no leader answering:
+`cliAlive` is false, and `retained` says whether a submission would revive
+the member's own session rather than fail. It is true when the key's
+session record is bound to this member on this team instance
+(`grok_leader::binding_holds`: the record names the team, its
+`created_at_key` and the member; the registry holds that instance; the
+roster row is a grok row on the record's session id) and nothing listens
+on the socket. A same-named team recreated since, a member respawned onto
+another session, a row killed off, or a record without the binding fields
+is not retained. `alive` on a headless row is `cliAlive || retained`, and
+`Team::member_alive` reads it the same way; `hive doctor` prints `alive`
+(alive or retained) beside `cliAlive` and `retained`. The field is a
+snapshot: the hived re-runs the same check at the submission, and the
+runtime read itself starts no leader.
 
 **`inputState`** — whether the agent is waiting for a human answer. The send
 gate consumes it and refuses a send to a waiting target. One waiver exists:
@@ -1313,6 +1344,52 @@ A terminal launcher uses `l-<id>` instead. On create/join, the member's
 `m-<team>.<member>.alias` names that launch key; socket and session-record
 lookups follow it, so binding does not rename a live socket or restart the
 leader. The alias also lets member teardown reach that leader.
+
+### The leader lives by its client references
+
+Hive spawns every leader — member key and launch key alike, one argv —
+without `--no-exit-on-disconnect`, so grok's own rule holds: the leader
+runs while any client holds it and exits on its own shortly after the last
+one disconnects. Its clients are real processes: the TUI in the member's
+pane (or at the launcher's terminal), the hived's pool client for the key,
+and any stdio client a `hive` call from inside the member's tools left
+behind. Closing a pane therefore does not end a member whose desk is awake
+— the hived's client still holds the leader — and a desk retiring for want
+of a viewer drops only its own clients: the leader exits once no TUI holds
+it either, and a TUI still open keeps it. Nothing hive does signals a
+leader on this path; `hive kill`, `hive delete --down` and the hived's
+orphan reap are the explicit ends, unchanged.
+
+What the exit leaves is the session record — `{sessionId, cwd, team,
+createdAt, member}`, the binding written at the mint (`session/new`, the
+resume and fork lanes) or when a create/join binds a launch
+(`bind_launch`, which binds the record before it publishes the alias and
+puts the previous binding back when the alias is refused; a rollback
+clears only its own). The member is `retained` while that binding holds
+(the field above). A record from before the binding existed carries no
+`team`/`createdAt`/`member` and is never retained: such a member is
+killed and spawned again, or its terminal re-runs create/join; hive does
+not guess a binding onto a same-named record.
+
+**Revive** is the one path that raises a member's leader again, and it
+runs only at a submission's entry: `hive send` (`send_payload`, after the
+target resolves and before the send gate) and the workflow runner's
+`revive` request before it waits on a reused member's turn. It re-checks
+the binding here and now, raises the member daemon when nothing listens
+(an online member is a no-op: `revived: false`, distinct from a failure),
+clears the connect cooldown a cold runtime read left, and handshakes —
+`initialize`, then `session/load` of the recorded session. No prompt is
+sent and no bus row is written by a revive. The send gate then reads the
+state the load replayed: a session that loads mid-permission is
+`waiting_user` and the send is refused there, before any row; a load that
+fails is an explicit refusal, never a send into a session that did not
+load. From the revive to the prompt the submission rides the client the
+revive confirmed: a record that names another session by then, a client
+rebound since, or a leader gone is a failed submission — nothing loads the
+new session or raises a leader on the pool's submission path, and nothing
+is sent twice. Where the row was already written (`bus::write_send_event`
+precedes the engine call), that row and its terminal operation stay:
+a refused transport after the row is not a row to delete.
 
 - **Session ownership.** The leader keeps every session of the cwd, so which
   one belongs to this member is not discoverable from it. Hive names the
