@@ -2063,7 +2063,7 @@ fn test_cleanup_reads_a_bound_launchs_grace_from_its_alias_not_the_leaders_pidfi
 struct SuperState {
     panes: Vec<(String, String, String)>, // pane_id, agent, cli
     recorded: Vec<String>,
-    record_sockets: HashMap<String, String>, // pane -> tmuxSocket; absent = legacy record
+    record_sockets: HashMap<String, String>, // pane -> tmuxSocket; absent = names no server
     own_socket: Option<String>,
     threads: HashMap<String, String>,
     cwds: HashMap<String, String>,
@@ -2208,6 +2208,11 @@ fn test_supervisor_healthy_world_does_nothing() {
 fn test_supervisor_prunes_records_of_dead_panes_and_releases_their_threads() {
     let mut state = super_state();
     state.recorded = vec!["%1".to_string(), "%dead".to_string()];
+    let own = state
+        .own_socket
+        .clone()
+        .expect("the fixture names its server");
+    state.record_sockets.insert("%dead".to_string(), own);
     state
         .threads
         .insert("%dead".to_string(), "tid-dead".to_string());
@@ -6372,19 +6377,16 @@ fn test_supervisor_reaps_only_records_of_its_own_server() {
 }
 
 #[test]
-fn test_supervisor_on_private_server_leaves_legacy_records_alone() {
+fn test_supervisor_leaves_a_record_that_names_no_server_alone() {
+    // %dead has no tmuxSocket: nobody's to reap, on a private server and
+    // on the default one alike.
     let mut state = super_state();
     state.own_socket = Some("/x/tmux-501/e2e".to_string());
     state.recorded = vec!["%1".to_string(), "%dead".to_string()];
-    // no tmuxSocket on %dead: written by the pre-field binary
     assert_eq!(reap_calls(state), Vec::<String>::new());
-}
-
-#[test]
-fn test_supervisor_on_default_server_reaps_legacy_records() {
     let mut state = super_state();
     state.recorded = vec!["%1".to_string(), "%dead".to_string()];
-    assert_eq!(reap_calls(state), vec!["clear %dead".to_string()]);
+    assert_eq!(reap_calls(state), Vec::<String>::new());
 }
 
 #[test]

@@ -604,12 +604,6 @@ pub(crate) fn build_cli() -> Command {
                     Arg::new("session")
                         .long("session")
                         .value_name("ID")
-                        .conflicts_with("window"),
-                )
-                .arg(Arg::new("window").long("window").value_name("TARGET"))
-                .group(
-                    clap::ArgGroup::new("wake_target")
-                        .args(["session", "window"])
                         .required(true),
                 ),
         )
@@ -1127,7 +1121,7 @@ fn dispatch(matches: &ArgMatches) {
             _ => unreachable!("subcommand required"),
         },
         Some(("resume-hint", m)) => launch::resume_hint_cmd(arg_str(m, "cli_name")),
-        Some(("wake", m)) => attach::wake_cmd(arg_str(m, "session"), arg_str(m, "window")),
+        Some(("wake", m)) => attach::wake_cmd(arg_str(m, "session")),
         Some(("shell-init", m)) => setup::shell_init_cmd(arg_str(m, "shell")),
         Some(("uninstall", m)) => {
             uninstall::uninstall_cmd(m.get_flag("force"), m.get_flag("purge"))

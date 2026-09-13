@@ -40,7 +40,14 @@ hive plugin setup
 
 Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin ships no hooks (hooks would sit behind codex's hook-review dialog) — hive's own codex launch path re-adds the plugin when the binary version changes, before the engine starts. The plugin payload is local; registration updates the agent CLIs' plugin settings.
 
-Requires:
+Requires (hive is written against these exact versions — the versions on the machine it is developed on — and carries no compatibility code for older ones; upgrade the engine, then hive):
+
+- `tmux` 3.7c
+- `claude` 2.1.263 (Claude Code)
+- `codex-cli` 0.153.4
+- `grok` 1.0.30
+
+Notes on why:
 
 - `tmux` 3.5+ — hive keeps a control-mode client (the hived's pane monitor) on every team session, and tmux answers a pane's OSC 10/11 colour query from that client, which it never gave real colours: on tmux 3.4 codex and `hive view` in a team pane are told the background is black and draw dark on a light terminal. From 3.5 hive reports the pane's colours itself (`refresh-client -r`, following `view.theme`, then `HIVE_APPEARANCE` / `COLORFGBG`, light by default). `hive create`, `hive doctor` and `hive plugin setup` warn on an older tmux. The `hive cvim` / `hive vim` popups need 3.2+
 - a Rust toolchain — only for the build-from-source route; the installer ships prebuilt binaries

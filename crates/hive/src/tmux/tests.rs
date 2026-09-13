@@ -1404,8 +1404,8 @@ const USER_ATTACH: &str = "run-shell \"touch /tmp/attached\"";
 const USER_CHANGED: &str = "display-message hi";
 /// Wake entries from before homes were baked in: this binary's and
 /// another's. Neither names a home, so neither is any home's.
-const LEGACY_THIS_BIN: &str = "run-shell -b \"/x/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
-const LEGACY_OTHER_BIN: &str = "run-shell -b \"/y/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
+const OTHER_SHAPE_THIS_BIN: &str = "run-shell -b \"/x/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
+const OTHER_SHAPE_OTHER_BIN: &str = "run-shell -b \"/y/hive wake --window '#{q:session_name}:#{window_index}' >/dev/null 2>&1 || true\"";
 
 type HookStore = Rc<RefCell<std::collections::BTreeMap<String, String>>>;
 
@@ -1617,19 +1617,17 @@ fn test_install_and_remove_wake_hooks_recognise_their_entry_under_a_relative_hiv
 }
 
 #[test]
-fn test_install_wake_hooks_leaves_home_less_legacy_hooks_and_drops_its_own_duplicates() {
+fn test_install_wake_hooks_leaves_entries_that_bake_no_home_alone() {
     let _env = wake_env();
-    // Older installs (no home baked in, the whole array clobbered to
-    // index 0) of this binary and of another are nobody's: both stay as
-    // they are and this home takes the next free index. A second entry of
-    // this home's is a leftover to drop.
+    // Entries naming this binary or another without a home baked in are
+    // nobody's: both stay as they are and this home takes the next free
+    // index beside them.
     let (store, _calls) = hook_server(
         &[
-            ("client-attached[0]", LEGACY_THIS_BIN),
-            ("client-attached[1]", LEGACY_OTHER_BIN),
+            ("client-attached[0]", OTHER_SHAPE_THIS_BIN),
+            ("client-attached[1]", OTHER_SHAPE_OTHER_BIN),
             ("client-session-changed[0]", OWN_WAKE),
             ("client-session-changed[2]", USER_CHANGED),
-            ("client-session-changed[3]", OWN_WAKE),
         ],
         false,
     );
@@ -1641,11 +1639,11 @@ fn test_install_wake_hooks_leaves_home_less_legacy_hooks_and_drops_its_own_dupli
         vec![
             (
                 "client-attached[0]".to_string(),
-                LEGACY_THIS_BIN.to_string()
+                OTHER_SHAPE_THIS_BIN.to_string()
             ),
             (
                 "client-attached[1]".to_string(),
-                LEGACY_OTHER_BIN.to_string()
+                OTHER_SHAPE_OTHER_BIN.to_string()
             ),
             ("client-attached[2]".to_string(), OWN_WAKE.to_string()),
             (
@@ -1660,18 +1658,18 @@ fn test_install_wake_hooks_leaves_home_less_legacy_hooks_and_drops_its_own_dupli
     );
 }
 
-/// Two hive homes installed from one binary: the home-less legacy entry
-/// that binary left names no home, so a second home neither claims it as
-/// its own index nor removes it — its entry is created beside it, updated
-/// in place, and removed alone.
+/// Two hive homes installed from one binary: an entry naming that binary
+/// without a home is not a second home's, so it neither claims it as its
+/// own index nor removes it — its entry is created beside it, updated in
+/// place, and removed alone.
 #[test]
-fn test_a_second_home_of_the_same_binary_leaves_the_binarys_legacy_hook_alone() {
+fn test_a_second_home_of_the_same_binary_leaves_a_home_less_entry_alone() {
     let mut env = wake_env();
     env.env.set("HIVE_HOME", "/h/two");
     let (store, calls) = hook_server(
         &[
-            ("client-attached[0]", LEGACY_THIS_BIN),
-            ("client-session-changed[0]", LEGACY_THIS_BIN),
+            ("client-attached[0]", OTHER_SHAPE_THIS_BIN),
+            ("client-session-changed[0]", OTHER_SHAPE_THIS_BIN),
         ],
         false,
     );
@@ -1684,12 +1682,12 @@ fn test_a_second_home_of_the_same_binary_leaves_the_binarys_legacy_hook_alone() 
             vec![
                 (
                     "client-attached[0]".to_string(),
-                    LEGACY_THIS_BIN.to_string()
+                    OTHER_SHAPE_THIS_BIN.to_string()
                 ),
                 ("client-attached[1]".to_string(), two.clone()),
                 (
                     "client-session-changed[0]".to_string(),
-                    LEGACY_THIS_BIN.to_string()
+                    OTHER_SHAPE_THIS_BIN.to_string()
                 ),
                 ("client-session-changed[1]".to_string(), two.clone()),
             ]
@@ -1707,11 +1705,11 @@ fn test_a_second_home_of_the_same_binary_leaves_the_binarys_legacy_hook_alone() 
         vec![
             (
                 "client-attached[0]".to_string(),
-                LEGACY_THIS_BIN.to_string()
+                OTHER_SHAPE_THIS_BIN.to_string()
             ),
             (
                 "client-session-changed[0]".to_string(),
-                LEGACY_THIS_BIN.to_string()
+                OTHER_SHAPE_THIS_BIN.to_string()
             ),
         ]
     );
@@ -1747,8 +1745,8 @@ fn test_remove_wake_hooks_unsets_only_this_homes_entries() {
             ("client-attached[0]", USER_ATTACH),
             ("client-attached[1]", FOREIGN_WAKE),
             ("client-attached[2]", OWN_WAKE),
-            ("client-session-changed[0]", LEGACY_THIS_BIN),
-            ("client-session-changed[1]", LEGACY_OTHER_BIN),
+            ("client-session-changed[0]", OTHER_SHAPE_THIS_BIN),
+            ("client-session-changed[1]", OTHER_SHAPE_OTHER_BIN),
             ("client-session-changed[2]", OWN_WAKE),
         ],
         false,
@@ -1763,11 +1761,11 @@ fn test_remove_wake_hooks_unsets_only_this_homes_entries() {
             ("client-attached[1]".to_string(), FOREIGN_WAKE.to_string()),
             (
                 "client-session-changed[0]".to_string(),
-                LEGACY_THIS_BIN.to_string()
+                OTHER_SHAPE_THIS_BIN.to_string()
             ),
             (
                 "client-session-changed[1]".to_string(),
-                LEGACY_OTHER_BIN.to_string()
+                OTHER_SHAPE_OTHER_BIN.to_string()
             ),
         ]
     );

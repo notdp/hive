@@ -546,7 +546,7 @@ fn test_notifications_before_load_response_are_discarded() {
 fn turn_completed_for(session_id: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
-        "method": "_x.ai/session_notification",
+        "method": "_x.ai/session/update",
         "params": {
             "sessionId": session_id,
             "update": {"sessionUpdate": "turn_completed", "stop_reason": "end_turn"},
@@ -600,10 +600,10 @@ fn test_replayed_history_is_turn_evidence_but_not_display_state() {
     teardown(&client, &proc);
 }
 
-/// grok 1.0.30's turn end, as its `session/load` replay and its live
-/// stream carry it (method `_x.ai/session/update`), captured from a real
-/// leader during the install acceptance of the lifecycle fixes.
-fn turn_completed_v130(session_id: &str, prompt_id: &str) -> Value {
+/// A turn end as the leader's `session/load` replay carries it, captured
+/// from a real grok 1.0.30 leader during the install acceptance of the
+/// lifecycle fixes (`_meta.isReplay`, usage, elapsed).
+fn replayed_turn_completed(session_id: &str, prompt_id: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "method": "_x.ai/session/update",
@@ -627,10 +627,10 @@ fn turn_completed_v130(session_id: &str, prompt_id: &str) -> Value {
 }
 
 #[test]
-fn test_replayed_turn_end_under_grok_130s_method_name_closes_the_turn() {
+fn test_replayed_turn_end_with_its_wire_shape_closes_the_turn() {
     // A desk woken from sleep reloads the member's history: a turn that
-    // ran (message chunk, tool calls) and ended under the newer method
-    // name is a closed turn, so the next dispatch is not `member_busy`.
+    // ran (message chunk, tool calls) and ended is a closed turn, so the
+    // next dispatch is not `member_busy`.
     let _bed = setup();
     let history = vec![
         update_for(
@@ -648,7 +648,7 @@ fn test_replayed_turn_end_under_grok_130s_method_name_closes_the_turn() {
             "tool_call",
             json!({"toolCallId": "c1", "title": "write", "status": "completed"}),
         ),
-        turn_completed_v130(SID, "412fdb07-277a-4f23-9206-5689d6688efa"),
+        replayed_turn_completed(SID, "412fdb07-277a-4f23-9206-5689d6688efa"),
         json!({
             "jsonrpc": "2.0",
             "method": "_x.ai/session/update",
@@ -660,25 +660,25 @@ fn test_replayed_turn_end_under_grok_130s_method_name_closes_the_turn() {
     assert!(client.runtime().is_none());
     teardown(&client, &proc);
 
-    // Another session's turn end under the same method is still not ours.
+    // Another session's turn end is still not ours.
     let (client, proc) = loaded(
         None,
         vec![
             update_for(SID, "agent_message_chunk", json!({})),
-            turn_completed_v130("other-session", "p-other"),
+            replayed_turn_completed("other-session", "p-other"),
         ],
     );
     assert_eq!(client.turn_open(), Some(true));
     teardown(&client, &proc);
 
-    // Live, the same method name ends the turn the display shows.
+    // Live, the same frame ends the turn the display shows.
     let (client, proc) = loaded(None, vec![]);
     proc.feed(&update(
         "agent_message_chunk",
         json!({"content": {"type": "text", "text": "new turn"}}),
     ));
     settle(&client, |rt| rt.busy);
-    proc.feed(&turn_completed_v130(SID, "p-live"));
+    proc.feed(&replayed_turn_completed(SID, "p-live"));
     let runtime = settle(&client, |rt| !rt.busy);
     assert_eq!(runtime.turn_open, Some(false));
     assert_eq!(runtime.input_state, "ready");
@@ -830,7 +830,7 @@ fn test_turn_completed_clears_busy() {
     settle(&client, |rt| rt.busy);
     proc.feed(&json!({
         "jsonrpc": "2.0",
-        "method": "_x.ai/session_notification",
+        "method": "_x.ai/session/update",
         "params": {
             "sessionId": SID,
             "update": {"sessionUpdate": "turn_completed", "stop_reason": "end_turn"},
@@ -1132,7 +1132,7 @@ fn tool_call(prompt_id: &str, id: &str) -> Value {
 fn turn_completed(prompt_id: &str, stop_reason: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
-        "method": "_x.ai/session_notification",
+        "method": "_x.ai/session/update",
         "params": {
             "sessionId": SID,
             "update": {

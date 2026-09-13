@@ -383,21 +383,18 @@ fn on_notification(inner: &ClientInner, method: &str, params: &Value) {
     }
 }
 
-/// The leader's turn-end notification. grok has carried `turn_completed`
-/// under two extension methods: `_x.ai/session_notification` (grok
-/// ≤1.0.2x) and `_x.ai/session/update` (grok 1.0.30, live and in the
-/// `session/load` replay alike). A desk that woke from sleep reloads the
+/// The leader's turn-end notification, `_x.ai/session/update` with
+/// `sessionUpdate: turn_completed` (grok 1.0.30), live and in the
+/// `session/load` replay alike. A desk that woke from sleep reloads the
 /// member's history through that replay; missing its last turn end there
 /// leaves `turn_open` true and every later dispatch `member_busy`.
 fn is_turn_completed(method: &str, params: &Value) -> bool {
-    matches!(
-        method,
-        "_x.ai/session_notification" | "_x.ai/session/update"
-    ) && params
-        .get("update")
-        .and_then(|update| update.get("sessionUpdate"))
-        .and_then(Value::as_str)
-        == Some("turn_completed")
+    method == "_x.ai/session/update"
+        && params
+            .get("update")
+            .and_then(|update| update.get("sessionUpdate"))
+            .and_then(Value::as_str)
+            == Some("turn_completed")
 }
 
 /// Fold `activity` — the leader's busy authority — into the runtime.

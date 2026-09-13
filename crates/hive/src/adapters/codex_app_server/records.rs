@@ -80,7 +80,7 @@ pub fn write_pane_thread(
 
 /// The pane→thread binding hive wrote at spawn.
 ///
-/// `tmux_socket` is None for a record written before the field existed.
+/// `tmux_socket` is None for a record whose writer had no server to name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneThread {
     pub thread_id: String,

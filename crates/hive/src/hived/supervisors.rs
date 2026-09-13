@@ -119,21 +119,9 @@ pub(crate) fn cleanup_dead_daemons(workspace: &str, team: &str) {
 /// Pane ids repeat across tmux servers while CODEX_HOME (the record store)
 /// is shared, so the absence of `%3` here says nothing about `%3` on the
 /// default server. A record names its server (`tmuxSocket`) and is reaped
-/// only by a hived on that server. A record without the field predates the
-/// field; only a hived on the default server reaps those, because hive is
-/// single-user and every live member of the pre-field binary sat on the
-/// default server, while a private-server hived (the e2e suite, a dev
-/// lane) is exactly the one that must not touch them. The next spawn
-/// rewrites every record with the field, so the legacy branch is one
-/// release of exposure.
+/// only by a hived on that server; one naming no server is nobody's.
 fn reap_stale_record(record_socket: Option<&str>, own_socket: &str) -> bool {
-    match record_socket {
-        Some(socket) => crate::tmux::same_socket(socket, own_socket),
-        None => crate::tmux::same_socket(
-            own_socket,
-            &crate::tmux::default_socket_path().to_string_lossy(),
-        ),
-    }
+    record_socket.is_some_and(|socket| crate::tmux::same_socket(socket, own_socket))
 }
 
 /// Keep this team's codex members riding the shared daemon.
