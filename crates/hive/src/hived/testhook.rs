@@ -46,9 +46,13 @@ pub struct FakeAdapter {
 #[derive(Default)]
 pub struct Hook {
     pub monotonic: Option<F0<f64>>,
-    pub gl_park_daemon_key: Option<S1<()>>,
     pub gl_idle_owned_keys: Option<S1<Option<Vec<String>>>>,
     pub after_accept: Option<F0<()>>,
+    /// Barriers inside a served connection: after the admission line went
+    /// out, before the handler runs, before the final reply goes out.
+    pub after_admit: Option<F0<()>>,
+    pub before_handler: Option<F0<()>>,
+    pub before_reply: Option<F0<()>>,
     // adapters / gate
     pub adapters_get: Option<S1<Option<AdapterHandle>>>,
     pub check_input_gate: Option<P1<GateResult>>,
@@ -65,10 +69,11 @@ pub struct Hook {
     #[allow(clippy::type_complexity)]
     pub list_panes_all_status: Option<F0<(Option<Vec<crate::tmux::PaneInfo>>, &'static str)>>,
     pub tmux_socket_path: Option<F0<Option<String>>>,
-    pub is_tmux_window_alive: Option<S1<bool>>,
-    pub team_window_alive: Option<S2<bool>>,
+    #[allow(clippy::type_complexity)]
+    pub list_windows_snapshot: Option<F0<(Option<Vec<crate::tmux::WindowExtra>>, &'static str)>>,
     pub watching_clients: Option<S1<Option<usize>>>,
-    pub install_wake_hooks: Option<S1<()>>,
+    pub install_wake_hooks: Option<S1<Result<(), String>>>,
+    pub remove_wake_hooks: Option<S1<()>>,
     // agent_cli
     pub detect_cli_process_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,
     pub detect_profile_for_pane: Option<S1<Option<&'static crate::agent_cli::CLIProfile>>>,

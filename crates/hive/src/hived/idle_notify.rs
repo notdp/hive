@@ -92,11 +92,13 @@ struct TickCtx<'a> {
 }
 
 /// One idle-notify tick over *snap*, the tick's display snapshot: pane
-/// liveness, windows and notify tokens are lookups into it.
+/// liveness, windows and notify tokens are lookups into it. *session* is
+/// the display's current session (its id, or empty without a display),
+/// whose most recent terminal names the active window.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn idle_notify_tick(
     team_name: &str,
-    session_name: &str,
+    session: &str,
     idle_notify: &mut HashMap<String, IdleRecord>,
     busy_monitor: Option<&dyn OutputMonitor>,
     now: f64,
@@ -116,7 +118,7 @@ pub(crate) fn idle_notify_tick(
         team_name,
         workspace,
         now,
-        active_window: hooked_get_most_recent_client_window(session_name).unwrap_or_default(),
+        active_window: hooked_get_most_recent_client_window(session).unwrap_or_default(),
         token_key: notify_token_key(),
         busy_monitor,
         snap,

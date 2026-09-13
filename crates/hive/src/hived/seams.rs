@@ -171,15 +171,33 @@ pub(super) fn hooked_list_panes_snapshot_status(
     crate::tmux::list_panes_snapshot_status()
 }
 
-/// `tmux::list_window_option_all`: one window option across every window.
-pub(super) fn hooked_list_window_option_all(
-    key: &str,
-) -> Option<std::collections::HashMap<String, String>> {
+/// `tmux::list_windows_snapshot_status`: every window with its instance
+/// tags and notify token. Under test a fixture that lists no windows
+/// leaves the snapshot without them (`(None, "ok")`), so the tick's
+/// display location resolves to nothing and the token is asked per window.
+pub(super) fn hooked_list_windows_snapshot(
+    token_key: &str,
+) -> (
+    Option<std::collections::HashMap<String, crate::tmux::WindowExtra>>,
+    &'static str,
+) {
     #[cfg(test)]
     if hookget(|_| ()).is_some() {
-        return None;
+        let Some(f) = hookget(|h| h.list_windows_snapshot.clone()).flatten() else {
+            return (None, "ok");
+        };
+        let (windows, status) = f();
+        return (
+            windows.map(|windows| {
+                windows
+                    .into_iter()
+                    .map(|window| (window.window.clone(), window))
+                    .collect()
+            }),
+            status,
+        );
     }
-    crate::tmux::list_window_option_all(key)
+    crate::tmux::list_windows_snapshot_status(token_key)
 }
 
 /// `tmux::list_all_tty_processes`: the process table grouped by tty.
@@ -213,42 +231,37 @@ pub(super) fn hooked_watching_clients(session: &str) -> Option<usize> {
     crate::tmux::watching_clients(session)
 }
 
-/// The desk's own team session gets the wake hooks at every start.
-pub(super) fn hooked_install_wake_hooks(team: &str) {
+/// The session the desk's display sits in gets this home's wake hooks: at
+/// the first tick that finds the display, again whenever it moves, and
+/// again after a failed install. The error is the loop's to act on: a
+/// desk whose session cannot wake it must not retire unwatched.
+pub(super) fn hooked_install_wake_hooks(session_id: &str) -> Result<(), String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.install_wake_hooks.clone()).flatten() {
-        f(team);
+        return f(session_id);
     }
-    #[cfg(not(test))]
-    crate::tmux::install_wake_hooks(team)
+    #[cfg(test)]
+    if hookget(|_| ()).is_some() {
+        return Ok(());
+    }
+    crate::tmux::install_wake_hooks(session_id).map_err(|e| e.to_string())
 }
 
-/// The window exists and carries this team's tag. Under test a dedicated
-/// hook answers; without one the window-alive hook stands in, so the
-/// display tests keep their meaning.
-pub(super) fn hooked_team_window_alive(tmux_window_id: &str, team: &str) -> bool {
+/// This home's wake entries leave a session the display left behind, once
+/// no team of this home shows there.
+pub(super) fn hooked_remove_wake_hooks(session_id: &str) {
     #[cfg(test)]
-    {
-        hookget(|h| h.team_window_alive.clone())
-            .flatten()
-            .map_or_else(
-                || hooked_is_tmux_window_alive(tmux_window_id),
-                |f| f(tmux_window_id, team),
-            )
+    if let Some(f) = hookget(|h| h.remove_wake_hooks.clone()).flatten() {
+        f(session_id);
+        return;
     }
-    #[cfg(not(test))]
-    {
-        is_tmux_window_alive_impl(tmux_window_id)
-            && crate::tmux::get_window_option(tmux_window_id, "hive-team").as_deref() == Some(team)
-    }
-}
-
-pub(super) fn hooked_is_tmux_window_alive(tmux_window_id: &str) -> bool {
     #[cfg(test)]
-    if let Some(f) = hookget(|h| h.is_tmux_window_alive.clone()).flatten() {
-        return f(tmux_window_id);
+    if hookget(|_| ()).is_some() {
+        return;
     }
-    is_tmux_window_alive_impl(tmux_window_id)
+    if let Err(err) = crate::tmux::remove_wake_hooks(session_id) {
+        eprintln!("hived: wake hooks on session {session_id} not removed: {err}");
+    }
 }
 
 // --- agent_cli seams -------------------------------------------------------
@@ -674,15 +687,6 @@ pub(super) fn hooked_gl_kill_daemon_key(key: &str) {
         return;
     }
     crate::adapters::grok_leader::kill_daemon_key(key)
-}
-
-pub(super) fn hooked_gl_park_daemon_key(key: &str) {
-    #[cfg(test)]
-    if let Some(f) = hookget(|h| h.gl_park_daemon_key.clone()).flatten() {
-        f(key);
-        return;
-    }
-    crate::adapters::grok_leader::park_daemon_key(key)
 }
 
 pub(super) fn hooked_gl_pool_drop_key(key: &str) {

@@ -547,8 +547,9 @@ mod tests {
         );
     }
 
-    /// A hived stand-in on the workspace socket: records every request it is
-    /// sent and answers each with `{ok: true, seq: <n>}`.
+    /// A hived stand-in on the workspace socket: admits the preflight a
+    /// side-effect request opens with, records every request it is sent
+    /// and answers each with `{ok: true, seq: <n>}`.
     struct FakeHived {
         path: std::path::PathBuf,
         stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -558,7 +559,7 @@ mod tests {
 
     impl FakeHived {
         fn bind(workspace: &str) -> FakeHived {
-            use std::io::{Read, Write};
+            use std::io::{BufRead, Write};
             let path = crate::hived::socket_path(workspace);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).unwrap();
@@ -577,9 +578,20 @@ mod tests {
                         break;
                     }
                     let Ok(mut stream) = stream else { break };
-                    let mut body = Vec::new();
-                    let _ = stream.read_to_end(&mut body);
-                    let request: Map<String, Value> = serde_json::from_slice(&body).unwrap();
+                    let mut reader = std::io::BufReader::new(&stream);
+                    let mut line = String::new();
+                    let _ = reader.read_line(&mut line);
+                    let mut request: Map<String, Value> = serde_json::from_str(&line).unwrap();
+                    if request.get("action").and_then(Value::as_str)
+                        == Some(crate::hived::ADMIT_ACTION)
+                    {
+                        let admitted = json!({"ok": true, "admitted": true,
+                            "apiVersion": crate::hived::HIVED_API_VERSION});
+                        let _ = (&stream).write_all(format!("{admitted}\n").as_bytes());
+                        line.clear();
+                        let _ = reader.read_line(&mut line);
+                        request = serde_json::from_str(&line).unwrap();
+                    }
                     let mut log = log.lock().unwrap();
                     log.push(request);
                     let reply = json!({"ok": true, "seq": log.len()});

@@ -91,4 +91,4 @@ pub fn grok_home() -> PathBuf {
 // --------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

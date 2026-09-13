@@ -28,6 +28,25 @@ pub fn tmux_dquote_escape(value: &str) -> String {
         .replace('$', "\\$")
 }
 
+/// The inverse of `tmux_dquote_escape`, for a value tmux prints back
+/// (`show-hooks` renders a stored command's arguments with the same
+/// three escapes); a backslash before any other character is kept.
+pub fn tmux_dquote_unescape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next @ ('\\' | '"' | '$')) = chars.peek() {
+                out.push(*next);
+                chars.next();
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,6 +58,14 @@ mod tests {
             "'/x/we ird\\$x/hive'"
         );
         assert_eq!(tmux_dquote_escape("a\\b\"c"), "a\\\\b\\\"c");
+    }
+
+    #[test]
+    fn test_tmux_dquote_unescape_reverses_the_escape_and_keeps_other_backslashes() {
+        for raw in ["/x/hive", "'/x/we ird$x/hive'", "a\\b\"c", "it's \\$5"] {
+            assert_eq!(tmux_dquote_unescape(&tmux_dquote_escape(raw)), raw, "{raw}");
+        }
+        assert_eq!(tmux_dquote_unescape("a\\nb\\"), "a\\nb\\");
     }
 
     #[test]

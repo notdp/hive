@@ -64,22 +64,32 @@ pub fn display_value(target: &str, fmt: &str) -> Option<String> {
     }
 }
 
-/// True only when tmux resolves `window_id` to itself.
-///
-/// Never errors: a missing tmux binary, timeout, nonzero exit, or mismatched
-/// id all mean "not alive" to callers making reap decisions.
-/// How many clients attached to *session* are terminals — control-mode
-/// clients (hive's own monitor) excluded. None when tmux does not answer
-/// or the session is gone: an unknown viewer count is not "nobody".
+/// A `-t` that names exactly one session. tmux resolves a bare name by
+/// prefix when nothing matches it exactly (`fern` finds `fern-dev`), so a
+/// name is pinned with `=`; a session id (`$3`) and a pinned name pass
+/// through.
+pub fn exact_session_target(session: &str) -> String {
+    if session.starts_with('$') || session.starts_with('=') {
+        session.to_string()
+    } else {
+        format!("={session}")
+    }
+}
+
+/// How many clients attached to *session* (a session id, or a name pinned
+/// by `exact_session_target`) are terminals — control-mode clients (hive's
+/// own monitor) excluded. None when tmux does not answer or the session is
+/// gone: an unknown viewer count is not "nobody".
 pub fn watching_clients(session: &str) -> Option<usize> {
     if session.is_empty() {
         return None;
     }
+    let target = exact_session_target(session);
     let r = run(
         &[
             "list-clients",
             "-t",
-            session,
+            &target,
             "-F",
             "#{client_control_mode}",
         ],
@@ -97,7 +107,7 @@ pub(crate) fn count_watching(listing: &str) -> usize {
 
 #[cfg(test)]
 mod watching_tests {
-    use super::count_watching;
+    use super::{count_watching, exact_session_target};
 
     #[test]
     fn test_count_watching_counts_terminals_not_control_clients() {
@@ -105,20 +115,50 @@ mod watching_tests {
         assert_eq!(count_watching("1\n"), 0);
         assert_eq!(count_watching("0\n1\n0\n"), 2);
     }
+
+    #[test]
+    fn test_exact_session_target_pins_names_and_passes_ids() {
+        assert_eq!(exact_session_target("fern"), "=fern");
+        assert_eq!(exact_session_target("=fern"), "=fern");
+        assert_eq!(exact_session_target("$3"), "$3");
+    }
 }
 
-pub fn window_exists(window_id: &str) -> bool {
+/// The instance tags on a window: `(window_id, team, workspace, created)`
+/// as one `display-message`, the team masked by `@hive-hidden` the way
+/// every team scan reads it. None when tmux does not answer for the target.
+pub fn window_instance_tags(target: &str) -> Option<WindowInstanceTags> {
+    if target.is_empty() {
+        return None;
+    }
+    let fmt = format!(
+        "#{{window_id}}\t{}\t#{{@hive-workspace}}\t#{{@hive-created}}",
+        super::WINDOW_TEAM_FMT
+    );
+    let r = run(&["display-message", "-t", target, "-p", &fmt], false, 5).ok()?;
+    if r.returncode != 0 {
+        return None;
+    }
+    let line = r.stdout.trim_end_matches('\n');
+    let mut parts = line.split('\t');
+    let window_id = parts.next()?.trim().to_string();
     if window_id.is_empty() {
-        return false;
+        return None;
     }
-    match run(
-        &["display-message", "-t", window_id, "-p", "#{window_id}"],
-        false,
-        5,
-    ) {
-        Ok(r) => r.returncode == 0 && r.stdout.trim() == window_id,
-        Err(_) => false,
-    }
+    Some(WindowInstanceTags {
+        window_id,
+        team: parts.next().unwrap_or_default().to_string(),
+        workspace: parts.next().unwrap_or_default().to_string(),
+        created: parts.next().unwrap_or_default().to_string(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WindowInstanceTags {
+    pub window_id: String,
+    pub team: String,
+    pub workspace: String,
+    pub created: String,
 }
 
 /// `run-shell -b <command>`: the shell string is passed byte-for-byte.
@@ -134,11 +174,12 @@ pub fn get_most_recent_client_tty(session_name: Option<&str>) -> Option<String> 
 /// Terminal (non-control-mode) clients as `(activity, tty)`, newest first.
 fn list_terminal_clients(session_name: Option<&str>) -> Vec<(i64, String)> {
     let mut args: Vec<&str> = vec!["list-clients"];
-    if let Some(session) = session_name {
-        if !session.is_empty() {
-            args.push("-t");
-            args.push(session);
-        }
+    let target = session_name
+        .filter(|session| !session.is_empty())
+        .map(exact_session_target);
+    if let Some(target) = target.as_deref() {
+        args.push("-t");
+        args.push(target);
     }
     args.extend([
         "-F",

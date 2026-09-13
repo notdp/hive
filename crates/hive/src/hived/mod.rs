@@ -59,6 +59,9 @@ pub const NOTIFY_DEBUG_HEARTBEAT_SECONDS: f64 = 30.0;
 pub const HIVED_CODE_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_OWNER_CHECK_SECONDS: f64 = 5.0;
 pub const HIVED_SLEEP_AFTER_SECONDS: f64 = 600.0;
+/// How long a desk waits before asking tmux again to install the wake
+/// hooks a failed install left off its session.
+pub const WAKE_HOOK_RETRY_SECONDS: f64 = 30.0;
 // The display (tmux server) is probed every tick while it answers — that
 // listing is the pane snapshot the status and view ticks read — and on a
 // doubling schedule capped here while it does not. A dead server must not
@@ -77,7 +80,11 @@ pub const SOCKET_RETRY_INTERVAL: f64 = 0.1;
 // scheduling and payload plumbing. A send blocks on nothing else: it
 // returns the moment the transport accepts.
 pub const REQUEST_SLACK: f64 = 5.0;
-pub const HIVED_API_VERSION: i64 = 5;
+// The socket protocol's own version, for identification only: a request
+// with a side effect is admitted on its connection first (`admit`), and a
+// hived of another api is not sent one. Bumped with the wire format, never
+// with the crate's release.
+pub const HIVED_API_VERSION: i64 = 6;
 pub const BUSY_OUTPUT_THRESHOLD_SECONDS: f64 = 3.0;
 // A probed session id only speaks for the session it saw: nothing tells the
 // hived that the human typed `/new` in an unmanaged pane, so the snapshot

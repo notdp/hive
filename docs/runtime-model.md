@@ -100,12 +100,16 @@ Consequences across modules:
   before exit. Other requests renew it even if they finish between ticks.
   Display recovery or an obligation resets the timer. An arrival during the
   sleep drain cancels retirement; a queued connection gets `notAdmitted` and
-  can retry. Before exit the hived backfills the registry, stops only its own
-  idle Grok clients' team keys, emits `hived.sleep` with `idleSeconds` and
-  `display-unreachable` / `window-gone`, and performs owner-checked socket
-  cleanup. Grok session records and aliases survive parking; the next send
-  starts the member leader and loads the recorded session. Runtime reads do
-  not start parked leaders. Codex shared daemons are left to their home. The existing ensure
+  can retry. Before exit the hived backfills the registry, closes the stdio
+  clients it holds on its own team's idle Grok keys, emits `hived.sleep` with
+  `idleSeconds` and `display-unreachable` / `window-gone`, and performs
+  owner-checked socket cleanup. The leader on a member's socket is grok's own
+  process and the TUI in that member's pane is one of the leader's clients, so
+  retiring signals neither: a leader outliving the desk is the price of the
+  pane's session surviving it. Session records and aliases survive either way;
+  the next send reuses a leader still up, or starts one and loads the recorded
+  session. Runtime reads start no leader. Codex shared daemons are left to
+  their home. The existing ensure
   path starts the next generation on demand, including a subsequent send or
   attach. `hive ps` reports a registered team as `running` while its hived is up and
   `asleep` without one, window or no window (`displayPresent` carries the

@@ -42,7 +42,7 @@ const UNROSTERED_ENGINE_MESSAGE: &str = "this engine's session names nobody on a
 // `workflow run --team` rides the same doctrine: it exists for callers
 // without a pane identity (a workflow proxy subagent, a desktop session).
 const TMUX_OPTIONAL_ROOT_COMMANDS: &[&str] = &[
-    // `wake` is a session hook's run-shell job, targeting a named window.
+    // `wake` is a session hook's run-shell job, naming the client's session.
     "wake",
     // `mirror` acts on a named window: the status click's run-shell job
     // and the desktop session (no pane, its own team window) both run it
@@ -598,12 +598,18 @@ pub(crate) fn build_cli() -> Command {
         )
         .subcommand(
             Command::new("wake")
-                .about("Bring the team window's hived back (the session's client-attached hook).")
+                .about("Bring back the hiveds of the teams a session shows (the session's client-attached and client-session-changed hooks).")
                 .hide(true)
                 .arg(
-                    Arg::new("window")
-                        .long("window")
-                        .value_name("TARGET")
+                    Arg::new("session")
+                        .long("session")
+                        .value_name("ID")
+                        .conflicts_with("window"),
+                )
+                .arg(Arg::new("window").long("window").value_name("TARGET"))
+                .group(
+                    clap::ArgGroup::new("wake_target")
+                        .args(["session", "window"])
                         .required(true),
                 ),
         )
@@ -1121,7 +1127,7 @@ fn dispatch(matches: &ArgMatches) {
             _ => unreachable!("subcommand required"),
         },
         Some(("resume-hint", m)) => launch::resume_hint_cmd(arg_str(m, "cli_name")),
-        Some(("wake", m)) => attach::wake_cmd(arg_str(m, "window")),
+        Some(("wake", m)) => attach::wake_cmd(arg_str(m, "session"), arg_str(m, "window")),
         Some(("shell-init", m)) => setup::shell_init_cmd(arg_str(m, "shell")),
         Some(("uninstall", m)) => {
             uninstall::uninstall_cmd(m.get_flag("force"), m.get_flag("purge"))

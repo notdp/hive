@@ -13,15 +13,11 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::devlog;
 
 use super::*;
-
-pub(crate) fn is_tmux_window_alive_impl(tmux_window_id: &str) -> bool {
-    crate::tmux::window_exists(tmux_window_id)
-}
 
 /// A display probe result that flipped the display's reachability; the
 /// loop logs each flip once.
@@ -207,11 +203,18 @@ impl Drop for StartupLock {
 /// A hived of this hive home that is another build, api version or team
 /// is replaced from this binary. One serving the workspace from another
 /// `HIVE_HOME` is refused, not restarted: nothing is spawned and the error
-/// names both homes.
+/// names both homes. One that is retiring or draining (`Busy`) is asked
+/// again within the identity budget, never replaced on that answer alone.
+///
+/// A stale build that declines the graceful stop, or does not leave in
+/// time, keeps serving only while it speaks this binary's api: the caller
+/// hears which build answers and why. A different api is refused outright,
+/// so no payload the two builds might read differently goes out.
 ///
 /// The error cases are all loud: a startup lock that cannot be taken within
-/// its budget, a hived this hive must not touch, and a spawned hived that
-/// never answered a matching ping.
+/// its budget, a hived this hive must not touch, one that stayed busy for
+/// the whole budget, and a spawned hived that never answered a matching
+/// ping.
 pub fn ensure_hived(
     workspace: &str,
     team: &str,
@@ -219,14 +222,14 @@ pub fn ensure_hived(
     tmux_window_id: &str,
 ) -> Result<Option<i32>> {
     let mut lock = StartupLock::acquire(workspace)?;
-    let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
-    match hived_identity(response.as_ref(), team) {
+    let (response, identity) = identity_ping(workspace, team)?;
+    match identity {
         HivedIdentity::Matches => return Ok(None),
         HivedIdentity::ForeignHome(served) => bail!(
             "hived for {workspace} serves HIVE_HOME {served}, this hive runs with {}",
             crate::paths::hive_home().display()
         ),
-        HivedIdentity::Restart => {}
+        HivedIdentity::Restart | HivedIdentity::Busy => {}
     }
     if response.is_some() {
         // The retiring owner takes the same lock for cleanup. Do not
@@ -238,27 +241,29 @@ pub fn ensure_hived(
             false,
         );
         lock.reacquire()?;
-        if stopped == StopOutcome::Deferred {
+        let (response, identity) = identity_ping(workspace, team)?;
+        if identity == HivedIdentity::Matches {
             return Ok(None);
         }
-        let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
-        if hived_identity_matches(response.as_ref(), team) {
-            return Ok(None);
-        }
-        if stopped == StopOutcome::TimedOut
-            && response
-                .as_ref()
-                .and_then(|r| r.get("team"))
-                .and_then(Value::as_str)
-                == Some(team)
-        {
-            if let HivedIdentity::ForeignHome(home) = hived_identity(response.as_ref(), team) {
-                bail!("hived now serves another hive home: {home}");
+        match stopped {
+            StopOutcome::Deferred => {
+                keep_old_generation(
+                    response.as_ref(),
+                    team,
+                    "it holds node operations and keeps serving until they finish",
+                )?;
+                return Ok(None);
             }
-            return Ok(None);
-        }
-        if stopped != StopOutcome::Stopped || response.is_some() {
-            bail!("hived is draining; retry after accepted operations finish");
+            StopOutcome::TimedOut if response.is_some() => {
+                keep_old_generation(
+                    response.as_ref(),
+                    team,
+                    "it did not leave within the stop budget and keeps serving",
+                )?;
+                return Ok(None);
+            }
+            StopOutcome::Stopped if response.is_none() => {}
+            _ => bail!("hived is draining; retry after accepted operations finish"),
         }
     }
     if std::os::unix::net::UnixStream::connect(socket_path(workspace)).is_ok() {
@@ -285,6 +290,70 @@ pub fn ensure_hived(
          see {}",
         devlog::hived_stderr_path(Path::new(workspace)).display()
     )
+}
+
+/// The identity ping and what it says, asked again while the desk answers
+/// busy: a shut gate is a retirement it may cancel or a drain that ends,
+/// not a generation to replace. The whole exchange fits the identity
+/// budget; a desk still busy at its end is an error, not a restart.
+fn identity_ping(
+    workspace: &str,
+    team: &str,
+) -> Result<(Option<Map<String, Value>>, HivedIdentity)> {
+    let deadline = monotonic() + IDENTITY_PING_TIMEOUT;
+    loop {
+        let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
+        let identity = hived_identity(response.as_ref(), team);
+        if identity != HivedIdentity::Busy {
+            return Ok((response, identity));
+        }
+        if monotonic() >= deadline {
+            bail!(
+                "hived for team '{team}' is busy (retiring or draining) and did not admit a ping \
+                 within {IDENTITY_PING_TIMEOUT}s; retry"
+            );
+        }
+        thread::sleep(Duration::from_secs_f64(SOCKET_RETRY_INTERVAL));
+    }
+}
+
+/// A generation this binary asked to stop is still serving: allowed to,
+/// with the reason on stderr, when it is this team's under this home and
+/// speaks this api; refused otherwise, since a payload the two builds
+/// read differently must not go out.
+fn keep_old_generation(response: Option<&Map<String, Value>>, team: &str, why: &str) -> Result<()> {
+    let Some(response) = response else {
+        bail!("hived is draining; retry after accepted operations finish");
+    };
+    if let HivedIdentity::ForeignHome(home) = hived_identity(Some(response), team) {
+        bail!("hived now serves another hive home: {home}");
+    }
+    let served_team = response.get("team").and_then(Value::as_str).unwrap_or("");
+    if served_team != team {
+        bail!("hived on this workspace now serves team '{served_team}', not '{team}'");
+    }
+    let api = response.get("apiVersion").and_then(Value::as_i64);
+    let old_build = response
+        .get("buildHash")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let short = |hash: &str| hash[..hash.len().min(12)].to_string();
+    if api != Some(HIVED_API_VERSION) {
+        bail!(
+            "hived for team '{team}' is build {} speaking api {} while this binary is build {} \
+             speaking api {HIVED_API_VERSION}; {why}, and this binary will not send it requests \
+             it may read differently — retry once it has retired",
+            short(old_build),
+            api.map_or("unknown".to_string(), |v| v.to_string()),
+            short(hived_build_hash())
+        );
+    }
+    eprintln!(
+        "warning: hived for team '{team}' is build {} (this binary is build {}); {why}",
+        short(old_build),
+        short(hived_build_hash())
+    );
+    Ok(())
 }
 
 pub(super) fn hooked_current_exe() -> String {
@@ -404,6 +473,139 @@ fn hooked_make_busy_monitor(
     )))
 }
 
+/// The display as the loop last resolved it, and the busy monitor on its
+/// session. The location follows the windows' own tags tick by tick — a
+/// window moved to another session, a session renamed, a display rebuilt
+/// after a windowless stretch — and the monitor, the viewer sessions the
+/// sleep gate counts and the idle notifier's session follow it; the hived
+/// itself stays. What the CLI passed at start is where the display was
+/// then, not an authority the loop keeps.
+struct DisplayTrack {
+    location: Option<DisplayLocation>,
+    monitor: Option<Arc<dyn OutputMonitor>>,
+    /// Whether this home's wake hooks are on the display's session: what a
+    /// retirement for want of a viewer needs, since nothing else brings
+    /// such a desk back. False until an install succeeds; a failed one is
+    /// retried at `wake_retry_at`.
+    wake_armed: bool,
+    wake_retry_at: f64,
+}
+
+impl DisplayTrack {
+    fn window(&self) -> &str {
+        self.location.as_ref().map_or("", |l| l.window.as_str())
+    }
+
+    fn window_id(&self) -> &str {
+        self.location.as_ref().map_or("", |l| l.window_id.as_str())
+    }
+
+    fn session_id(&self) -> &str {
+        self.location.as_ref().map_or("", |l| l.session_id.as_str())
+    }
+
+    /// Put this home's wake hooks on the display's session, or record the
+    /// failure for `hived.wake_hooks_failed` and a retry.
+    fn arm_wake(&mut self, workspace: &str, team: &str, now: f64) {
+        let session = self.session_id().to_string();
+        if session.is_empty() {
+            self.wake_armed = false;
+            return;
+        }
+        match hooked_install_wake_hooks(&session) {
+            Ok(()) => self.wake_armed = true,
+            Err(err) => {
+                self.wake_armed = false;
+                self.wake_retry_at = now + WAKE_HOOK_RETRY_SECONDS;
+                hooked_notify_debug_emit(
+                    workspace,
+                    "hived.wake_hooks_failed",
+                    &[
+                        ("team", Value::from(team)),
+                        ("session", Value::from(session.as_str())),
+                        ("error", Value::from(err)),
+                        ("retryInSeconds", Value::from(WAKE_HOOK_RETRY_SECONDS)),
+                    ],
+                );
+            }
+        }
+    }
+
+    /// Take this tick's resolution. A change of session stops the monitor
+    /// on the old one and starts one on the new, which also gets the wake
+    /// hooks; the session left behind loses this home's hooks once no team
+    /// of this home shows there (*snap* says; without one nothing is
+    /// removed); the same location again changes nothing.
+    fn follow(
+        &mut self,
+        workspace: &str,
+        team: &str,
+        next: Option<DisplayLocation>,
+        snap: Option<&TickSnapshot>,
+        now: f64,
+    ) {
+        if next == self.location {
+            return;
+        }
+        let next_session = next.as_ref().map_or("", |l| l.session_id.as_str());
+        hooked_notify_debug_emit(
+            workspace,
+            "hived.display",
+            &[
+                ("team", Value::from(team)),
+                (
+                    "window",
+                    next.as_ref()
+                        .map_or(Value::Null, |l| Value::from(l.window.as_str())),
+                ),
+                (
+                    "windowId",
+                    next.as_ref()
+                        .map_or(Value::Null, |l| Value::from(l.window_id.as_str())),
+                ),
+                (
+                    "session",
+                    if next_session.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::from(next_session)
+                    },
+                ),
+                (
+                    "sessions",
+                    Value::Array(
+                        next.as_ref()
+                            .map(|l| l.sessions.iter().map(|s| Value::from(s.as_str())).collect())
+                            .unwrap_or_default(),
+                    ),
+                ),
+            ],
+        );
+        if next_session != self.session_id() {
+            if let Some(monitor) = self.monitor.take() {
+                monitor.stop();
+            }
+            set_output_busy_monitor(None);
+            let left = self.session_id().to_string();
+            if !left.is_empty() && snap.is_some_and(|snap| !snap.home_displays_in(&left)) {
+                hooked_remove_wake_hooks(&left);
+            }
+            if !next_session.is_empty() {
+                let monitor = hooked_make_busy_monitor(next_session, workspace);
+                if let Some(monitor) = monitor.as_ref() {
+                    monitor.start();
+                }
+                set_output_busy_monitor(monitor.clone());
+                self.monitor = monitor;
+            }
+            self.location = next;
+            self.arm_wake(workspace, team, now);
+            return;
+        }
+        self.location = next;
+    }
+}
+
 pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_id: &str) {
     SHUTDOWN.store(false, Ordering::SeqCst);
     FORCE_SHUTDOWN.store(false, Ordering::SeqCst);
@@ -416,7 +618,14 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     let mut claude_view_state = ClaudeTickState::default();
     let mut status_state = StatusTickState::default();
     let mut display = DisplayProbe::new();
-    let mut sleep = SleepState::for_window(tmux_window);
+    let mut sleep = SleepState::default();
+    let instance = TeamInstance::from_registry(team, workspace);
+    let mut track = DisplayTrack {
+        location: None,
+        monitor: None,
+        wake_armed: false,
+        wake_retry_at: f64::NEG_INFINITY,
+    };
     // `monotonic()` starts near zero, so a 0.0 seed would skip the first
     // periodic checks; negative infinity makes every one run on the first tick.
     let mut last_window_check = f64::NEG_INFINITY;
@@ -430,10 +639,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     );
-    // The session hooks that wake an unwatched desk ride the hived's start,
-    // not only the session's build: a session an older binary built gets
-    // them at the first start after an upgrade.
-    hooked_install_wake_hooks(team);
     hooked_notify_debug_emit(
         workspace,
         "hived.start",
@@ -484,17 +689,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     // so the session hooks can still wake the desk.
     sleep::clear_asleep_marker(workspace);
     hooked_release_reexec_lock_fd(inherited_reexec_lock_fd);
-    let session_target = tmux_window
-        .split_once(':')
-        .map(|(session, _)| session)
-        .unwrap_or(tmux_window)
-        .trim()
-        .to_string();
-    let busy_monitor = hooked_make_busy_monitor(&session_target, workspace);
-    set_output_busy_monitor(busy_monitor.clone());
-    if let Some(monitor) = busy_monitor.as_ref() {
-        monitor.start();
-    }
 
     // Every exit from the loop is a `break`, so the teardown after it runs
     // for all of them.
@@ -505,23 +699,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         }
 
         let now = monotonic();
-        if now - last_window_check >= 30.0 {
-            last_window_check = now;
-            // The registry entry is the team's existence; the tmux window
-            // is only its display. A dead window starts the idle sleep
-            // check below; a missing registry file (`hive delete` removes
-            // it) with no display
-            // window left behind it does. Corrupt or foreign-instance
-            // entries are not "missing": never retire on a read that
-            // might be wrong.
-            if let Some(path) = crate::registry::entry_path(team) {
-                if !path.is_file() && !hooked_is_tmux_window_alive(tmux_window_id) {
-                    retirement_reason = "team removed";
-                    break;
-                }
-            }
-        }
-
         if now - last_daemon_cleanup >= 30.0 {
             last_daemon_cleanup = now;
             // Supervision must never take the hived down: every tick below
@@ -542,8 +719,8 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
                     "hived.retire_orphan",
                     &[
                         ("team", Value::from(team)),
-                        ("tmux_window", Value::from(tmux_window)),
-                        ("tmux_window_id", Value::from(tmux_window_id)),
+                        ("tmux_window", Value::from(track.window())),
+                        ("tmux_window_id", Value::from(track.window_id())),
                         ("currentPid", Value::from(getpid())),
                         ("socketPid", Value::from(foreign_pid)),
                     ],
@@ -555,14 +732,16 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         let stale_hash = hooked_stale_disk_build_hash(&mut code_reexec_state, now);
         flush_operations(workspace);
         if let Some(stale_hash) = stale_hash {
+            // The next generation is told where the display was last
+            // seen, never where this one was born.
             let emit_reexec = || {
                 hooked_notify_debug_emit(
                     workspace,
                     "hived.reexec",
                     &[
                         ("team", Value::from(team)),
-                        ("tmux_window", Value::from(tmux_window)),
-                        ("tmux_window_id", Value::from(tmux_window_id)),
+                        ("tmux_window", Value::from(track.window())),
+                        ("tmux_window_id", Value::from(track.window_id())),
                         ("oldHash", Value::from(hived_build_hash())),
                         ("newHash", Value::from(stale_hash.clone())),
                     ],
@@ -571,10 +750,10 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             if let Some(replacement) = reexec_hived(
                 workspace,
                 team,
-                tmux_window,
-                tmux_window_id,
+                track.window(),
+                track.window_id(),
                 server.as_ref(),
-                busy_monitor.as_ref(),
+                track.monitor.as_ref(),
                 Some(&emit_reexec),
             ) {
                 // exec failed: keep serving the old build on the rebound
@@ -594,23 +773,70 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         // windows, CLIs, tokens are lookups into it); while it does not,
         // those ticks are skipped and the probe backs off. The accept worker
         // serves independently of this sampling and maintenance.
-        let snap = if display.due(now) {
+        let (snap, status) = if display.due(now) {
             let snap = TickSnapshot::collect();
-            if let Some(transition) = display.record(snap.status, now) {
+            let status = snap.status;
+            if let Some(transition) = display.record(status, now) {
                 hooked_notify_debug_emit(
                     workspace,
                     transition.event(),
                     &[
                         ("team", Value::from(team)),
-                        ("status", Value::from(snap.status)),
+                        ("status", Value::from(status)),
                         ("nextProbeSeconds", Value::from(display.next_in(now))),
                     ],
                 );
             }
-            Some(snap).filter(TickSnapshot::reachable)
+            (Some(snap).filter(TickSnapshot::reachable), Some(status))
         } else {
-            None
+            (None, None)
         };
+        // Where the display is now. A server that is gone has no windows;
+        // a server that did not answer keeps the last location, so a
+        // blink of tmux moves nothing.
+        match (snap.as_ref(), status) {
+            (Some(snap), _) => {
+                let preferred = || {
+                    crate::registry::load(team).and_then(|entry| {
+                        entry
+                            .get("display")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                };
+                track.follow(
+                    workspace,
+                    team,
+                    snap.display_location(&instance, preferred),
+                    Some(snap),
+                    now,
+                );
+            }
+            (None, Some("no-server")) => track.follow(workspace, team, None, None, now),
+            _ => {}
+        }
+        // A session whose hooks would not install is asked again, so a
+        // desk is never left where an attach could not wake it.
+        if !track.wake_armed && !track.session_id().is_empty() && now >= track.wake_retry_at {
+            track.arm_wake(workspace, team, now);
+        }
+
+        if now - last_window_check >= 30.0 {
+            last_window_check = now;
+            // The registry entry is the team's existence; the display is
+            // only where it shows. A missing entry (`hive delete` removes
+            // it) with no window of this instance left behind it retires
+            // the desk; a display still up keeps it on the idle policy
+            // below. Corrupt or foreign-instance entries are not
+            // "missing": never retire on a read that might be wrong.
+            if let Some(path) = crate::registry::entry_path(team) {
+                if !path.is_file() && track.location.is_none() {
+                    retirement_reason = "team removed";
+                    break;
+                }
+            }
+        }
+
         let tick_members = snap.as_ref().map(|snap| {
             let tick_members = hooked_team_member_bindings(team, snap).unwrap_or_default();
             // Job relabelling and border cosmetics must never take the hived
@@ -626,7 +852,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             status_tick(
                 workspace,
                 &tick_members,
-                busy_monitor.as_deref(),
+                track.monitor.as_deref(),
                 &mut status_state,
                 now_epoch_seconds(),
                 snap,
@@ -635,7 +861,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         });
 
         if !hooked_wait_tick(IDLE_NOTIFY_TICK_SECONDS) {
-            if finish_shutdown(workspace, server.as_ref(), Duration::from_secs(5)) {
+            if finish_shutdown(workspace, Duration::from_secs(5)) {
                 break;
             }
             continue;
@@ -644,9 +870,9 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         if let (Some(snap), Some(tick_members)) = (snap.as_ref(), tick_members.as_deref()) {
             idle_notify_tick(
                 team,
-                &session_target,
+                track.session_id(),
                 &mut idle_notify,
-                busy_monitor.as_deref(),
+                track.monitor.as_deref(),
                 monotonic(),
                 workspace,
                 Some(&mut notify_debug_state),
@@ -657,34 +883,53 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         if sleep.tick(
             workspace,
             team,
-            tmux_window_id,
             snap.as_ref(),
-            server.as_ref(),
+            track.location.as_ref(),
+            track.wake_armed,
+            &owner_token,
             monotonic(),
         ) {
             break;
         }
     }
 
-    if let Some(monitor) = busy_monitor.as_ref() {
-        monitor.stop();
-    }
-    set_output_busy_monitor(None);
+    // Retirement, in one order for every reason: under the startup lock
+    // — a sleep took it at its final commit, every other exit takes it
+    // here (ensure releases it before requesting shutdown, so a competing
+    // starter cannot bind between the owner check and the unlink) — the
+    // gate shuts, the accept worker is joined and the listener closed, the
+    // journal gets its interruptions, the socket goes if it is still this
+    // generation's, and only then the slow work: the monitor's join and
+    // the pool clients this desk held. The lock outlasts all of it, so no
+    // starter binds while this generation may still write shared state.
+    let retirement = sleep.take_retirement();
+    let lock_fd = match retirement.as_ref() {
+        Some(retirement) => Some(retirement.lock_fd),
+        // The lock lives in the workspace's run dir: a workspace that is
+        // gone has nothing left to serialize against, and taking the lock
+        // would recreate the directory the team's end removed.
+        None if !Path::new(workspace).is_dir() => None,
+        None => Some(loop {
+            if let Some(fd) = hooked_try_acquire_reexec_lock(workspace) {
+                break fd;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }),
+    };
     close_admission();
+    server.close();
     if !SHUTDOWN.load(Ordering::SeqCst) && Path::new(workspace).is_dir() {
         interrupt_operations(workspace, retirement_reason);
     }
-    server.close();
-    // ensure releases this lock before requesting shutdown; competing
-    // starters cannot bind between our owner check and unlink.
-    loop {
-        if let Some(fd) = hooked_try_acquire_reexec_lock(workspace) {
-            cleanup_socket_if_owner(workspace, &owner_token);
-            hooked_release_reexec_lock_fd(Some(fd));
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
+    cleanup_socket_if_owner(workspace, &owner_token);
+    if let Some(monitor) = track.monitor.as_ref() {
+        monitor.stop();
     }
+    set_output_busy_monitor(None);
+    if let Some(retirement) = retirement {
+        retirement.drop_clients();
+    }
+    hooked_release_reexec_lock_fd(lock_fd);
 }
 
 fn now_epoch_seconds() -> i64 {
@@ -700,14 +945,12 @@ pub(super) fn drain_ready(workspace: &str) -> bool {
 
 /// Await only already accepted request handlers. A late node dispatch or a
 /// slow handler cancels graceful retirement; forced deletion has a deadline.
-pub(super) fn finish_shutdown(
-    workspace: &str,
-    server: &dyn HivedServerApi,
-    timeout: Duration,
-) -> bool {
+pub(super) fn finish_shutdown(workspace: &str, timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while requests_in_flight() && std::time::Instant::now() < deadline {
-        reject_draining_request(server);
+        // The accept worker refuses arrivals meanwhile; only the leases
+        // already handed out are waited for.
+        thread::sleep(Duration::from_millis(20));
     }
     if FORCE_SHUTDOWN.load(Ordering::SeqCst) {
         interrupt_operations(workspace, "forced shutdown");
