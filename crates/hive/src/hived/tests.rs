@@ -12,7 +12,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
 use crate::adapters::grok_leader::PromptId;
@@ -37,7 +37,7 @@ type OptionWrites = Arc<Mutex<Vec<(String, String, String)>>>;
 type EventSink = Arc<Mutex<Vec<(String, Map<String, Value>)>>>;
 type SpawnSink = Arc<Mutex<Vec<(Vec<String>, PathBuf)>>>;
 type DebugEventSink = Arc<Mutex<Vec<(String, Vec<(String, Value)>)>>>;
-use crate::tmux::PaneInfo;
+use crate::tmux::{PaneInfo, WindowExtra};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 
@@ -4896,7 +4896,6 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
             write_hived_owner_impl(workspace, pid + 1, started_at, "foreign");
         })),
         release_reexec_lock_fd: Some(Arc::new(|_fd| {})),
-        is_tmux_window_alive: Some(Arc::new(|_id| true)),
         stale_disk_build_hash: Some(Arc::new(|| None)),
         wait_tick: Some(Arc::new(move || {
             serve_sink.lock().unwrap().push("serve".to_string());
@@ -4924,6 +4923,7 @@ fn test_hived_loop_retires_orphan_before_idle_tick() {
         ..Default::default()
     };
     let _guard = testhook::install(hook);
+    crate::registry::record_team("team-a", &workspace, "123", &[], "").unwrap();
 
     hived_loop(&workspace, "team-a", "dev:3", "@99");
 
@@ -5021,7 +5021,6 @@ fn test_hived_loop_reports_a_socket_bind_failure_instead_of_exiting_silently() {
         })),
         release_reexec_lock_fd: Some(Arc::new(move |fd| release_sink.lock().unwrap().push(fd))),
         cleanup_socket: Some(Arc::new(|_workspace| {})),
-        is_tmux_window_alive: Some(Arc::new(|_id| false)),
         make_busy_monitor: Some(Arc::new(|_session| None)),
         notify_debug_emit: Some(Arc::new(move |_ws, event, fields| {
             sink.lock().unwrap().push((
@@ -5088,7 +5087,6 @@ fn test_hived_loop_releases_inherited_reexec_lock_after_socket_ready() {
                 .unwrap()
                 .push(format!("cleanup {workspace}"))
         })),
-        is_tmux_window_alive: Some(Arc::new(|_id| false)),
         make_busy_monitor: Some(Arc::new(|_session| None)),
         notify_debug_emit: Some(Arc::new(|_ws, _event, _fields| {})),
         ..Default::default()
@@ -6479,6 +6477,21 @@ struct LoopProbeEnv {
     _guard: testhook::Guard,
 }
 
+/// A window of team `probe`'s instance (`createdAt` 123 on *workspace*)
+/// as the tick's window listing reports it.
+fn probe_window(window: &str, window_id: &str, session_id: &str, workspace: &str) -> WindowExtra {
+    WindowExtra {
+        window: window.to_string(),
+        window_id: window_id.to_string(),
+        session_id: session_id.to_string(),
+        session_name: window.split(':').next().unwrap_or_default().to_string(),
+        team: "probe".to_string(),
+        workspace: workspace.to_string(),
+        created: "123".to_string(),
+        token: String::new(),
+    }
+}
+
 /// A hived loop that serves four ticks then retires, against a display
 /// whose probe answers *status* (`(None, status)` unless `ok`).
 fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
@@ -6489,6 +6502,20 @@ fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
     // pool reads and writes session records under this root.
     env.set("GROK_HOME", tmp.path().join(".grok"));
     let workspace = tmp.path().to_string_lossy().to_string();
+    // The instance the loop serves: its entry names the createdAt the
+    // window tags must match, and the members a node may be dispatched to.
+    crate::registry::record_team(
+        "probe",
+        &workspace,
+        "123",
+        &[
+            crate::testkit::member_row("worker", "codex", "t-worker"),
+            crate::testkit::member_row("b", "codex", "t-b"),
+        ],
+        "",
+    )
+    .unwrap();
+    let window_ws = workspace.clone();
     let probes = Arc::new(Mutex::new(0usize));
     let bindings = Arc::new(Mutex::new(0usize));
     let serves = Arc::new(Mutex::new(0usize));
@@ -6507,7 +6534,6 @@ fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
             write_hived_owner_impl(workspace, pid, started_at, token);
         })),
         release_reexec_lock_fd: Some(Arc::new(|_fd| {})),
-        is_tmux_window_alive: Some(Arc::new(|_id| true)),
         stale_disk_build_hash: Some(Arc::new(|| None)),
         wait_tick: Some(Arc::new(move || {
             let mut served = serves_sink.lock().unwrap();
@@ -6527,6 +6553,18 @@ fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
             *probes_sink.lock().unwrap() += 1;
             if status == "ok" {
                 (Some(Vec::new()), "ok")
+            } else {
+                (None, status)
+            }
+        })),
+        // The team window `probe:1` (`@1`, in session `$1`) carries this
+        // instance's tags whenever the display answers.
+        list_windows_snapshot: Some(Arc::new(move || {
+            if status == "ok" {
+                (
+                    Some(vec![probe_window("probe:1", "@1", "$1", &window_ws)]),
+                    "ok",
+                )
             } else {
                 (None, status)
             }
@@ -6805,9 +6843,9 @@ fn snapshot_fixture() -> TickSnapshot {
     let processes = crate::tmux::parse_all_tty_processes(
         "  501 ttys003 /Users/x/.local/bin/claude claude --resume abc\n  600 ttys004 -zsh -zsh\n  700 ??   /sbin/launchd /sbin/launchd\n",
     );
-    let mut tokens = HashMap::new();
-    tokens.insert("dev:1".to_string(), "tok-1".to_string());
-    TickSnapshot::with_extras("ok", panes, extras, Some(tokens), Some(processes))
+    let windows =
+        crate::tmux::parse_windows_snapshot("dev:1\t@1\t$0\tdev\tteam-a\t/tmp\t1\ttok-1\n");
+    TickSnapshot::with_extras("ok", panes, extras, Some(windows), Some(processes))
 }
 
 #[test]
@@ -7047,10 +7085,8 @@ fn test_shutdown_lease_timeout_resumes_graceful_service_but_bounds_force() {
 
 fn sleep_probe_env() -> LoopProbeEnv {
     let env = loop_probe_env("no-server");
-    crate::registry::record_team("probe", &env.workspace, "123", &[], "").unwrap();
     testhook::update(|h| {
         h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
-        h.is_tmux_window_alive = Some(Arc::new(|_| false));
         // The sleep commit takes the real startup lock on the probe
         // workspace; the lock it releases is real too.
         h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
@@ -7059,15 +7095,14 @@ fn sleep_probe_env() -> LoopProbeEnv {
 }
 
 /// A team window the display probe sees, on a session nobody watches
-/// unless the test says so.
+/// unless the test says so. The viewer count is asked by session id.
 fn unwatched_probe_env(watching: Option<usize>) -> LoopProbeEnv {
     let env = loop_probe_env("ok");
-    crate::registry::record_team("probe", &env.workspace, "123", &[], "").unwrap();
     testhook::update(|h| {
         h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
         h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
         h.watching_clients = Some(Arc::new(move |session| {
-            assert_eq!(session, "probe");
+            assert_eq!(session, "$1");
             watching
         }));
     });
@@ -7112,15 +7147,14 @@ fn test_hived_sleeps_when_its_window_id_now_belongs_to_another_team() {
     let serves = Arc::clone(&env.serves);
     let clock = Arc::clone(&serves);
     crate::registry::set_display("probe", "@1").unwrap();
+    let workspace = env.workspace.clone();
     testhook::update(|h| {
         h.list_panes_all_status = Some(Arc::new(|| (Some(Vec::new()), "ok")));
-        // The id exists on the server…
-        h.is_tmux_window_alive = Some(Arc::new(|_| true));
-        // …but the window is not this team's any more.
-        h.team_window_alive = Some(Arc::new(|window, team| {
-            assert_eq!(window, "@1");
-            assert_eq!(team, "probe");
-            false
+        // The id exists on the server, but the window is another team's.
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let mut window = probe_window("other:0", "@1", "$0", &workspace);
+            window.team = "other".to_string();
+            (Some(vec![window]), "ok")
         }));
         h.monotonic = Some(Arc::new(move || {
             *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
@@ -7144,13 +7178,14 @@ fn test_a_starting_hived_installs_the_wake_hooks_on_its_team_session() {
     let installed = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&installed);
     testhook::update(|h| {
-        h.install_wake_hooks = Some(Arc::new(move |team| {
-            sink.lock().unwrap().push(team.to_string())
+        h.install_wake_hooks = Some(Arc::new(move |team, session| {
+            sink.lock().unwrap().push(format!("{team} {session}"))
         }));
         h.wait_tick = Some(Arc::new(|| false));
     });
     hived_loop(&env.workspace, "probe", "probe:1", "@1");
-    assert_eq!(*installed.lock().unwrap(), vec!["probe".to_string()]);
+    // Installed where the display was found, by session id.
+    assert_eq!(*installed.lock().unwrap(), vec!["probe $1".to_string()]);
 }
 
 #[test]
@@ -7277,18 +7312,18 @@ fn test_sleep_drops_owned_clients_without_parking_leaders() {
     let mut state = SleepState::default();
     // A member mid-turn is not idle: no sleep, however long the desk sits.
     gl::tests::feed_turn_open(&alpha_proc, alpha, true);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
     // A key whose alias rebound it elsewhere is evidence nobody can read.
     gl::tests::feed_turn_open(&alpha_proc, alpha, false);
     fs::write(gl::alias_path_for_key(beta), "l-rebound").unwrap();
     assert_eq!(gl::pool().idle_owned_keys("probe"), None);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1202.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1202.0));
     fs::remove_file(gl::alias_path_for_key(beta)).unwrap();
     assert!(!alpha_proc.terminated() && !beta_proc.terminated());
 
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1800.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 2401.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1800.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, "", 2401.0));
 
     assert_eq!(display_events(&env, "hived.sleep").len(), 1);
     // The commit names the clients; they go only once the loop's teardown
@@ -7330,18 +7365,31 @@ fn test_sleep_drops_owned_clients_without_parking_leaders() {
 }
 
 #[test]
-fn test_sleep_timer_resets_when_display_or_registry_window_returns() {
+fn test_sleep_timer_resets_when_display_returns() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
     let snap = TickSnapshot::with_extras("ok", Vec::new(), HashMap::new(), None, None);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
-    crate::registry::set_display("probe", "@2").unwrap();
-    testhook::update(|h| h.is_tmux_window_alive = Some(Arc::new(|id| id == "@2")));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), "", 599.0));
-    testhook::update(|h| h.is_tmux_window_alive = Some(Arc::new(|_| false)));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), "", 601.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", Some(&snap), "", 1200.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", Some(&snap), "", 1201.0));
+    let location = DisplayLocation {
+        window: "probe:1".into(),
+        window_id: "@2".into(),
+        session_id: "$1".into(),
+        sessions: vec!["$1".into()],
+    };
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
+    assert_eq!(state.idle_since(), Some(0.0));
+    // The display comes back: the clock is dropped.
+    assert!(!state.tick(
+        &env.workspace,
+        "probe",
+        Some(&snap),
+        Some(&location),
+        "",
+        599.0
+    ));
+    assert_eq!(state.idle_since(), None);
+    assert!(!state.tick(&env.workspace, "probe", Some(&snap), None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", Some(&snap), None, "", 1200.0));
+    assert!(state.tick(&env.workspace, "probe", Some(&snap), None, "", 1201.0));
     assert_eq!(
         display_events(&env, "hived.sleep")[0]["reason"],
         "window-gone"
@@ -7352,12 +7400,12 @@ fn test_sleep_timer_resets_when_display_or_registry_window_returns() {
 fn test_sleep_obligations_reset_the_timer() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
     let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
     lease.classify("send");
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 600.0));
     drop(lease);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1200.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1200.0));
     let path = prepare_operation(
         &env.workspace,
         "probe",
@@ -7367,21 +7415,21 @@ fn test_sleep_obligations_reset_the_timer() {
         "node",
     )
     .unwrap();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1800.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1800.0));
     operation_terminal(&path, Map::new()).unwrap();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 2400.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 2400.0));
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| None)));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 3000.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 3000.0));
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 3600.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 4200.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 3600.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, "", 4200.0));
 }
 
 #[test]
 fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
     for action in [
         "ping",
         "doctor",
@@ -7392,19 +7440,19 @@ fn test_read_only_requests_do_not_renew_sleep_but_short_send_does() {
     ] {
         let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
         lease.classify(action);
-        assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 599.0));
+        assert!(!state.tick(&env.workspace, "probe", None, None, "", 599.0));
         drop(lease);
     }
     let mut usage = RequestLease::reserve(&mut admission().lock().unwrap());
     usage.classify("send");
     drop(usage);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 600.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
     let mut reader = RequestLease::reserve(&mut admission().lock().unwrap());
     reader.classify("ping");
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1201.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1201.0));
     drop(reader);
-    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 1201.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, "", 1201.0));
 }
 
 #[test]
@@ -7433,8 +7481,8 @@ fn test_sleep_drain_new_connection_cancels_retirement() {
         }));
     });
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 600.0));
     assert!(!admission().lock().unwrap().closed);
     assert!(display_events(&env, "hived.sleep").is_empty());
     assert!(
@@ -7457,7 +7505,7 @@ fn test_sleep_drain_new_connection_cancels_retirement() {
     assert_eq!(ping["ok"], true);
     settle_leases();
     testhook::update(|h| h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new()))));
-    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, "", 601.0));
     assert_eq!(display_events(&env, "hived.sleep").len(), 1);
     let retirement = state.take_retirement().expect("the commit holds the lock");
     server.close();
@@ -7570,8 +7618,8 @@ fn test_sleep_drain_new_node_cancels_without_interrupting_it() {
         }));
     });
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 600.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 600.0));
     assert!(!admission().lock().unwrap().closed);
     assert_eq!(pending_operations(&env.workspace), 1);
     let record = saved_operation(Path::new(&env.workspace), "nd-late");
@@ -8159,13 +8207,13 @@ fn test_busy_identity_waits_out_a_sleep_rejection_on_a_real_socket() {
 fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
     let env = sleep_probe_env();
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 0.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 0.0));
     assert_eq!(state.idle_since(), Some(0.0));
     // Accepted, action not yet read: the clock runs on, the exit waits.
     let mut lease = RequestLease::reserve(&mut admission().lock().unwrap());
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 599.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 599.0));
     assert_eq!(state.idle_since(), Some(0.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
     assert_eq!(
         state.idle_since(),
         Some(0.0),
@@ -8174,7 +8222,7 @@ fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
     assert_eq!(admission().lock().unwrap().usage, 0);
     // Classified as a read: still no renewal, still delays the exit.
     lease.classify("ping");
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
     assert_eq!(state.idle_since(), Some(0.0));
     assert_eq!(admission().lock().unwrap().usage, 0);
     drop(lease);
@@ -8189,7 +8237,7 @@ fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
             Some(Vec::new())
         }));
     });
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 601.0));
     assert_eq!(arrived.load(Ordering::SeqCst), 1);
     assert_eq!(
         state.idle_since(),
@@ -8198,7 +8246,7 @@ fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
     );
     assert!(!admission().lock().unwrap().closed);
     // The next tick retires on the original deadline.
-    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 602.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, "", 602.0));
     assert_eq!(display_events(&env, "hived.sleep")[0]["idleSeconds"], 602.0);
     let retirement = state.take_retirement().unwrap();
     release_reexec_lock_fd_impl(Some(retirement.lock_fd));
@@ -8207,17 +8255,17 @@ fn test_unclassified_and_readonly_leases_preserve_sleep_deadline() {
 
     // A classified send is use: the clock resets and runs the full 600s.
     let mut state = SleepState::default();
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1000.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1000.0));
     let mut send = RequestLease::reserve(&mut admission().lock().unwrap());
     send.classify("send");
     assert_eq!(admission().lock().unwrap().usage, 1);
     drop(send);
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1601.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1601.0));
     assert_eq!(state.idle_since(), None, "use resets the clock");
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 1602.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 1602.0));
     assert_eq!(state.idle_since(), Some(1602.0));
-    assert!(!state.tick(&env.workspace, "probe", "@1", None, "", 2201.0));
-    assert!(state.tick(&env.workspace, "probe", "@1", None, "", 2202.0));
+    assert!(!state.tick(&env.workspace, "probe", None, None, "", 2201.0));
+    assert!(state.tick(&env.workspace, "probe", None, None, "", 2202.0));
     assert_eq!(display_events(&env, "hived.sleep")[1]["idleSeconds"], 600.0);
     let retirement = state.take_retirement().unwrap();
     release_reexec_lock_fd_impl(Some(retirement.lock_fd));
@@ -9020,9 +9068,11 @@ fn test_generation_change_keeps_one_dispatch_and_its_terminal_result() {
     let dispatches = dispatches.unwrap();
     hived_loop(&workspace, "probe", "probe:1", "@1");
     assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    // The display never answered this generation: the next one is told
+    // of no window, not of the birth target.
     assert_eq!(
         *execs.lock().unwrap(),
-        vec![hived_reexec_argv(&workspace, "probe", "probe:1", "@1")]
+        vec![hived_reexec_argv(&workspace, "probe", "", "")]
     );
     let generation = next_generation(&workspace, "probe");
     let result = request_node_result(&workspace, "nd-000000000001").unwrap();
@@ -9195,4 +9245,540 @@ fn test_admission_handshake_latency_within_budget() {
         assert!(admit_p95 < 50.0, "preflight p95 {admit_p95:.3}ms");
     });
     settle_leases();
+}
+
+// --------------------------------------------------------------------------
+// the display: where the team's windows are now, tick by tick
+// --------------------------------------------------------------------------
+
+/// A busy monitor that records its life on *log*, as `make`/`start`/`stop`
+/// with the session it was made for.
+struct TrackedMonitor {
+    session: String,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl OutputMonitor for TrackedMonitor {
+    fn is_busy(&self, _pane_id: &str, _threshold_seconds: f64) -> bool {
+        false
+    }
+    fn last_output_age(&self, _pane_id: &str) -> Option<f64> {
+        None
+    }
+    fn start(&self) {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("start {}", self.session));
+    }
+    fn stop(&self) {
+        self.log
+            .lock()
+            .unwrap()
+            .push(format!("stop {}", self.session));
+    }
+}
+
+fn tracked_monitors(log: &Arc<Mutex<Vec<String>>>) -> testhook::S1<Option<Arc<dyn OutputMonitor>>> {
+    let log = Arc::clone(log);
+    Arc::new(move |session| {
+        log.lock().unwrap().push(format!("make {session}"));
+        Some(Arc::new(TrackedMonitor {
+            session: session.to_string(),
+            log: Arc::clone(&log),
+        }) as Arc<dyn OutputMonitor>)
+    })
+}
+
+fn owner_bytes(workspace: &str) -> String {
+    fs::read_to_string(hooked_run_dir(workspace).join("hived.owner.json")).unwrap_or_default()
+}
+
+#[test]
+fn test_display_location_tracks_move_rename_and_rebuild() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    // The window listing the display answers on each tick: born in the
+    // team session, moved whole into `main`, that session renamed, gone,
+    // rebuilt in a new team session, then held while an upgrade fails.
+    let listings: Vec<Vec<WindowExtra>> = vec![
+        vec![probe_window("probe:1", "@1", "$1", &ws)],
+        vec![probe_window("probe:1", "@1", "$1", &ws)],
+        vec![probe_window("main:3", "@1", "$2", &ws)],
+        vec![probe_window("work:3", "@1", "$2", &ws)],
+        vec![],
+        vec![probe_window("probe:1", "@9", "$3", &ws)],
+        vec![probe_window("probe:1", "@9", "$3", &ws)],
+    ];
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let monitors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let hooks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let viewers_asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let notify_sessions: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let execs: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+    let owners: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        // The failed exec takes and releases the real reexec lock.
+        h.release_reexec_lock_fd = Some(Arc::new(release_reexec_lock_fd_impl));
+        h.make_busy_monitor = Some(tracked_monitors(&monitors));
+        let sink = Arc::clone(&hooks);
+        h.install_wake_hooks = Some(Arc::new(move |team, session| {
+            sink.lock().unwrap().push(format!("{team} {session}"))
+        }));
+        let sink = Arc::clone(&viewers_asked);
+        h.watching_clients = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(session.to_string());
+            Some(1)
+        }));
+        let sink = Arc::clone(&notify_sessions);
+        h.get_most_recent_client_window = Some(Arc::new(move |session| {
+            sink.lock().unwrap().push(session.to_string());
+            None
+        }));
+        let tick = Arc::clone(&ticks);
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let listing = listings[tick.load(Ordering::SeqCst).min(listings.len() - 1)].clone();
+            (Some(listing), "ok")
+        }));
+        let tick = Arc::clone(&ticks);
+        h.stale_disk_build_hash = Some(Arc::new(move || {
+            (tick.load(Ordering::SeqCst) == 6).then(|| "next-build".to_string())
+        }));
+        h.current_exe = Some(Arc::new(|| "/opt/hive".to_string()));
+        let sink = Arc::clone(&execs);
+        h.execv = Some(Arc::new(move |argv| {
+            sink.lock().unwrap().push(argv.to_vec());
+            ExecOutcome::Failed(std::io::Error::other("exec refused by the test"))
+        }));
+        let tick = Arc::clone(&ticks);
+        let owners = Arc::clone(&owners);
+        let owner_ws = ws.clone();
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            owners.lock().unwrap().push(owner_bytes(&owner_ws));
+            next < 7
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+
+    assert_eq!(
+        *monitors.lock().unwrap(),
+        vec![
+            "make $1", "start $1", // born
+            "stop $1", "make $2", "start $2", // moved: the same window, another session
+            "stop $2",  // windowless
+            "make $3", "start $3", // rebuilt
+            "stop $3", "start $3", // the failed exec rebinds the same monitor
+            "stop $3",  // teardown
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>(),
+        "a rename keeps the session and restarts nothing; a repeated snapshot changes nothing"
+    );
+    assert_eq!(
+        *hooks.lock().unwrap(),
+        vec!["probe $1", "probe $2", "probe $3"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        "the wake hooks follow the display into each new session"
+    );
+    // The last tick ends at `wait_tick`, before the idle and sleep checks.
+    assert_eq!(
+        *viewers_asked.lock().unwrap(),
+        vec!["$1", "$1", "$2", "$2", "$3"],
+        "the sleep gate counts viewers on the display's current session, by id, and none without a display"
+    );
+    assert_eq!(
+        *notify_sessions.lock().unwrap(),
+        vec!["$1", "$1", "$2", "$2", "", "$3"],
+        "the idle notifier reads the active window from the current session"
+    );
+    let moves: Vec<(Value, Value, Value)> = display_events(&env, "hived.display")
+        .into_iter()
+        .map(|e| {
+            (
+                e["window"].clone(),
+                e["windowId"].clone(),
+                e["session"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        moves,
+        vec![
+            (json!("probe:1"), json!("@1"), json!("$1")),
+            (json!("main:3"), json!("@1"), json!("$2")),
+            (json!("work:3"), json!("@1"), json!("$2")),
+            (Value::Null, Value::Null, Value::Null),
+            (json!("probe:1"), json!("@9"), json!("$3")),
+        ]
+    );
+    assert_eq!(
+        *execs.lock().unwrap(),
+        vec![hived_reexec_argv(&ws, "probe", "probe:1", "@9")],
+        "the next generation is told of the display as last seen, not the birth target"
+    );
+    let reexec = display_events(&env, "hived.reexec");
+    assert_eq!(reexec.len(), 1);
+    assert_eq!(reexec[0]["tmux_window"], "probe:1");
+    assert_eq!(reexec[0]["tmux_window_id"], "@9");
+    let owners = owners.lock().unwrap();
+    assert_eq!(owners.len(), 7);
+    assert!(
+        owners[0].contains(&format!("{}", getpid())),
+        "{}",
+        owners[0]
+    );
+    assert!(
+        owners.iter().all(|owner| *owner == owners[0]),
+        "the hived's pid and token outlive every display change: {owners:?}"
+    );
+    assert!(display_events(&env, "hived.sleep").is_empty());
+}
+
+#[test]
+fn test_display_location_prefers_the_registry_display_among_several_windows() {
+    let env = sleep_probe_env();
+    let ws = env.workspace.clone();
+    let instance = TeamInstance::from_registry("probe", &ws);
+    assert_eq!(instance.created, "123");
+    let mut other = probe_window("dev:2", "@4", "$0", &ws);
+    other.team = "other".to_string();
+    let mut stale = probe_window("dev:3", "@5", "$0", &ws);
+    stale.created = "99".to_string();
+    let mut elsewhere = probe_window("dev:4", "@6", "$0", &ws);
+    elsewhere.workspace = "/ws/elsewhere".to_string();
+    let listing = |windows: Vec<WindowExtra>| {
+        TickSnapshot::with_extras(
+            "ok",
+            Vec::new(),
+            HashMap::new(),
+            Some(windows.into_iter().map(|w| (w.window.clone(), w)).collect()),
+            None,
+        )
+    };
+    let asked = std::cell::Cell::new(0);
+    let preferred = |id: &'static str| {
+        let asked = &asked;
+        move || {
+            asked.set(asked.get() + 1);
+            Some(id.to_string())
+        }
+    };
+
+    // Same-name windows of another instance, and other teams' windows,
+    // are not this display; nothing to prefer among one candidate.
+    let snap = listing(vec![
+        other.clone(),
+        stale.clone(),
+        elsewhere.clone(),
+        probe_window("main:3", "@8", "$2", &ws),
+    ]);
+    let location = snap.display_location(&instance, preferred("@5")).unwrap();
+    assert_eq!(asked.get(), 0, "one window needs no tie-break");
+    assert_eq!(location.window, "main:3");
+    assert_eq!(location.window_id, "@8");
+    assert_eq!(location.session_id, "$2");
+    assert_eq!(location.sessions, vec!["$2"]);
+    assert_eq!(
+        listing(vec![other, stale, elsewhere]).display_location(&instance, preferred("@5")),
+        None
+    );
+
+    // Two windows across two sessions: the registry's display is the
+    // primary, every session is a viewer session.
+    let snap = listing(vec![
+        probe_window("main:3", "@8", "$2", &ws),
+        probe_window("probe:1", "@1", "$1", &ws),
+    ]);
+    let location = snap.display_location(&instance, preferred("@8")).unwrap();
+    assert_eq!(asked.get(), 1);
+    assert_eq!(
+        (location.window.as_str(), location.session_id.as_str()),
+        ("main:3", "$2")
+    );
+    assert_eq!(location.sessions, vec!["$1", "$2"]);
+    // A cache naming neither: the first in id order, stably.
+    let location = snap.display_location(&instance, preferred("@77")).unwrap();
+    assert_eq!(
+        (location.window.as_str(), location.session_id.as_str()),
+        ("probe:1", "$1")
+    );
+    let location = snap.display_location(&instance, || None).unwrap();
+    assert_eq!(location.window_id, "@1");
+
+    // The createdAt tag matches numerically, in whatever spelling.
+    let mut spelled = probe_window("probe:1", "@1", "$1", &ws);
+    spelled.created = "123.0".to_string();
+    assert!(listing(vec![spelled])
+        .display_location(&instance, || None)
+        .is_some());
+    let mut untagged = probe_window("probe:1", "@1", "$1", &ws);
+    untagged.created = String::new();
+    assert!(listing(vec![untagged])
+        .display_location(&instance, || None)
+        .is_none());
+}
+
+#[test]
+fn test_viewers_use_exact_current_sessions() {
+    let env = sleep_probe_env();
+    let snap = TickSnapshot::with_extras("ok", Vec::new(), HashMap::new(), None, None);
+    let location = DisplayLocation {
+        window: "probe:1".into(),
+        window_id: "@1".into(),
+        session_id: "$1".into(),
+        sessions: vec!["$1".into(), "$2".into()],
+    };
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let answers: Arc<Mutex<HashMap<String, Option<usize>>>> = Arc::new(Mutex::new(HashMap::new()));
+    testhook::update(|h| {
+        let asked = Arc::clone(&asked);
+        let answers = Arc::clone(&answers);
+        h.watching_clients = Some(Arc::new(move |session| {
+            asked.lock().unwrap().push(session.to_string());
+            answers.lock().unwrap()[session]
+        }));
+    });
+    let set = |a: Option<usize>, b: Option<usize>| {
+        let mut answers = answers.lock().unwrap();
+        answers.insert("$1".to_string(), a);
+        answers.insert("$2".to_string(), b);
+    };
+    let tick = |state: &mut SleepState, now: f64| {
+        state.tick(
+            &env.workspace,
+            "probe",
+            Some(&snap),
+            Some(&location),
+            "",
+            now,
+        )
+    };
+
+    // A terminal on either session is a viewer.
+    set(Some(0), Some(1));
+    let mut state = SleepState::default();
+    assert!(!tick(&mut state, 0.0));
+    assert!(!tick(&mut state, 601.0));
+    assert_eq!(state.idle_since(), None);
+
+    // A session tmux would not count is not "nobody".
+    set(Some(0), None);
+    let mut state = SleepState::default();
+    assert!(!tick(&mut state, 0.0));
+    assert!(!tick(&mut state, 601.0));
+    assert_eq!(state.idle_since(), None);
+
+    // Every session known empty: unwatched, at the threshold.
+    set(Some(0), Some(0));
+    let mut state = SleepState::default();
+    assert!(!tick(&mut state, 0.0));
+    assert_eq!(state.idle_since(), Some(0.0));
+    assert!(!tick(&mut state, 599.0));
+    assert!(tick(&mut state, 601.0));
+    let events = display_events(&env, "hived.sleep");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["reason"], "unwatched");
+    let lock_fd = state.take_retirement().unwrap().lock_fd;
+    release_reexec_lock_fd_impl(Some(lock_fd));
+
+    let asked = asked.lock().unwrap();
+    assert!(!asked.is_empty());
+    assert!(
+        asked.iter().all(|s| s == "$1" || s == "$2"),
+        "only the display's sessions are asked, by id: {asked:?}"
+    );
+}
+
+#[test]
+fn test_removed_team_ignores_recycled_foreign_window_id() {
+    // An external workspace outlives its registry entry; the tmux server
+    // restarted since this hived was born, and its `@1` is another team's
+    // window now — with a pane still tagged for this team by name.
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let entry = crate::registry::entry_path("probe").unwrap();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.cv_journal_signature = Some(Arc::new(Vec::new));
+        let recycled = ws.clone();
+        h.list_windows_snapshot = Some(Arc::new(move || {
+            let mut window = probe_window("other:0", "@1", "$0", &recycled);
+            window.team = "other".to_string();
+            (Some(vec![window]), "ok")
+        }));
+        h.list_panes_all_status = Some(Arc::new(|| {
+            (
+                Some(vec![PaneInfo {
+                    pane_id: "%7".to_string(),
+                    role: "agent".to_string(),
+                    team: "probe".to_string(),
+                    ..Default::default()
+                }]),
+                "ok",
+            )
+        }));
+        let clock = Arc::clone(&ticks);
+        h.monotonic = Some(Arc::new(move || clock.load(Ordering::SeqCst) as f64 * 30.0));
+        let tick = Arc::clone(&ticks);
+        let entry = entry.clone();
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            if next == 1 {
+                fs::remove_file(&entry).unwrap();
+            }
+            next < 4
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    assert_eq!(
+        ticks.load(Ordering::SeqCst),
+        1,
+        "the next 30s check retires the desk, not the 600s sleep"
+    );
+    assert!(display_events(&env, "hived.sleep").is_empty());
+    assert!(!asleep_marker_path(&ws).exists());
+    assert!(
+        Path::new(&ws).is_dir(),
+        "the external workspace is left alone"
+    );
+}
+
+#[test]
+fn test_removed_team_with_its_display_up_keeps_the_idle_policy() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let entry = crate::registry::entry_path("probe").unwrap();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        let clock = Arc::clone(&ticks);
+        h.monotonic = Some(Arc::new(move || clock.load(Ordering::SeqCst) as f64 * 30.0));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            if next == 1 {
+                fs::remove_file(&entry).unwrap();
+            }
+            next < 4
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    assert_eq!(
+        ticks.load(Ordering::SeqCst),
+        4,
+        "a window of this instance still on screen keeps the desk on the sleep policy"
+    );
+    assert!(display_events(&env, "hived.sleep").is_empty());
+}
+
+#[test]
+fn test_orphan_interrupts_owned_node_without_unlinking_new_owner() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    let path = prepare_operation(&ws, "probe", "123", "nd-orphan", "worker", "node").unwrap();
+    assert_eq!(
+        saved_operation(Path::new(&ws), "nd-orphan")["state"],
+        "prepared"
+    );
+    testhook::update(|h| {
+        h.open_server_socket = Some(Arc::new(|workspace| {
+            Ok(Box::new(open_server_socket(workspace)?) as Box<dyn HivedServerApi>)
+        }));
+        h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
+        // Another generation took the owner file right after this one
+        // published itself.
+        h.write_hived_owner = Some(Arc::new(|workspace, pid, started_at, token| {
+            write_hived_owner_impl(workspace, pid, started_at, token);
+            write_hived_owner_impl(workspace, pid + 1, "next", "next-token");
+        }));
+        h.wait_tick = Some(Arc::new(|| panic!("an orphan never serves a tick")));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    let retire = display_events(&env, "hived.retire_orphan");
+    assert_eq!(retire.len(), 1);
+    assert_eq!(retire[0]["socketPid"], Value::from(getpid() + 1));
+    let record = saved_operation(Path::new(&ws), "nd-orphan");
+    assert_eq!(record["state"], "terminal");
+    assert_eq!(record["result"]["status"], "interrupted");
+    assert_eq!(record["result"]["reason"], "hived replaced");
+    assert_eq!(
+        serde_json::from_str::<Value>(&owner_bytes(&ws)).unwrap()["token"],
+        "next-token",
+        "the new owner's file is not touched"
+    );
+    assert!(
+        socket_path(&ws).exists(),
+        "the socket is the new owner's; the orphan unlinks nothing"
+    );
+    drop(path);
+    cleanup_socket_impl(&ws);
+}
+
+#[test]
+fn test_team_removed_interrupts_node_in_external_workspace() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    prepare_operation(&ws, "probe", "123", "nd-removed", "worker", "node").unwrap();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let entry = crate::registry::entry_path("probe").unwrap();
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        h.list_windows_snapshot = Some(Arc::new(|| (Some(Vec::new()), "ok")));
+        let clock = Arc::clone(&ticks);
+        h.monotonic = Some(Arc::new(move || clock.load(Ordering::SeqCst) as f64 * 30.0));
+        let tick = Arc::clone(&ticks);
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            if next == 1 {
+                fs::remove_file(&entry).unwrap();
+            }
+            next < 4
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    assert_eq!(ticks.load(Ordering::SeqCst), 1);
+    let record = saved_operation(Path::new(&ws), "nd-removed");
+    assert_eq!(record["state"], "terminal");
+    assert_eq!(record["result"]["status"], "interrupted");
+    assert_eq!(record["result"]["reason"], "team removed");
+    assert!(Path::new(&ws).is_dir());
+}
+
+#[test]
+fn test_workspace_removed_does_not_recreate_journal() {
+    let env = loop_probe_env("ok");
+    let ws = env.workspace.clone();
+    prepare_operation(&ws, "probe", "123", "nd-gone", "worker", "node").unwrap();
+    let journal = hooked_run_dir(&ws).join("operations");
+    assert!(journal.is_dir());
+    let ticks = Arc::new(AtomicUsize::new(0));
+    testhook::update(|h| {
+        h.gl_idle_owned_keys = Some(Arc::new(|_| Some(Vec::new())));
+        let tick = Arc::clone(&ticks);
+        let gone = ws.clone();
+        h.wait_tick = Some(Arc::new(move || {
+            let next = tick.fetch_add(1, Ordering::SeqCst) + 1;
+            if next == 1 {
+                fs::remove_dir_all(&gone).unwrap();
+            }
+            next < 4
+        }));
+    });
+    hived_loop(&ws, "probe", "probe:1", "@1");
+    assert_eq!(
+        ticks.load(Ordering::SeqCst),
+        1,
+        "the next tick retires the desk"
+    );
+    assert!(
+        !Path::new(&ws).exists(),
+        "nothing of the removed workspace is written back: no journal, no lock, no marker"
+    );
+    assert!(display_events(&env, "hived.sleep").is_empty());
 }

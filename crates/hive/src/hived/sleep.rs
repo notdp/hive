@@ -65,23 +65,10 @@ impl Retirement {
 pub(super) struct SleepState {
     since: Option<f64>,
     usage: u64,
-    /// The session the team window sits in (from its `session:index`
-    /// target): whose terminals count as viewers.
-    session: String,
     retirement: Option<Retirement>,
 }
 
 impl SleepState {
-    pub(super) fn for_window(tmux_window: &str) -> Self {
-        SleepState {
-            session: tmux_window
-                .split_once(':')
-                .map_or("", |(session, _)| session)
-                .to_string(),
-            ..Default::default()
-        }
-    }
-
     /// The commit of a tick that returned true, for the loop's teardown.
     pub(super) fn take_retirement(&mut self) -> Option<Retirement> {
         self.retirement.take()
@@ -101,37 +88,51 @@ fn idle_owned_grok_keys(team: &str) -> Option<Vec<String>> {
     crate::adapters::grok_leader::pool().idle_owned_keys(team)
 }
 
-/// Whether the team's window is on screen. A window id is checked as this
-/// team's window, never by existence alone: ids restart from `@0` when the
-/// tmux server restarts, so a hived from before the restart would otherwise
-/// read another team's `@0` as its own display and never retire.
-fn absent_display(team: &str, window: &str, snap: Option<&TickSnapshot>) -> Option<&'static str> {
-    let Some(snap) = snap else {
-        return Some("display-unreachable");
-    };
-    if snap.panes.iter().any(|pane| pane.team == team) || hooked_team_window_alive(window, team) {
-        return None;
-    }
-    if let Some(display) = crate::registry::load(team).and_then(|entry| {
-        entry
-            .get("display")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    }) {
-        if !display.is_empty() && display != window && hooked_team_window_alive(&display, team) {
-            return None;
+/// Terminals watching the display, over every session that holds one of
+/// its windows: any known terminal is a viewer; nobody only when every
+/// session answered zero. A session tmux would not count leaves the sum
+/// unknown unless another already showed a viewer — an unknown count is
+/// not "nobody". Control-mode clients (hive's own monitor) never count.
+fn viewers(sessions: &[String]) -> Option<usize> {
+    let mut total = 0;
+    let mut unknown = false;
+    for session in sessions {
+        match hooked_watching_clients(session) {
+            Some(n) => total += n,
+            None => unknown = true,
         }
     }
-    Some("window-gone")
+    if total == 0 && unknown {
+        None
+    } else {
+        Some(total)
+    }
+}
+
+/// Why the display counts as absent this tick: the tmux server did not
+/// answer, or no window on it carries this instance's tags. A window id
+/// is never taken on its own: ids restart from `@0` when the tmux server
+/// restarts, and a hived from before the restart would otherwise read
+/// another team's `@0` as its display and never retire.
+fn absent_display(
+    snap: Option<&TickSnapshot>,
+    location: Option<&DisplayLocation>,
+) -> Option<&'static str> {
+    if snap.is_none() {
+        return Some("display-unreachable");
+    }
+    location.is_none().then_some("window-gone")
 }
 
 impl SleepState {
+    /// One idle check against this tick's display (*snap*, None while
+    /// tmux does not answer) and the display's current location on it.
     pub(super) fn tick(
         &mut self,
         workspace: &str,
         team: &str,
-        window: &str,
         snap: Option<&TickSnapshot>,
+        location: Option<&DisplayLocation>,
         owner_token: &str,
         now: f64,
     ) -> bool {
@@ -139,7 +140,7 @@ impl SleepState {
             let state = admission().lock().unwrap_or_else(|e| e.into_inner());
             (state.working(), state.usage)
         };
-        let absent = absent_display(team, window, snap);
+        let absent = absent_display(snap, location);
         let used = self.usage != usage;
         self.usage = usage;
         if working
@@ -152,15 +153,15 @@ impl SleepState {
         }
         // A window no terminal is attached to is a picture nobody sees:
         // the status bar and colours this desk keeps up have no viewer.
-        // hive's own control-mode monitor is not one; a count tmux will
-        // not give is not "nobody". Asked only once the cheaper gates
-        // pass, so a busy desk never pays for it.
-        let reason = match absent {
-            Some(reason) => Some(reason),
-            None => match hooked_watching_clients(&self.session) {
+        // Asked only once the cheaper gates pass, so a busy desk never
+        // pays for it.
+        let reason = match (absent, location) {
+            (Some(reason), _) => Some(reason),
+            (None, Some(location)) => match viewers(&location.sessions) {
                 Some(0) => Some("unwatched"),
                 _ => None,
             },
+            (None, None) => None,
         };
         let Some(reason) = reason else {
             self.since = None;

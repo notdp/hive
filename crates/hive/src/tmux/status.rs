@@ -328,20 +328,23 @@ pub fn install_team_status(session_id: &str) {
     }
 }
 
-/// The wake hooks alone, on the team session *team* named itself: what a
-/// hived (re)installs at start, so a session built by an older binary —
-/// or one whose hooks were unset by hand — wakes its desk too. Idempotent;
-/// a session that is not hive's own (a team built in the human's session)
-/// is left alone, its client is the human's already.
-pub fn install_wake_hooks(team: &str) {
-    if !crate::team_display::owns_team_session(team) {
+/// The wake hooks alone, on *session_id* — the session the hived found
+/// its display in — when that is the team session *team* named itself:
+/// what a hived installs where its display is, so a session built by an
+/// older binary, or one whose hooks were unset by hand, wakes its desk
+/// too. Idempotent; a session that is not hive's own (a team built in, or
+/// moved into, the human's session) is left alone, its client is the
+/// human's already.
+pub fn install_wake_hooks(team: &str, session_id: &str) {
+    if session_id.is_empty() || !crate::team_display::owns_team_session(team) {
         return;
     }
-    let Some(session_id) = crate::tmux::display_value(&format!("{team}:"), "#{session_id}") else {
+    let own = crate::tmux::display_value(&format!("={team}:"), "#{session_id}");
+    if own.as_deref() != Some(session_id) {
         return;
-    };
+    }
     let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
-    for row in wake_hook_argv(&session_id, &hive) {
+    for row in wake_hook_argv(session_id, &hive) {
         let args: Vec<&str> = row.iter().map(String::as_str).collect();
         let _ = run(&args, false, 5);
     }

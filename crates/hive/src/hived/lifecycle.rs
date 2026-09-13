@@ -19,10 +19,6 @@ use crate::devlog;
 
 use super::*;
 
-pub(crate) fn is_tmux_window_alive_impl(tmux_window_id: &str) -> bool {
-    crate::tmux::window_exists(tmux_window_id)
-}
-
 /// A display probe result that flipped the display's reachability; the
 /// loop logs each flip once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,6 +473,91 @@ fn hooked_make_busy_monitor(
     )))
 }
 
+/// The display as the loop last resolved it, and the busy monitor on its
+/// session. The location follows the windows' own tags tick by tick — a
+/// window moved to another session, a session renamed, a display rebuilt
+/// after a windowless stretch — and the monitor, the viewer sessions the
+/// sleep gate counts and the idle notifier's session follow it; the hived
+/// itself stays. What the CLI passed at start is where the display was
+/// then, not an authority the loop keeps.
+struct DisplayTrack {
+    location: Option<DisplayLocation>,
+    monitor: Option<Arc<dyn OutputMonitor>>,
+}
+
+impl DisplayTrack {
+    fn window(&self) -> &str {
+        self.location.as_ref().map_or("", |l| l.window.as_str())
+    }
+
+    fn window_id(&self) -> &str {
+        self.location.as_ref().map_or("", |l| l.window_id.as_str())
+    }
+
+    fn session_id(&self) -> &str {
+        self.location.as_ref().map_or("", |l| l.session_id.as_str())
+    }
+
+    /// Take this tick's resolution. A change of session stops the monitor
+    /// on the old one and starts one on the new, which also gets the wake
+    /// hooks; the same location again changes nothing.
+    fn follow(&mut self, workspace: &str, team: &str, next: Option<DisplayLocation>) {
+        if next == self.location {
+            return;
+        }
+        let next_session = next.as_ref().map_or("", |l| l.session_id.as_str());
+        hooked_notify_debug_emit(
+            workspace,
+            "hived.display",
+            &[
+                ("team", Value::from(team)),
+                (
+                    "window",
+                    next.as_ref()
+                        .map_or(Value::Null, |l| Value::from(l.window.as_str())),
+                ),
+                (
+                    "windowId",
+                    next.as_ref()
+                        .map_or(Value::Null, |l| Value::from(l.window_id.as_str())),
+                ),
+                (
+                    "session",
+                    if next_session.is_empty() {
+                        Value::Null
+                    } else {
+                        Value::from(next_session)
+                    },
+                ),
+                (
+                    "sessions",
+                    Value::Array(
+                        next.as_ref()
+                            .map(|l| l.sessions.iter().map(|s| Value::from(s.as_str())).collect())
+                            .unwrap_or_default(),
+                    ),
+                ),
+            ],
+        );
+        if next_session != self.session_id() {
+            if let Some(monitor) = self.monitor.take() {
+                monitor.stop();
+            }
+            set_output_busy_monitor(None);
+            if !next_session.is_empty() {
+                let monitor = hooked_make_busy_monitor(next_session, workspace);
+                if let Some(monitor) = monitor.as_ref() {
+                    monitor.start();
+                }
+                set_output_busy_monitor(monitor.clone());
+                self.monitor = monitor;
+                hooked_install_wake_hooks(team, next_session);
+            }
+        }
+        self.location = next;
+    }
+}
+
 pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_window_id: &str) {
     SHUTDOWN.store(false, Ordering::SeqCst);
     FORCE_SHUTDOWN.store(false, Ordering::SeqCst);
@@ -489,7 +570,12 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     let mut claude_view_state = ClaudeTickState::default();
     let mut status_state = StatusTickState::default();
     let mut display = DisplayProbe::new();
-    let mut sleep = SleepState::for_window(tmux_window);
+    let mut sleep = SleepState::default();
+    let instance = TeamInstance::from_registry(team, workspace);
+    let mut track = DisplayTrack {
+        location: None,
+        monitor: None,
+    };
     // `monotonic()` starts near zero, so a 0.0 seed would skip the first
     // periodic checks; negative infinity makes every one run on the first tick.
     let mut last_window_check = f64::NEG_INFINITY;
@@ -503,10 +589,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             .map(|d| d.as_nanos())
             .unwrap_or_default()
     );
-    // The session hooks that wake an unwatched desk ride the hived's start,
-    // not only the session's build: a session an older binary built gets
-    // them at the first start after an upgrade.
-    hooked_install_wake_hooks(team);
     hooked_notify_debug_emit(
         workspace,
         "hived.start",
@@ -557,17 +639,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     // so the session hooks can still wake the desk.
     sleep::clear_asleep_marker(workspace);
     hooked_release_reexec_lock_fd(inherited_reexec_lock_fd);
-    let session_target = tmux_window
-        .split_once(':')
-        .map(|(session, _)| session)
-        .unwrap_or(tmux_window)
-        .trim()
-        .to_string();
-    let busy_monitor = hooked_make_busy_monitor(&session_target, workspace);
-    set_output_busy_monitor(busy_monitor.clone());
-    if let Some(monitor) = busy_monitor.as_ref() {
-        monitor.start();
-    }
 
     // Every exit from the loop is a `break`, so the teardown after it runs
     // for all of them.
@@ -578,23 +649,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         }
 
         let now = monotonic();
-        if now - last_window_check >= 30.0 {
-            last_window_check = now;
-            // The registry entry is the team's existence; the tmux window
-            // is only its display. A dead window starts the idle sleep
-            // check below; a missing registry file (`hive delete` removes
-            // it) with no display
-            // window left behind it does. Corrupt or foreign-instance
-            // entries are not "missing": never retire on a read that
-            // might be wrong.
-            if let Some(path) = crate::registry::entry_path(team) {
-                if !path.is_file() && !hooked_is_tmux_window_alive(tmux_window_id) {
-                    retirement_reason = "team removed";
-                    break;
-                }
-            }
-        }
-
         if now - last_daemon_cleanup >= 30.0 {
             last_daemon_cleanup = now;
             // Supervision must never take the hived down: every tick below
@@ -615,8 +669,8 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
                     "hived.retire_orphan",
                     &[
                         ("team", Value::from(team)),
-                        ("tmux_window", Value::from(tmux_window)),
-                        ("tmux_window_id", Value::from(tmux_window_id)),
+                        ("tmux_window", Value::from(track.window())),
+                        ("tmux_window_id", Value::from(track.window_id())),
                         ("currentPid", Value::from(getpid())),
                         ("socketPid", Value::from(foreign_pid)),
                     ],
@@ -628,14 +682,16 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         let stale_hash = hooked_stale_disk_build_hash(&mut code_reexec_state, now);
         flush_operations(workspace);
         if let Some(stale_hash) = stale_hash {
+            // The next generation is told where the display was last
+            // seen, never where this one was born.
             let emit_reexec = || {
                 hooked_notify_debug_emit(
                     workspace,
                     "hived.reexec",
                     &[
                         ("team", Value::from(team)),
-                        ("tmux_window", Value::from(tmux_window)),
-                        ("tmux_window_id", Value::from(tmux_window_id)),
+                        ("tmux_window", Value::from(track.window())),
+                        ("tmux_window_id", Value::from(track.window_id())),
                         ("oldHash", Value::from(hived_build_hash())),
                         ("newHash", Value::from(stale_hash.clone())),
                     ],
@@ -644,10 +700,10 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             if let Some(replacement) = reexec_hived(
                 workspace,
                 team,
-                tmux_window,
-                tmux_window_id,
+                track.window(),
+                track.window_id(),
                 server.as_ref(),
-                busy_monitor.as_ref(),
+                track.monitor.as_ref(),
                 Some(&emit_reexec),
             ) {
                 // exec failed: keep serving the old build on the rebound
@@ -667,23 +723,59 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         // windows, CLIs, tokens are lookups into it); while it does not,
         // those ticks are skipped and the probe backs off. The accept worker
         // serves independently of this sampling and maintenance.
-        let snap = if display.due(now) {
+        let (snap, status) = if display.due(now) {
             let snap = TickSnapshot::collect();
-            if let Some(transition) = display.record(snap.status, now) {
+            let status = snap.status;
+            if let Some(transition) = display.record(status, now) {
                 hooked_notify_debug_emit(
                     workspace,
                     transition.event(),
                     &[
                         ("team", Value::from(team)),
-                        ("status", Value::from(snap.status)),
+                        ("status", Value::from(status)),
                         ("nextProbeSeconds", Value::from(display.next_in(now))),
                     ],
                 );
             }
-            Some(snap).filter(TickSnapshot::reachable)
+            (Some(snap).filter(TickSnapshot::reachable), Some(status))
         } else {
-            None
+            (None, None)
         };
+        // Where the display is now. A server that is gone has no windows;
+        // a server that did not answer keeps the last location, so a
+        // blink of tmux moves nothing.
+        match (snap.as_ref(), status) {
+            (Some(snap), _) => {
+                let preferred = || {
+                    crate::registry::load(team).and_then(|entry| {
+                        entry
+                            .get("display")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+                };
+                track.follow(workspace, team, snap.display_location(&instance, preferred));
+            }
+            (None, Some("no-server")) => track.follow(workspace, team, None),
+            _ => {}
+        }
+
+        if now - last_window_check >= 30.0 {
+            last_window_check = now;
+            // The registry entry is the team's existence; the display is
+            // only where it shows. A missing entry (`hive delete` removes
+            // it) with no window of this instance left behind it retires
+            // the desk; a display still up keeps it on the idle policy
+            // below. Corrupt or foreign-instance entries are not
+            // "missing": never retire on a read that might be wrong.
+            if let Some(path) = crate::registry::entry_path(team) {
+                if !path.is_file() && track.location.is_none() {
+                    retirement_reason = "team removed";
+                    break;
+                }
+            }
+        }
+
         let tick_members = snap.as_ref().map(|snap| {
             let tick_members = hooked_team_member_bindings(team, snap).unwrap_or_default();
             // Job relabelling and border cosmetics must never take the hived
@@ -699,7 +791,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             status_tick(
                 workspace,
                 &tick_members,
-                busy_monitor.as_deref(),
+                track.monitor.as_deref(),
                 &mut status_state,
                 now_epoch_seconds(),
                 snap,
@@ -717,9 +809,9 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         if let (Some(snap), Some(tick_members)) = (snap.as_ref(), tick_members.as_deref()) {
             idle_notify_tick(
                 team,
-                &session_target,
+                track.session_id(),
                 &mut idle_notify,
-                busy_monitor.as_deref(),
+                track.monitor.as_deref(),
                 monotonic(),
                 workspace,
                 Some(&mut notify_debug_state),
@@ -730,8 +822,8 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         if sleep.tick(
             workspace,
             team,
-            tmux_window_id,
             snap.as_ref(),
+            track.location.as_ref(),
             &owner_token,
             monotonic(),
         ) {
@@ -750,13 +842,17 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     // starter binds while this generation may still write shared state.
     let retirement = sleep.take_retirement();
     let lock_fd = match retirement.as_ref() {
-        Some(retirement) => retirement.lock_fd,
-        None => loop {
+        Some(retirement) => Some(retirement.lock_fd),
+        // The lock lives in the workspace's run dir: a workspace that is
+        // gone has nothing left to serialize against, and taking the lock
+        // would recreate the directory the team's end removed.
+        None if !Path::new(workspace).is_dir() => None,
+        None => Some(loop {
             if let Some(fd) = hooked_try_acquire_reexec_lock(workspace) {
                 break fd;
             }
             thread::sleep(Duration::from_millis(20));
-        },
+        }),
     };
     close_admission();
     server.close();
@@ -764,14 +860,14 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         interrupt_operations(workspace, retirement_reason);
     }
     cleanup_socket_if_owner(workspace, &owner_token);
-    if let Some(monitor) = busy_monitor.as_ref() {
+    if let Some(monitor) = track.monitor.as_ref() {
         monitor.stop();
     }
     set_output_busy_monitor(None);
     if let Some(retirement) = retirement {
         retirement.drop_clients();
     }
-    hooked_release_reexec_lock_fd(Some(lock_fd));
+    hooked_release_reexec_lock_fd(lock_fd);
 }
 
 fn now_epoch_seconds() -> i64 {

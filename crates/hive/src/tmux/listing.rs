@@ -376,24 +376,78 @@ pub fn parse_panes_snapshot(stdout: &str) -> PaneSnapshot {
     (panes, extras)
 }
 
-/// One window option across every window, `session:index → value`, only
-/// for windows where it is set. None when tmux did not answer.
-pub fn list_window_option_all(key: &str) -> Option<std::collections::HashMap<String, String>> {
-    let fmt = format!("#{{session_name}}:#{{window_index}}\t#{{@{key}}}");
-    let r = run(&["list-windows", "-a", "-F", &fmt], false, 5).ok()?;
-    if r.returncode != 0 {
-        return None;
-    }
-    Some(parse_window_option_all(&r.stdout))
+/// One window of the hived's tick snapshot: where it is, whose it is.
+/// `team`, `workspace` and `created` are the instance tags `hive create`
+/// writes (`@hive-team` masked by `@hive-hidden`, as every team scan reads
+/// it); `token` is the notify token option the tick clears.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WindowExtra {
+    /// `session:index`.
+    pub window: String,
+    pub window_id: String,
+    pub session_id: String,
+    pub session_name: String,
+    pub team: String,
+    pub workspace: String,
+    pub created: String,
+    pub token: String,
 }
 
-pub fn parse_window_option_all(stdout: &str) -> std::collections::HashMap<String, String> {
-    stdout
-        .lines()
-        .filter_map(|line| {
-            let (window, value) = line.split_once('\t')?;
-            (!window.is_empty() && !value.is_empty())
-                .then(|| (window.to_string(), value.to_string()))
-        })
-        .collect()
+fn window_snapshot_fmt(token_key: &str) -> String {
+    format!(
+        "#{{session_name}}:#{{window_index}}\t#{{window_id}}\t#{{session_id}}\t#{{session_name}}\t\
+         {WINDOW_TEAM_FMT}\t#{{@hive-workspace}}\t#{{@hive-created}}\t#{{@{token_key}}}"
+    )
+}
+const WINDOW_SNAPSHOT_FIELD_COUNT: usize = 8;
+
+/// Every window on the server with its snapshot columns, keyed by
+/// `session:index`; the same `(value, status)` contract as
+/// `list_panes_all_status`. *token_key* names the notify token option
+/// (without its `@`).
+pub fn list_windows_snapshot_status(
+    token_key: &str,
+) -> (
+    Option<std::collections::HashMap<String, WindowExtra>>,
+    &'static str,
+) {
+    let fmt = window_snapshot_fmt(token_key);
+    let r = match run(&["list-windows", "-a", "-F", &fmt], false, 5) {
+        Ok(r) => r,
+        Err(_) => return (None, "unknown"),
+    };
+    if r.returncode == 0 {
+        return (Some(parse_windows_snapshot(&r.stdout)), "ok");
+    }
+    if stderr_means_no_server(&r.stderr) {
+        return (None, "no-server");
+    }
+    (None, "unknown")
+}
+
+pub fn parse_windows_snapshot(stdout: &str) -> std::collections::HashMap<String, WindowExtra> {
+    let mut windows = std::collections::HashMap::new();
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let p = split_fields(line, WINDOW_SNAPSHOT_FIELD_COUNT);
+        if p[0].is_empty() {
+            continue;
+        }
+        windows.insert(
+            p[0].clone(),
+            WindowExtra {
+                window: p[0].clone(),
+                window_id: p[1].clone(),
+                session_id: p[2].clone(),
+                session_name: p[3].clone(),
+                team: p[4].clone(),
+                workspace: p[5].clone(),
+                created: p[6].clone(),
+                token: p[7].clone(),
+            },
+        );
+    }
+    windows
 }
