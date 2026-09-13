@@ -600,6 +600,91 @@ fn test_replayed_history_is_turn_evidence_but_not_display_state() {
     teardown(&client, &proc);
 }
 
+/// grok 1.0.30's turn end, as its `session/load` replay and its live
+/// stream carry it (method `_x.ai/session/update`), captured from a real
+/// leader during the install acceptance of the lifecycle fixes.
+fn turn_completed_v130(session_id: &str, prompt_id: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "_x.ai/session/update",
+        "params": {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "turn_completed",
+                "prompt_id": prompt_id,
+                "stop_reason": "end_turn",
+                "usage": {"inputTokens": 125335, "outputTokens": 1403, "numTurns": 5},
+                "elapsed_ms": 30327,
+            },
+            "_meta": {
+                "eventId": format!("{session_id}-412"),
+                "agentTimestampMs": 1789283323845u64,
+                "isReplay": true,
+                "x.ai/leaderClientId": 9,
+            },
+        },
+    })
+}
+
+#[test]
+fn test_replayed_turn_end_under_grok_130s_method_name_closes_the_turn() {
+    // A desk woken from sleep reloads the member's history: a turn that
+    // ran (message chunk, tool calls) and ended under the newer method
+    // name is a closed turn, so the next dispatch is not `member_busy`.
+    let _bed = setup();
+    let history = vec![
+        update_for(
+            SID,
+            "user_message_chunk",
+            json!({"content": {"type": "text", "text": "task"}}),
+        ),
+        update_for(
+            SID,
+            "agent_message_chunk",
+            json!({"content": {"type": "text", "text": "ok"}}),
+        ),
+        update_for(
+            SID,
+            "tool_call",
+            json!({"toolCallId": "c1", "title": "write", "status": "completed"}),
+        ),
+        turn_completed_v130(SID, "412fdb07-277a-4f23-9206-5689d6688efa"),
+        json!({
+            "jsonrpc": "2.0",
+            "method": "_x.ai/session/update",
+            "params": {"sessionId": SID, "update": {"sessionUpdate": "background_tasks", "tasks": []}},
+        }),
+    ];
+    let (client, proc) = loaded(None, history);
+    assert_eq!(client.turn_open(), Some(false));
+    assert!(client.runtime().is_none());
+    teardown(&client, &proc);
+
+    // Another session's turn end under the same method is still not ours.
+    let (client, proc) = loaded(
+        None,
+        vec![
+            update_for(SID, "agent_message_chunk", json!({})),
+            turn_completed_v130("other-session", "p-other"),
+        ],
+    );
+    assert_eq!(client.turn_open(), Some(true));
+    teardown(&client, &proc);
+
+    // Live, the same method name ends the turn the display shows.
+    let (client, proc) = loaded(None, vec![]);
+    proc.feed(&update(
+        "agent_message_chunk",
+        json!({"content": {"type": "text", "text": "new turn"}}),
+    ));
+    settle(&client, |rt| rt.busy);
+    proc.feed(&turn_completed_v130(SID, "p-live"));
+    let runtime = settle(&client, |rt| !rt.busy);
+    assert_eq!(runtime.turn_open, Some(false));
+    assert_eq!(runtime.input_state, "ready");
+    teardown(&client, &proc);
+}
+
 #[test]
 fn test_live_turn_evidence_overrides_the_replayed_history() {
     let _bed = setup();
