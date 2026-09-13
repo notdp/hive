@@ -478,6 +478,71 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("ambiguous delivery"));
         assert!(err.to_string().contains("do not resend automatically"));
+        // Refused at the preflight, or withheld from a hived of another
+        // api: nothing went out, so a plain refusal with the reason.
+        let err = hived_answer(
+            &ws,
+            Err(RequestFailure::NotAdmitted("hived is draining".into())),
+            "node dispatch",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, DispatchFailure::Refused(reason) if reason.contains("did not admit") && reason.contains("hived is draining")),
+            "{err:?}"
+        );
+        let err = hived_answer(
+            &ws,
+            Err(RequestFailure::Incompatible("hived speaks api 5".into())),
+            "node dispatch",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, DispatchFailure::Refused(reason) if reason.contains("api 5")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn test_admitted_request_retries_only_before_the_payload_went_out() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().to_string_lossy().to_string();
+        let _hived = crate::testkit::hived_answering_ping("t");
+        let team = Team {
+            name: "t".to_string(),
+            workspace: ws.clone(),
+            tmux_window: "dev:1".to_string(),
+            tmux_window_id: "@7".to_string(),
+            ..Default::default()
+        };
+        let attempts = |outcome: &dyn Fn() -> Result<Map<String, Value>, RequestFailure>| {
+            let mut calls = 0;
+            let answer = admitted_request(&ws, &team, || {
+                calls += 1;
+                outcome()
+            })
+            .unwrap();
+            (calls, answer)
+        };
+        // Refused at the preflight, or no listener: the desk is ensured
+        // again and the request tried again, a bounded number of times.
+        let (calls, answer) = attempts(&|| Err(RequestFailure::NotAdmitted("draining".into())));
+        assert_eq!(calls, ADMISSION_ATTEMPTS);
+        assert!(matches!(answer, Err(RequestFailure::NotAdmitted(_))));
+        let (calls, answer) = attempts(&|| Err(RequestFailure::NoListener));
+        assert_eq!(calls, ADMISSION_ATTEMPTS);
+        assert_eq!(answer, Err(RequestFailure::NoListener));
+        // The payload may have gone out: never tried again.
+        let (calls, answer) = attempts(&|| Err(RequestFailure::AnswerLost("EOF".into())));
+        assert_eq!(calls, 1);
+        assert!(matches!(answer, Err(RequestFailure::AnswerLost(_))));
+        // Withheld or unsent for a reason a retry does not change.
+        let (calls, _) = attempts(&|| Err(RequestFailure::Incompatible("api 5".into())));
+        assert_eq!(calls, 1);
+        let (calls, _) = attempts(&|| Err(RequestFailure::NotSent("perm".into())));
+        assert_eq!(calls, 1);
+        let (calls, answer) = attempts(&|| Ok(Map::new()));
+        assert_eq!(calls, 1);
+        assert_eq!(answer, Ok(Map::new()));
     }
 
     #[test]
