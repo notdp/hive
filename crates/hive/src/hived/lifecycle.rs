@@ -226,15 +226,14 @@ pub fn ensure_hived(
     tmux_window_id: &str,
 ) -> Result<Option<i32>> {
     let mut lock = StartupLock::acquire(workspace)?;
-    let response = identity_ping(workspace, team)?;
-    match hived_identity(response.as_ref(), team) {
+    let (response, identity) = identity_ping(workspace, team)?;
+    match identity {
         HivedIdentity::Matches => return Ok(None),
         HivedIdentity::ForeignHome(served) => bail!(
             "hived for {workspace} serves HIVE_HOME {served}, this hive runs with {}",
             crate::paths::hive_home().display()
         ),
-        HivedIdentity::Restart => {}
-        HivedIdentity::Busy => unreachable!("identity_ping resolves a busy answer"),
+        HivedIdentity::Restart | HivedIdentity::Busy => {}
     }
     if response.is_some() {
         // The retiring owner takes the same lock for cleanup. Do not
@@ -246,8 +245,8 @@ pub fn ensure_hived(
             false,
         );
         lock.reacquire()?;
-        let response = identity_ping(workspace, team)?;
-        if hived_identity_matches(response.as_ref(), team) {
+        let (response, identity) = identity_ping(workspace, team)?;
+        if identity == HivedIdentity::Matches {
             return Ok(None);
         }
         match stopped {
@@ -297,16 +296,20 @@ pub fn ensure_hived(
     )
 }
 
-/// The identity ping, asked again while the desk answers busy: a shut
-/// gate is a retirement it may cancel or a drain that ends, not a
-/// generation to replace. The whole exchange fits the identity budget; a
-/// desk still busy at its end is an error, not a restart.
-fn identity_ping(workspace: &str, team: &str) -> Result<Option<Map<String, Value>>> {
+/// The identity ping and what it says, asked again while the desk answers
+/// busy: a shut gate is a retirement it may cancel or a drain that ends,
+/// not a generation to replace. The whole exchange fits the identity
+/// budget; a desk still busy at its end is an error, not a restart.
+fn identity_ping(
+    workspace: &str,
+    team: &str,
+) -> Result<(Option<Map<String, Value>>, HivedIdentity)> {
     let deadline = monotonic() + IDENTITY_PING_TIMEOUT;
     loop {
         let response = hooked_request_ping(workspace, IDENTITY_PING_TIMEOUT);
-        if hived_identity(response.as_ref(), team) != HivedIdentity::Busy {
-            return Ok(response);
+        let identity = hived_identity(response.as_ref(), team);
+        if identity != HivedIdentity::Busy {
+            return Ok((response, identity));
         }
         if monotonic() >= deadline {
             bail!(

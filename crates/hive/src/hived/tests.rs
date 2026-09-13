@@ -8286,7 +8286,18 @@ fn test_closed_admission_rejects_multiple_connections_without_business_usage() {
     assert_eq!(ping["ok"], true);
     settle_leases();
     drop(half);
+    // Closing the worker does not wait for a peer still being drained.
+    close_admission();
+    let mut draining = UnixStream::connect(socket_path(&workspace)).unwrap();
+    draining.write_all(b"{\"action\":\"adm").unwrap();
+    let began = std::time::Instant::now();
     server.close();
+    assert!(
+        began.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        began.elapsed()
+    );
+    drop(draining);
 }
 
 /// A listener whose `close` — reached by `RequestServer::close` only once
