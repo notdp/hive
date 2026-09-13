@@ -8185,6 +8185,251 @@ fn test_answer_lost_after_business_body_remains_unknown() {
     server.close();
 }
 
+/// A stand-in desk for one production client: the workspace socket,
+/// bound here so the client's connect finds it, and one accepted
+/// connection handed to `serve` with a recorder of every byte the client
+/// put on the wire. No hived is involved: what `serve` answers is the
+/// whole protocol the client sees. Returns what was received.
+fn one_peer(
+    workspace: &str,
+    serve: impl FnOnce(&UnixStream, &mut Vec<u8>) + Send + 'static,
+) -> thread::JoinHandle<Vec<u8>> {
+    let path = socket_path(workspace);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let _ = fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    thread::spawn(move || {
+        let (conn, _) = listener.accept().unwrap();
+        let mut received = Vec::new();
+        serve(&conn, &mut received);
+        received
+    })
+}
+
+/// The peer's read of one line: whatever arrives up to a newline goes
+/// onto `received`.
+fn peer_take_line(conn: &UnixStream, received: &mut Vec<u8>) {
+    conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut byte = [0u8; 1];
+    loop {
+        match (&*conn).read(&mut byte) {
+            Ok(1) => {
+                received.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return;
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+/// The peer listens for `hold` without answering: whatever the client
+/// sends meanwhile goes onto `received`.
+fn peer_hold(conn: &UnixStream, received: &mut Vec<u8>, hold: Duration) {
+    let until = std::time::Instant::now() + hold;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        conn.set_read_timeout(Some(left)).unwrap();
+        match (&*conn).read(&mut chunk) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => received.extend_from_slice(&chunk[..n]),
+        }
+    }
+}
+
+/// The peer drips one byte of a line it never finishes every 100ms until
+/// the client hangs up — the write fails — or `cap` bytes went out;
+/// returns how many did. No read probe: a client that shut its write
+/// side after the body looks like a hangup to one.
+fn peer_drip(conn: &UnixStream, cap: usize) -> usize {
+    let mut sent = 0;
+    while sent < cap {
+        if (&*conn).write_all(b" ").is_err() {
+            break;
+        }
+        sent += 1;
+        thread::sleep(Duration::from_millis(100));
+    }
+    sent
+}
+
+fn preflight_line(action: &str) -> Vec<u8> {
+    let mut preflight = action_payload(ADMIT_ACTION);
+    preflight.insert("forAction".to_string(), Value::from(action));
+    format!("{}\n", Value::Object(preflight)).into_bytes()
+}
+
+#[test]
+fn test_request_admitted_writes_no_business_byte_before_admission() {
+    // The production client against a desk that takes its preflight and
+    // does not answer: nothing but the preflight is on the wire while it
+    // waits, whether the desk then hangs up, refuses, or admits — and
+    // only after the admission does the body follow.
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let frames: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&frames);
+    let _guard = testhook::install(Hook {
+        client_wrote: Some(Arc::new(move |frame| {
+            sink.lock().unwrap().push(frame.to_string())
+        })),
+        ..Default::default()
+    });
+    let payload = node_dispatch_payload("team-x", "nd-eeeeeeeeeeee");
+    let body_line = format!("{}\n", Value::Object(payload.clone())).into_bytes();
+    let preflight = preflight_line("node-dispatch");
+    let hold = Duration::from_millis(300);
+
+    // The desk hangs up without a word.
+    let peer = one_peer(&workspace, move |conn, received| {
+        peer_take_line(conn, received);
+        peer_hold(conn, received, hold);
+    });
+    let err = request_admitted(&workspace, &payload, 2.0).unwrap_err();
+    assert_eq!(
+        err,
+        RequestFailure::NotAdmitted("hived closed the connection before admitting".to_string())
+    );
+    assert_eq!(
+        peer.join().unwrap(),
+        preflight,
+        "the preflight and nothing else"
+    );
+
+    // The desk refuses.
+    let peer = one_peer(&workspace, move |conn, received| {
+        peer_take_line(conn, received);
+        peer_hold(conn, received, hold);
+        (&*conn)
+            .write_all(b"{\"ok\":false,\"notAdmitted\":true,\"error\":\"hived is draining\"}\n")
+            .unwrap();
+        conn.shutdown(std::net::Shutdown::Write).unwrap();
+        peer_hold(conn, received, Duration::from_secs(5));
+    });
+    let err = request_admitted(&workspace, &payload, 2.0).unwrap_err();
+    assert_eq!(
+        err,
+        RequestFailure::NotAdmitted("hived is draining".to_string())
+    );
+    assert_eq!(
+        peer.join().unwrap(),
+        preflight,
+        "refused: still only the preflight"
+    );
+
+    // The desk admits: the body follows, and only then.
+    let peer = one_peer(&workspace, move |conn, received| {
+        peer_take_line(conn, received);
+        peer_hold(conn, received, hold);
+        received.extend_from_slice(b"<admitted>");
+        (&*conn)
+            .write_all(
+                format!("{{\"ok\":true,\"admitted\":true,\"apiVersion\":{HIVED_API_VERSION}}}\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        peer_take_line(conn, received);
+        (&*conn)
+            .write_all(b"{\"ok\":true,\"dispatchId\":\"nd-eeeeeeeeeeee\"}\n")
+            .unwrap();
+        conn.shutdown(std::net::Shutdown::Write).unwrap();
+    });
+    let answer = request_admitted(&workspace, &payload, 2.0).unwrap();
+    assert_eq!(answer["dispatchId"], "nd-eeeeeeeeeeee");
+    let mut expected = preflight.clone();
+    expected.extend_from_slice(b"<admitted>");
+    expected.extend_from_slice(&body_line);
+    assert_eq!(
+        peer.join().unwrap(),
+        expected,
+        "the body came after the admission"
+    );
+
+    // The client's own writes agree: one preflight per attempt, one body.
+    let frames = frames.lock().unwrap();
+    let preflight = String::from_utf8(preflight).unwrap();
+    let body_line = String::from_utf8(body_line).unwrap();
+    assert_eq!(
+        *frames,
+        vec![preflight.clone(), preflight.clone(), preflight, body_line]
+    );
+}
+
+#[test]
+fn test_request_admitted_gives_up_on_answers_that_never_end() {
+    // A desk that drips an admission line, or an answer, a byte at a time
+    // and never finishes it: each read fits the socket timeout, and the
+    // caller is released at the budget's end — the identity budget for
+    // the admission, the request's for the answer — not held forever.
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let payload = node_dispatch_payload("team-x", "nd-ffffffffffff");
+    let preflight = preflight_line("node-dispatch");
+
+    let peer = one_peer(&workspace, |conn, received| {
+        peer_take_line(conn, received);
+        let dripped = peer_drip(conn, 90);
+        received.extend_from_slice(format!("<dripped {dripped}>").as_bytes());
+    });
+    let began = std::time::Instant::now();
+    let err = request_admitted(&workspace, &payload, 0.5).unwrap_err();
+    let waited = began.elapsed();
+    assert!(
+        matches!(&err, RequestFailure::NotAdmitted(why) if why.starts_with("preflight answer lost")),
+        "{err:?}"
+    );
+    assert!(
+        waited >= Duration::from_secs_f64(IDENTITY_PING_TIMEOUT - 0.5)
+            && waited < Duration::from_secs_f64(IDENTITY_PING_TIMEOUT + 2.0),
+        "released at the identity budget, not per byte: {waited:?}"
+    );
+    let received = String::from_utf8(peer.join().unwrap()).unwrap();
+    let dripped: usize = received
+        .rsplit("<dripped ")
+        .next()
+        .unwrap()
+        .trim_end_matches('>')
+        .parse()
+        .unwrap();
+    assert!(
+        dripped < 90,
+        "the client hung up before the drip ran out: {dripped}"
+    );
+    assert!(
+        received.as_bytes().starts_with(&preflight) && !received.contains("nd-ffffffffffff"),
+        "no business byte went out: {received}"
+    );
+
+    // Admitted, body sent, then an answer that never ends.
+    let peer = one_peer(&workspace, |conn, received| {
+        peer_take_line(conn, received);
+        (&*conn)
+            .write_all(
+                format!("{{\"ok\":true,\"admitted\":true,\"apiVersion\":{HIVED_API_VERSION}}}\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        peer_take_line(conn, received);
+        peer_drip(conn, 40);
+    });
+    let began = std::time::Instant::now();
+    let err = request_admitted(&workspace, &payload, 0.5).unwrap_err();
+    let waited = began.elapsed();
+    assert!(matches!(err, RequestFailure::AnswerLost(_)), "{err:?}");
+    assert!(
+        waited >= Duration::from_millis(400) && waited < Duration::from_secs(2),
+        "released at the request budget: {waited:?}"
+    );
+    assert!(String::from_utf8(peer.join().unwrap())
+        .unwrap()
+        .contains("nd-ffffffffffff"));
+}
+
 #[test]
 fn test_busy_identity_does_not_restart_matching_hived() {
     let tmp = tempfile::tempdir().unwrap();
@@ -8263,6 +8508,94 @@ fn test_busy_identity_does_not_restart_matching_hived() {
 }
 
 #[test]
+fn test_identity_ping_spends_one_budget_across_busy_retries() {
+    // One identity budget for the whole exchange: the first ping gets all
+    // of it, each ping after a busy answer what is left. A desk that was
+    // busy and then gave no answer by the budget's end is still busy — an
+    // error, nothing replaced — while an empty answer that came back with
+    // budget to spare is a desk gone, which the connect guard then checks.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut env = EnvGuard::new();
+    env.set("HIVE_HOME", tmp.path().join(".hive"));
+    let run_tmp = tempfile::Builder::new()
+        .prefix("hbdg")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let run_dir = run_tmp.path().to_path_buf();
+    let listener = UnixListener::bind(run_dir.join("hived.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let busy = json_obj(&[
+        ("ok", Value::Bool(false)),
+        ("notAdmitted", Value::Bool(true)),
+        ("error", Value::from("hived is draining")),
+    ]);
+    let clock = Arc::new(Mutex::new(0.0f64));
+    let budgets: Arc<Mutex<Vec<f64>>> = Arc::new(Mutex::new(Vec::new()));
+    // Each answer with the time it took on the desk's clock.
+    type Exchange = Vec<(f64, Option<Map<String, Value>>)>;
+    let script: Arc<Mutex<Exchange>> = Arc::new(Mutex::new(Vec::new()));
+    let reading = Arc::clone(&clock);
+    let ticking = Arc::clone(&clock);
+    let asked = Arc::clone(&budgets);
+    let answers = Arc::clone(&script);
+    let _guard = testhook::install(Hook {
+        run_dir: Some(Arc::new(move |_ws| run_dir.clone())),
+        monotonic: Some(Arc::new(move || *reading.lock().unwrap())),
+        request_ping: Some(Arc::new(move |_ws, timeout| {
+            asked.lock().unwrap().push(timeout);
+            let mut answers = answers.lock().unwrap();
+            assert!(!answers.is_empty(), "pinged past the scripted exchange");
+            let (took, answer) = answers.remove(0);
+            *ticking.lock().unwrap() += took;
+            answer
+        })),
+        popen: Some(Arc::new(|_, _| panic!("a busy desk was replaced"))),
+        cleanup_socket: Some(Arc::new(|_| panic!("a busy desk's socket was unlinked"))),
+        ..Default::default()
+    });
+    let close_enough = |got: &[f64], want: &[f64]| {
+        assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-6, "{got:?} vs {want:?}");
+        }
+    };
+
+    // Busy at 0.5s, busy again at 4.9s, then the last 0.1s of budget run
+    // out with no answer: still busy, not gone.
+    *script.lock().unwrap() = vec![
+        (0.5, Some(busy.clone())),
+        (4.4, Some(busy.clone())),
+        (0.2, None),
+    ];
+    let err = ensure_hived("/tmp/ws-budget", "team-a", "dev:3", "@99")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("busy"), "{err}");
+    assert!(err.contains("team-a"), "{err}");
+    assert!(
+        script.lock().unwrap().is_empty(),
+        "every scripted ping went out"
+    );
+    close_enough(&budgets.lock().unwrap(), &[5.0, 4.5, 0.1]);
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "no shutdown or other request reached the socket"
+    );
+
+    // Busy, then an empty answer with budget to spare: no desk answers,
+    // and the connect guard — not the ping — decides against replacing
+    // one whose socket still accepts.
+    *clock.lock().unwrap() = 0.0;
+    budgets.lock().unwrap().clear();
+    *script.lock().unwrap() = vec![(0.5, Some(busy)), (0.1, None)];
+    let err = ensure_hived("/tmp/ws-budget", "team-a", "dev:3", "@99")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("still accepts connections"), "{err}");
+    close_enough(&budgets.lock().unwrap(), &[5.0, 4.5]);
+}
+
+#[test]
 fn test_busy_identity_waits_out_a_sleep_rejection_on_a_real_socket() {
     // The desk is at its sleep commit, gate shut, when a CLI's ensure
     // pings it over the real socket: the ping is refused (busy), asked
@@ -8275,6 +8608,12 @@ fn test_busy_identity_waits_out_a_sleep_rejection_on_a_real_socket() {
     let go_rx = Mutex::new(go_rx);
     let ticks = Arc::clone(&env.serves);
     let clock = Arc::clone(&ticks);
+    // The clock runs a sleep's worth per tick to reach the commit; ensure's
+    // identity budget reads the same clock, so it stops at the tick the
+    // commit is held on — the desk stays awake after it on the pool's
+    // unknown answer, not on the clock.
+    let held_at = Arc::new(AtomicUsize::new(usize::MAX));
+    let cap = Arc::clone(&held_at);
     let spawns = Arc::new(AtomicUsize::new(0));
     let spawned = Arc::clone(&spawns);
     testhook::update(|h| {
@@ -8283,13 +8622,15 @@ fn test_busy_identity_waits_out_a_sleep_rejection_on_a_real_socket() {
         }));
         h.cleanup_socket = Some(Arc::new(cleanup_socket_impl));
         h.monotonic = Some(Arc::new(move || {
-            *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
+            let ticks = *clock.lock().unwrap();
+            ticks.min(cap.load(Ordering::SeqCst)) as f64 * HIVED_SLEEP_AFTER_SECONDS
         }));
         h.wait_tick = Some(Arc::new(move || {
             *ticks.lock().unwrap() += 1;
             !SHUTDOWN.load(Ordering::SeqCst)
         }));
         let held = AtomicUsize::new(0);
+        let ticks_held = Arc::clone(&env.serves);
         h.gl_idle_owned_keys = Some(Arc::new(move |_| {
             // The first commit is held under the shut gate; after it the
             // pool answers unknown, which keeps the desk awake.
@@ -8299,6 +8640,7 @@ fn test_busy_identity_waits_out_a_sleep_rejection_on_a_real_socket() {
                     Some(Vec::new())
                 }
                 0 => {
+                    held_at.store(*ticks_held.lock().unwrap(), Ordering::SeqCst);
                     let _ = shut_tx.send(());
                     let _ = go_rx.lock().unwrap().recv_timeout(Duration::from_secs(10));
                     Some(Vec::new())
@@ -8492,6 +8834,124 @@ fn test_closed_admission_rejects_multiple_connections_without_business_usage() {
     drop(draining);
 }
 
+/// A client that drips one byte of a line it never finishes every 100ms
+/// — each byte within the desk's socket timeout — until the desk hangs
+/// up or `cap` bytes went out. How many went out, and how long the
+/// connection lived.
+fn drip_until_dropped(conn: &UnixStream, cap: usize) -> (usize, Duration) {
+    let began = std::time::Instant::now();
+    let mut sent = 0;
+    let mut probe = [0u8; 64];
+    conn.set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    while sent < cap {
+        if (&*conn).write_all(b"{").is_err() {
+            break;
+        }
+        sent += 1;
+        if matches!((&*conn).read(&mut probe), Ok(0)) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    (sent, began.elapsed())
+}
+
+/// The desk under test hangs up on a dripping frame at the read budget
+/// (one second on the accept worker), with nothing served and no lease
+/// left; `cap` bytes at 100ms apiece would outlive that several times.
+fn assert_dropped_at_budget(sent: usize, lived: Duration, cap: usize) {
+    assert!(
+        sent < cap,
+        "the desk hung up before the drip ran out: {sent} of {cap} bytes"
+    );
+    assert!(
+        lived >= Duration::from_millis(800) && lived < Duration::from_millis(2500),
+        "dropped at the read budget, not per byte: {lived:?}"
+    );
+}
+
+#[test]
+fn test_open_gate_drops_a_dripping_prelude_at_the_read_budget() {
+    // The gate is open and a client drips its first line a byte at a
+    // time, each within the socket timeout, never the newline: the desk
+    // ends the connection at the frame budget, calls no handler, keeps
+    // no lease, and serves the next request.
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    let handled = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&handled);
+    let _guard = testhook::install(Hook {
+        handle_request: Some(Arc::new(move |_| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            (json_obj(&[("ok", Value::Bool(true))]), true)
+        })),
+        ..Default::default()
+    });
+    let server = request_server(&workspace, "t");
+    let conn = UnixStream::connect(socket_path(&workspace)).unwrap();
+    let (sent, lived) = drip_until_dropped(&conn, 40);
+    assert_dropped_at_budget(sent, lived, 40);
+    settle_leases();
+    assert_eq!(
+        handled.load(Ordering::SeqCst),
+        0,
+        "no handler for a frame that never came"
+    );
+    {
+        let state = admission().lock().unwrap();
+        assert_eq!(state.leases, 0);
+        assert_eq!(state.usage, 0);
+    }
+    drop(conn);
+    let ping = request_hived(&workspace, &action_payload("ping"), 2.0).unwrap();
+    assert_eq!(ping["ok"], true);
+    settle_leases();
+    assert_eq!(handled.load(Ordering::SeqCst), 1);
+    assert!(drain_ready(&workspace), "nothing holds the desk");
+    reopen_admission();
+    server.close();
+}
+
+#[test]
+fn test_open_gate_drops_a_dripping_body_at_the_read_budget() {
+    // Admitted, then the body dripped a byte at a time and never
+    // finished: the desk ends the connection at the body's budget, the
+    // dispatch never reaches the engine, bus or journal, the lease goes,
+    // and the next dispatch on a fresh connection lands.
+    let tmp = short_workspace();
+    let workspace = tmp.path().to_str().unwrap().to_string();
+    bus::init_workspace(tmp.path()).unwrap();
+    let mut hook = Hook::default();
+    let dispatches = wire_node_dispatch(&mut hook, &workspace, "team-x");
+    let _guard = testhook::install(hook);
+    let server = request_server(&workspace, "team-x");
+    let (conn, answer) = raw_preflight(&workspace, "node-dispatch");
+    assert_eq!(answer.unwrap()["admitted"], true);
+    assert_eq!(admission().lock().unwrap().leases, 1);
+    let (sent, lived) = drip_until_dropped(&conn, 40);
+    assert_dropped_at_budget(sent, lived, 40);
+    settle_leases();
+    assert_eq!(dispatches.load(Ordering::SeqCst), 0);
+    assert_eq!(bus::read_all_events(tmp.path()).unwrap().len(), 0);
+    assert_eq!(journal_records(&workspace).len(), 0);
+    {
+        let state = admission().lock().unwrap();
+        assert_eq!(state.leases, 0);
+        assert_eq!(state.usage, 0, "an unfinished body is no classified write");
+    }
+    drop(conn);
+    let answer =
+        request_node_dispatch(&workspace, "team-x", "b", "task", "", "nd-dddddddddddd").unwrap();
+    assert_eq!(answer["dispatchId"], "nd-dddddddddddd");
+    settle_leases();
+    assert_eq!(dispatches.load(Ordering::SeqCst), 1);
+    assert_eq!(admission().lock().unwrap().leases, 0);
+    assert!(drain_ready(&workspace), "nothing holds the desk");
+    reopen_admission();
+    server.close();
+}
+
 /// A listener whose `close` — reached by `RequestServer::close` only once
 /// the accept worker is joined — holds at a checkpoint before the listener
 /// itself goes: what arrives in between is queued behind nobody.
@@ -8665,6 +9125,16 @@ fn test_sleep_backlog_before_close_is_retryable_without_dispatch() {
             .unwrap();
         (conn, ())
     };
+    // The production client: the receipt of its preflight write says it
+    // is in the backlog before the close goes on, and the recorder keeps
+    // every frame it puts on the wire from here.
+    let frames: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&frames);
+    testhook::update(|h| {
+        h.client_wrote = Some(Arc::new(move |frame| {
+            sink.lock().unwrap().push(frame.to_string())
+        }));
+    });
     let queued_real = {
         let ws = workspace.clone();
         thread::spawn(move || {
@@ -8678,6 +9148,14 @@ fn test_sleep_backlog_before_close_is_retryable_without_dispatch() {
             )
         })
     };
+    let receipt = std::time::Instant::now();
+    while frames.lock().unwrap().is_empty() {
+        assert!(
+            receipt.elapsed() < Duration::from_secs(10),
+            "the production client never wrote its preflight"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
     before_close.release();
 
     // D: the listener is closed and the socket unlinked; the lock is held.
@@ -8716,11 +9194,16 @@ fn test_sleep_backlog_before_close_is_retryable_without_dispatch() {
     );
     let queued_real = queued_real.join().unwrap().unwrap_err();
     assert!(
-        matches!(
-            queued_real,
-            RequestFailure::NotAdmitted(_) | RequestFailure::NoListener
-        ),
-        "{queued_real:?}"
+        matches!(queued_real, RequestFailure::NotAdmitted(_)),
+        "queued behind the close, the production client stopped at its preflight: {queued_real:?}"
+    );
+    let queued_frames = std::mem::take(&mut *frames.lock().unwrap());
+    testhook::update(|h| h.client_wrote = None);
+    assert_eq!(
+        queued_frames,
+        vec![String::from_utf8(preflight_line("node-dispatch")).unwrap()],
+        "the only frame on the wire from the backlog on was that preflight; \
+         the late arrivals found no socket to write to"
     );
     for err in refused_b.lock().unwrap().iter() {
         assert!(matches!(err, RequestFailure::NotAdmitted(_)), "{err:?}");
