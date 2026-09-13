@@ -6,6 +6,13 @@
 //! runtime owns it from there; what a codex/grok delivery leaves behind is
 //! the engine's turn handle in the dispatch journal (`operations.rs`), read
 //! at the engine's own turn end for `node-result`.
+//!
+//! The desk's own life — who starts one and what a start refuses
+//! (`lifecycle.rs`), the six ways a running one leaves, the periods of the
+//! checks that find them, the admission preflight a side-effect request
+//! goes through (`server.rs`, `state.rs`) and the three sleep reasons of
+//! which only `unwatched` is woken by a session hook (`sleep.rs`) — is
+//! documented whole under "The team's desk" in `docs/runtime-model.md`.
 
 use std::sync::OnceLock;
 use std::time::Instant;
