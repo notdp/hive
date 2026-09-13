@@ -10,7 +10,9 @@ use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::claude_view::PaneView;
 use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome, ThreadRuntime, TurnResult};
 use crate::adapters::grok_leader::PromptId;
-use crate::adapters::grok_leader::{PromptResult, SessionRecord, SessionRuntime};
+use crate::adapters::grok_leader::{
+    PromptResult, Revival, ReviveFailure, SessionRecord, SessionRuntime,
+};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
 use serde_json::{Map, Value};
@@ -138,6 +140,8 @@ pub struct Hook {
     pub gl_kill_daemon_key: Option<S1<()>>,
     pub gl_pool_drop_key: Option<S1<()>>,
     pub gl_connect_pane: Option<S1<bool>>,
+    pub gl_retained: Option<S1<bool>>,
+    pub gl_revive_key: Option<S1<Result<Revival, ReviveFailure>>>,
     // notify / plugin
     #[allow(clippy::type_complexity)]
     pub notify_debug_emit: Option<Arc<dyn Fn(&str, &str, &[(&str, Value)]) + Send + Sync>>,

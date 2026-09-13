@@ -18,6 +18,7 @@ use crate::adapters::codex_app_server::TurnResult;
 use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::PromptResult;
 use crate::adapters::grok_leader::SessionRecord;
+use crate::adapters::grok_leader::{Revival, ReviveFailure};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
 
@@ -712,6 +713,22 @@ pub(super) fn hooked_gl_connect_pane(pane: &str) -> bool {
         return f(pane);
     }
     crate::adapters::grok_leader::connect_pane(pane)
+}
+
+pub(super) fn hooked_gl_retained(key: &str) -> bool {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_retained.clone()).flatten() {
+        return f(key);
+    }
+    crate::adapters::grok_leader::retained(key)
+}
+
+pub(super) fn hooked_gl_revive_key(key: &str) -> Result<Revival, ReviveFailure> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_revive_key.clone()).flatten() {
+        return f(key);
+    }
+    crate::adapters::grok_leader::pool().revive_key(key)
 }
 
 // --- notify / plugin seams -------------------------------------------------

@@ -28,7 +28,7 @@ use super::*;
 use crate::adapters::claude_bg::EngineSession;
 use crate::adapters::claude_view::PaneView;
 use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome, ThreadRuntime, TurnResult};
-use crate::adapters::grok_leader::{PromptResult, SessionRuntime};
+use crate::adapters::grok_leader::{PromptResult, Revival, ReviveFailure, SessionRuntime};
 
 /// Collectors the hook closures push into: `(target, option, value)` tmux
 /// writes, `(event, payload)` notify emits, `(argv, stderr path)` spawns and
@@ -5269,6 +5269,16 @@ fn saved_operation(workspace: &Path, id: &str) -> Value {
     .unwrap()
 }
 
+/// A revive that found the member online: no leader raised, its state
+/// as loaded.
+fn online_revival() -> Revival {
+    Revival {
+        raised: false,
+        input_state: "ready".to_string(),
+        turn_open: Some(false),
+    }
+}
+
 fn wire_send(hook: &mut Hook, workspace: &Path) {
     let team = Team {
         name: "team-x".to_string(),
@@ -5689,6 +5699,289 @@ fn test_send_to_retained_shell_fails_closed_with_durable_bus_event() {
     assert!(payload["seq"].as_i64().unwrap() > 0);
 }
 
+/// A revive that raised the leader; `sequence` notes it, and `loaded`
+/// flips the runtime the gate reads next.
+fn raising_revival(
+    sequence: &Arc<Mutex<Vec<String>>>,
+    loaded: &Arc<Mutex<Option<&'static str>>>,
+    state: &'static str,
+) -> testhook::S1<Result<Revival, ReviveFailure>> {
+    let sequence = Arc::clone(sequence);
+    let loaded = Arc::clone(loaded);
+    Arc::new(move |key| {
+        assert_eq!(key, "m-team-x.g");
+        sequence.lock().unwrap().push("revive".to_string());
+        *loaded.lock().unwrap() = Some(state);
+        Ok(Revival {
+            raised: true,
+            input_state: state.to_string(),
+            turn_open: Some(false),
+        })
+    })
+}
+
+/// A send to a pane-less grok member: the roster resolves it, the hived
+/// revives it before the gate, and the gate reads the state the load left.
+fn wire_grok_send(
+    hook: &mut Hook,
+    workspace: &Path,
+    sequence: &Arc<Mutex<Vec<String>>>,
+    loaded: &Arc<Mutex<Option<&'static str>>>,
+) {
+    let team = Team {
+        name: "team-x".to_string(),
+        workspace: workspace.to_string_lossy().to_string(),
+        created_at: 123.0,
+        tmux_session: "dev".to_string(),
+        tmux_window: "dev:0".to_string(),
+        ..Default::default()
+    };
+    let target = Agent {
+        team_name: "team-x".to_string(),
+        ..fake_agent("g", "", "grok")
+    };
+    hook.team_load = Some(Arc::new({
+        let team = team.clone();
+        move |_| Ok(team.clone())
+    }));
+    hook.resolve_live_agent = Some(Arc::new(move |_team, _agent| {
+        Ok((team.clone(), target.clone()))
+    }));
+    // the real gate, reading the headless runtime off the leader seams
+    let runtime_loaded = Arc::clone(loaded);
+    let runtime_sequence = Arc::clone(sequence);
+    hook.gl_runtime_for_key = Some(Arc::new(move |_key| {
+        runtime_sequence.lock().unwrap().push("gate".to_string());
+        runtime_loaded
+            .lock()
+            .unwrap()
+            .map(|state| session_runtime(false, state))
+    }));
+    hook.gl_read_session_key = Some(Arc::new(|_key| None));
+    hook.gl_retained = Some(Arc::new(|_key| true));
+}
+
+#[test]
+fn test_send_revives_a_grok_target_before_the_gate_which_reads_the_loaded_state() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let sequence: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let loaded: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+    let handed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_grok_send(&mut hook, &workspace, &sequence, &loaded);
+    hook.gl_revive_key = Some(raising_revival(&sequence, &loaded, "ready"));
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, text| {
+        handed_sink.lock().unwrap().push(text.to_string());
+        Ok(TurnHandle::Grok {
+            key: "m-team-x.g".to_string(),
+            prompt_id: PromptId {
+                generation: 1,
+                rid: 7,
+            },
+        })
+    }));
+    let _guard = testhook::install(hook);
+
+    let payload = send_payload_for_test(&workspace, "a", "g", "hi", "");
+
+    assert_eq!(payload["ok"], Value::Bool(true), "{payload:?}");
+    // revived once, then gated on the loaded state, then handed over
+    assert_eq!(
+        *sequence.lock().unwrap(),
+        vec!["revive".to_string(), "gate".to_string()]
+    );
+    assert_eq!(handed.lock().unwrap().len(), 1);
+    assert_eq!(bus::read_all_events(&workspace).unwrap().len(), 1);
+}
+
+#[test]
+fn test_send_gate_refuses_a_revived_grok_target_whose_load_shows_it_waiting() {
+    // The load replays a pending permission request: the gate reads
+    // `waiting_user` after the revive, and the send stops there — no
+    // bus row, no prompt.
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let sequence: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let loaded: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+    let mut hook = Hook::default();
+    wire_grok_send(&mut hook, &workspace, &sequence, &loaded);
+    hook.gl_revive_key = Some(raising_revival(&sequence, &loaded, "waiting_user"));
+    hook.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+        panic!("a waiting target must not be handed the message")
+    }));
+    let _guard = testhook::install(hook);
+
+    let err = send_payload(
+        &workspace.to_string_lossy(),
+        "team-x",
+        SendOrigin::Member("a"),
+        "g",
+        "hi",
+        "",
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(err.contains("waiting for a user answer"), "{err}");
+    assert_eq!(
+        *sequence.lock().unwrap(),
+        vec!["revive".to_string(), "gate".to_string()]
+    );
+    assert_eq!(bus::read_all_events(&workspace).unwrap().len(), 0);
+}
+
+#[test]
+fn test_send_refuses_a_grok_target_whose_revive_fails_before_any_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let sequence: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let loaded: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+    for failure in [
+        ReviveFailure::NotRetained("the roster row names another session".to_string()),
+        ReviveFailure::LeaderStart("the leader did not come up".to_string()),
+        ReviveFailure::Handshake("session/load timed out".to_string()),
+    ] {
+        let mut hook = Hook::default();
+        wire_grok_send(&mut hook, &workspace, &sequence, &loaded);
+        let refused = failure.clone();
+        hook.gl_revive_key = Some(Arc::new(move |_key| Err(refused.clone())));
+        hook.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+            panic!("nothing is handed over after a failed revive")
+        }));
+        let _guard = testhook::install(hook);
+
+        let err = send_payload(
+            &workspace.to_string_lossy(),
+            "team-x",
+            SendOrigin::Node {
+                dispatch_id: "nd-0123456789ab",
+            },
+            "g",
+            "task nd-0123456789ab\nreview it",
+            "",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("could not be revived"), "{err}");
+        assert!(err.contains(&failure.to_string()), "{err}");
+        // refused before the row: the gate never ran, no bus row, and no
+        // operation record holds the dispatch id
+        assert!(sequence.lock().unwrap().is_empty());
+        assert_eq!(bus::read_all_events(&workspace).unwrap().len(), 0);
+        assert!(!workspace.join("run").join("operations").exists());
+    }
+}
+
+#[test]
+fn test_send_leaves_other_clis_unrevived() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    hook.gl_revive_key = Some(Arc::new(|_key| panic!("a claude target is not revived")));
+    hook.agent_send = Some(Arc::new(|_agent, _text, _sender| {
+        Ok("udsWriteAccepted".to_string())
+    }));
+    let _guard = testhook::install(hook);
+    let payload = send_payload_for_test(&workspace, "a", "b", "hi", "");
+    assert_eq!(payload["ok"], Value::Bool(true));
+}
+
+#[test]
+fn test_revive_action_reports_the_revival_and_needs_admission() {
+    assert!(admission_required("revive"));
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    let revived: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let revived_sink = Arc::clone(&revived);
+    let hook = Hook {
+        team_load: Some(Arc::new(|name| {
+            Ok(fake_team(
+                name,
+                vec![
+                    Agent {
+                        team_name: name.to_string(),
+                        ..fake_agent("g", "", "grok")
+                    },
+                    fake_agent("c", "%2", "codex"),
+                ],
+            ))
+        })),
+        gl_revive_key: Some(Arc::new(move |key| {
+            revived_sink.lock().unwrap().push(key.to_string());
+            match key {
+                "m-team-a.g" => Ok(Revival {
+                    raised: true,
+                    input_state: "ready".to_string(),
+                    turn_open: None,
+                }),
+                "m-team-b.g" => Ok(online_revival()),
+                _ => Err(ReviveFailure::NotRetained(
+                    "the roster row names another session".to_string(),
+                )),
+            }
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+    let request = |team: &str, agent: &str| {
+        handle_request(
+            &workspace.to_string_lossy(),
+            "team-a",
+            "dev:3",
+            "@99",
+            "2026-04-17T00:00:00Z",
+            &json_obj(&[
+                ("action", Value::from("revive")),
+                ("team", Value::from(team)),
+                ("agent", Value::from(agent)),
+            ]),
+        )
+    };
+
+    // a leader raised and the session loaded: no turn evidence yet
+    let (response, keep_running) = request("team-a", "g");
+    assert!(keep_running);
+    assert_eq!(response["ok"], Value::Bool(true));
+    assert_eq!(response["revived"], Value::Bool(true));
+    assert_eq!(response["inputState"], Value::from("ready"));
+    assert_eq!(response["turnOpen"], Value::Null);
+    // an online member: ok, nothing raised
+    let (response, _) = request("team-b", "g");
+    assert_eq!(response["ok"], Value::Bool(true));
+    assert_eq!(response["revived"], Value::Bool(false));
+    assert_eq!(response["turnOpen"], Value::Bool(false));
+    // a refusal carries its reason
+    let (response, _) = request("team-c", "g");
+    assert_eq!(response["ok"], Value::Bool(false));
+    assert_eq!(response["revived"], Value::Bool(false));
+    assert!(
+        response["reason"]
+            .as_str()
+            .unwrap()
+            .contains("not retained: the roster row"),
+        "{response:?}"
+    );
+    // only a grok member is revived
+    let (response, _) = request("team-a", "c");
+    assert_eq!(response["ok"], Value::Bool(false));
+    assert!(
+        response["error"].as_str().unwrap().contains("runs codex"),
+        "{response:?}"
+    );
+    assert_eq!(
+        *revived.lock().unwrap(),
+        vec!["m-team-a.g", "m-team-b.g", "m-team-c.g"]
+    );
+}
+
 #[test]
 fn test_send_with_live_cli_still_uses_native_transport() {
     for cli_name in ["codex", "grok", "claude"] {
@@ -5723,6 +6016,7 @@ fn test_send_with_live_cli_still_uses_native_transport() {
                 let cli = cli_name.to_string();
                 move |_team, _agent| Ok((fake_team("team-x", vec![]), fake_agent("v", "%9", &cli)))
             })),
+            gl_revive_key: Some(Arc::new(|_key| Ok(online_revival()))),
             ..Default::default()
         };
         let _guard = testhook::install(hook);
@@ -5905,6 +6199,71 @@ fn test_headless_member_runtime_grok() {
     assert_eq!(payload["alive"], Value::Bool(true));
     assert_eq!(payload["busy"], Value::Bool(true));
     assert_eq!(payload["sessionId"], Value::from("sid-g"));
+}
+
+#[test]
+fn test_headless_member_runtime_grok_without_a_leader_reports_retained() {
+    // No leader answers: `cliAlive` is false either way, `retained` is
+    // whether the member's record still names it, and `alive` admits a
+    // retained member.
+    for retained in [true, false] {
+        let hook = Hook {
+            gl_runtime_for_key: Some(Arc::new(|_key| None)),
+            gl_retained: Some(Arc::new(move |key| {
+                assert_eq!(key, "m-honey.rex");
+                retained
+            })),
+            gl_read_session_key: Some(Arc::new(|_key| None)),
+            ..Default::default()
+        };
+        let _guard = testhook::install(hook);
+
+        let payload = headless_member_runtime(&headless_member("grok", Some("sid-1")));
+
+        assert_eq!(payload["cliAlive"], Value::Bool(false), "{retained}");
+        assert_eq!(payload["retained"], Value::Bool(retained));
+        assert_eq!(payload["alive"], Value::Bool(retained));
+        assert_eq!(payload["inputState"], Value::from("unknown"));
+        assert_eq!(payload["inputReason"], Value::from("no_leader_runtime"));
+    }
+    // a leader answering is never retained
+    let hook = Hook {
+        gl_runtime_for_key: Some(Arc::new(|_key| Some(session_runtime(false, "ready")))),
+        gl_retained: Some(Arc::new(|_key| panic!("an online member is not asked"))),
+        gl_read_session_key: Some(Arc::new(|_key| None)),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+    let payload = headless_member_runtime(&headless_member("grok", Some("sid-1")));
+    assert_eq!(payload["cliAlive"], Value::Bool(true));
+    assert_eq!(payload["retained"], Value::Bool(false));
+    assert_eq!(payload["alive"], Value::Bool(true));
+}
+
+#[test]
+fn test_doctor_reports_retained_beside_alive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let hook = Hook {
+        team_load: Some(Arc::new(|_name| {
+            Ok(fake_team("t", vec![fake_agent("g", "", "grok")]))
+        })),
+        agent_is_alive: Some(Arc::new(|_a| true)),
+        member_runtime_payload: Some(Arc::new(|_p, _r| {
+            let mut rt = Map::new();
+            rt.insert("alive".to_string(), Value::Bool(true));
+            rt.insert("cliAlive".to_string(), Value::Bool(false));
+            rt.insert("retained".to_string(), Value::Bool(true));
+            rt
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+
+    let diag = doctor_payload(&tmp.path().to_string_lossy(), "t", "g", false, None).unwrap();
+
+    assert_eq!(diag["alive"], Value::Bool(true));
+    assert_eq!(diag["cliAlive"], Value::Bool(false));
+    assert_eq!(diag["retained"], Value::Bool(true));
 }
 
 #[test]
@@ -9788,7 +10147,13 @@ fn test_new_hived_refuses_old_format_side_effects_but_answers_ping_and_shutdown(
         ..Default::default()
     });
     let server = request_server(&workspace, "t");
-    for action in ["send", "node-dispatch", "connect-codex", "connect-grok"] {
+    for action in [
+        "send",
+        "node-dispatch",
+        "connect-codex",
+        "connect-grok",
+        "revive",
+    ] {
         let reply = request_hived(&workspace, &action_payload(action), 2.0).unwrap();
         assert_eq!(reply["ok"], false, "{action}");
         assert!(

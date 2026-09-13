@@ -217,6 +217,11 @@ pub(crate) fn handle_request(
             response.insert("connected".to_string(), Value::Bool(hooked_cas_connect()));
             (response, true)
         }
+        "revive" => {
+            let response = revive_payload(&team_in_request(), &map_get_str(request, "agent"))
+                .unwrap_or_else(err_response);
+            (response, true)
+        }
         "connect-grok" => {
             let pane = map_get_str(request, "pane");
             let connected = !pane.is_empty() && hooked_gl_connect_pane(&pane);

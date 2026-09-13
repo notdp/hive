@@ -171,7 +171,7 @@ pub(super) fn read_only_request(action: &str) -> bool {
 pub(crate) fn admission_required(action: &str) -> bool {
     matches!(
         action,
-        "send" | "node-dispatch" | "connect-codex" | "connect-grok"
+        "send" | "node-dispatch" | "connect-codex" | "connect-grok" | "revive"
     )
 }
 
