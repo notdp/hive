@@ -109,6 +109,36 @@ pub(super) fn ack_timeout_override() -> Option<f64> {
     ACK_TIMEOUT_OVERRIDE.with(|slot| slot.get())
 }
 
+thread_local! {
+    static PANE_WRITE_INTERLEAVE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Runs once between a pane write's alias resolve and its launch lock.
+pub(super) fn pane_write_interleave() {
+    if let Some(hook) = PANE_WRITE_INTERLEAVE.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+thread_local! {
+    static RECORD_UPDATE_INTERLEAVE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Runs once inside a record update, after its read and before its write.
+pub(super) fn record_update_interleave() {
+    if let Some(hook) = RECORD_UPDATE_INTERLEAVE.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+fn set_record_update_interleave(hook: impl FnOnce() + 'static) {
+    RECORD_UPDATE_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+fn set_pane_write_interleave(hook: impl FnOnce() + 'static) {
+    PANE_WRITE_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
 fn set_pane_options(tags: HashMap<(String, String), String>) {
     PANE_OPTION_OVERRIDE.with(|slot| {
         *slot.borrow_mut() = Some(Box::new(move |pane, key| {
@@ -1836,6 +1866,248 @@ fn test_resolve_pane_key_uses_member_tags() {
     set_pane_options(tags);
     assert_eq!(resolve_pane_key("%9"), "m-honey.rex");
     assert_eq!(resolve_pane_key("%7"), "p7"); // untagged: raw pane lifecycle
+}
+
+#[test]
+fn test_write_pane_session_keeps_the_mint_binding_on_the_same_session() {
+    let _bed = setup();
+    let mut tags = HashMap::new();
+    tags.insert(
+        ("%9".to_string(), "hive-team".to_string()),
+        "honey".to_string(),
+    );
+    tags.insert(
+        ("%9".to_string(), "hive-agent".to_string()),
+        "rex".to_string(),
+    );
+    set_pane_options(tags);
+    let binding = RecordBinding {
+        team: "honey".to_string(),
+        created_at: "1700000000".to_string(),
+        member: "rex".to_string(),
+    };
+    write_session_key("m-honey.rex", "sid-1", "/w", Some(&binding)).unwrap();
+    // the pane TUI launched onto the minted session writes its record
+    write_pane_session("%9", "sid-1", "/w2").unwrap();
+    let record = read_session_key("m-honey.rex").unwrap();
+    assert_eq!(record.session_id, "sid-1");
+    assert_eq!(record.cwd, "/w2");
+    assert_eq!(record.binding, Some(binding));
+}
+
+#[test]
+fn test_write_pane_session_unbinds_another_session_on_a_member_key() {
+    let _bed = setup();
+    let mut tags = HashMap::new();
+    tags.insert(
+        ("%9".to_string(), "hive-team".to_string()),
+        "honey".to_string(),
+    );
+    tags.insert(
+        ("%9".to_string(), "hive-agent".to_string()),
+        "rex".to_string(),
+    );
+    set_pane_options(tags);
+    let binding = RecordBinding {
+        team: "honey".to_string(),
+        created_at: "1700000000".to_string(),
+        member: "rex".to_string(),
+    };
+    write_session_key("m-honey.rex", "sid-1", "/w", Some(&binding)).unwrap();
+    write_pane_session("%9", "sid-2", "/w").unwrap();
+    let record = read_session_key("m-honey.rex").unwrap();
+    assert_eq!(record.session_id, "sid-2");
+    assert_eq!(record.binding, None);
+    // an untagged pane never carries a binding
+    write_pane_session("%7", "sid-3", "/w").unwrap();
+    assert_eq!(read_session_key("p7").unwrap().binding, None);
+}
+
+fn tag_cedar_worker() {
+    let mut tags = HashMap::new();
+    tags.insert(
+        ("%9".to_string(), "hive-team".to_string()),
+        "cedar".to_string(),
+    );
+    tags.insert(
+        ("%9".to_string(), "hive-agent".to_string()),
+        "worker".to_string(),
+    );
+    set_pane_options(tags);
+}
+
+#[test]
+fn test_write_pane_session_on_an_aliased_member_waits_for_the_launch_lock() {
+    let bed = setup();
+    let _listener = bind_leader_socket(&bed.tmp.path().join("hive/l-ab12.sock"));
+    bind_launch("l-ab12", SID, CWD, "cedar", "123", "worker", "%9").unwrap();
+    let held = launch_lock("l-ab12").unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let writer = thread::spawn(move || {
+        tag_cedar_worker();
+        started_tx.send(()).unwrap();
+        let result = write_pane_session("%9", SID, "/changed-by-pane");
+        done_tx.send(()).unwrap();
+        result
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let completed_under_lock = done_rx.recv_timeout(Duration::from_millis(300)).is_ok();
+    let record_under_lock = read_session_key("l-ab12").unwrap();
+    drop(held);
+    writer.join().unwrap().unwrap();
+    assert!(
+        !completed_under_lock,
+        "pane writer finished under a held launch lock"
+    );
+    assert_eq!(record_under_lock.cwd, CWD);
+    let after = read_session_key("l-ab12").unwrap();
+    assert_eq!(after.cwd, "/changed-by-pane");
+    assert_eq!(after.binding, Some(binding("cedar", "123", "worker")));
+}
+
+#[test]
+fn test_write_pane_session_refuses_a_member_rebound_before_its_lock() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    tag_cedar_worker();
+    let _old_listener = bind_leader_socket(&bed.tmp.path().join("hive/l-ab12.sock"));
+    let _new_listener = bind_leader_socket(&bed.tmp.path().join("hive/l-cd34.sock"));
+    bind_launch("l-ab12", SID, CWD, "cedar", "123", "worker", "%9").unwrap();
+    set_pane_write_interleave(|| {
+        rollback_launch("l-ab12", SID, "cedar", "123", "worker", "%9").unwrap();
+        bind_launch(
+            "l-cd34",
+            "new-session",
+            "/new-cwd",
+            "cedar",
+            "456",
+            "worker",
+            "%9",
+        )
+        .unwrap();
+        record_cedar("456", Some("new-session"));
+        assert!(binding_holds("m-cedar.worker").is_ok());
+    });
+    let err = write_pane_session("%9", SID, "/old-pane").unwrap_err();
+    assert!(err.to_string().contains("no longer resolves"), "{err}");
+    assert_eq!(
+        read_session_key("l-cd34").unwrap(),
+        SessionRecord {
+            session_id: "new-session".to_string(),
+            cwd: "/new-cwd".to_string(),
+            binding: Some(binding("cedar", "456", "worker")),
+        }
+    );
+    assert!(binding_holds("m-cedar.worker").is_ok());
+}
+
+#[test]
+fn test_write_pane_session_on_an_aliased_member_keeps_the_launch_binding() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    tag_cedar_worker();
+    let _listener = bind_leader_socket(&bed.tmp.path().join("hive/l-ab12.sock"));
+    bind_launch("l-ab12", SID, CWD, "cedar", "123", "worker", "%9").unwrap();
+    record_cedar("123", Some(SID));
+    write_pane_session("%9", SID, "/updated-cwd").unwrap();
+    assert!(binding_holds("m-cedar.worker").is_ok());
+    assert_eq!(read_session_key("l-ab12").unwrap().cwd, "/updated-cwd");
+}
+
+#[test]
+fn test_write_pane_session_does_not_follow_an_alias_published_after_its_resolve() {
+    let mut bed = setup();
+    retained_member(&mut bed, "m-cedar.worker");
+    tag_cedar_worker();
+    let _old_listener = bind_leader_socket(&bed.tmp.path().join("hive/m-cedar.worker.sock"));
+    let _new_listener = bind_leader_socket(&bed.tmp.path().join("hive/l-cd34.sock"));
+    assert_eq!(canonical_key("m-cedar.worker"), "m-cedar.worker");
+    assert!(binding_holds("m-cedar.worker").is_ok());
+    set_pane_write_interleave(|| {
+        kill_daemon_key("m-cedar.worker");
+        bind_launch(
+            "l-cd34",
+            "new-session",
+            "/new-cwd",
+            "cedar",
+            "456",
+            "worker",
+            "%9",
+        )
+        .unwrap();
+        record_cedar("456", Some("new-session"));
+        assert!(binding_holds("m-cedar.worker").is_ok());
+    });
+    let err = write_pane_session("%9", SID, "/old-pane").unwrap_err();
+    assert!(err.to_string().contains("no session record"), "{err}");
+    assert_eq!(
+        read_session_key("l-cd34").unwrap(),
+        SessionRecord {
+            session_id: "new-session".to_string(),
+            cwd: "/new-cwd".to_string(),
+            binding: Some(binding("cedar", "456", "worker")),
+        }
+    );
+    assert!(!bed.tmp.path().join("hive/m-cedar.worker.session").exists());
+    assert!(binding_holds("m-cedar.worker").is_ok());
+}
+
+#[test]
+fn test_write_pane_session_creates_a_pane_record_but_not_a_member_one() {
+    let bed = setup();
+    write_pane_session("%7", "sid-3", "/w").unwrap();
+    assert_eq!(read_session_key("p7").unwrap().session_id, "sid-3");
+    tag_cedar_worker();
+    let err = write_pane_session("%9", SID, CWD).unwrap_err();
+    assert!(err.to_string().contains("no session record"), "{err}");
+    assert!(!bed.tmp.path().join("hive/m-cedar.worker.session").exists());
+}
+
+#[test]
+fn test_write_pane_session_does_not_recreate_a_member_record_deleted_after_its_read() {
+    let mut bed = setup();
+    retained_member(&mut bed, "m-cedar.worker");
+    tag_cedar_worker();
+    let path = session_path_for_key("m-cedar.worker");
+    set_record_update_interleave(|| {
+        kill_daemon_key("m-cedar.worker");
+        assert!(!session_path_for_key("m-cedar.worker").exists());
+    });
+    let _ = write_pane_session("%9", SID, "/old-pane");
+    assert!(
+        !path.exists(),
+        "pane update recreated a member record deleted after its read"
+    );
+}
+
+#[test]
+fn test_write_pane_session_does_not_overwrite_a_record_replaced_after_its_read() {
+    let mut bed = setup();
+    retained_member(&mut bed, "m-cedar.worker");
+    tag_cedar_worker();
+    set_record_update_interleave(|| {
+        kill_daemon_key("m-cedar.worker");
+        write_session_key(
+            "m-cedar.worker",
+            "new-session",
+            "/new-cwd",
+            Some(&binding("cedar", "456", "worker")),
+        )
+        .unwrap();
+        record_cedar("456", Some("new-session"));
+        assert!(binding_holds("m-cedar.worker").is_ok());
+    });
+    let _ = write_pane_session("%9", SID, "/old-pane");
+    assert_eq!(
+        read_session_key("m-cedar.worker").unwrap(),
+        SessionRecord {
+            session_id: "new-session".to_string(),
+            cwd: "/new-cwd".to_string(),
+            binding: Some(binding("cedar", "456", "worker")),
+        }
+    );
+    assert!(binding_holds("m-cedar.worker").is_ok());
 }
 
 #[test]

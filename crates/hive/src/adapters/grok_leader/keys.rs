@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -184,18 +184,36 @@ pub fn write_session_key(
     cwd: &str,
     binding: Option<&RecordBinding>,
 ) -> Result<()> {
-    let path = session_path_for_key(key);
+    write_record_at(&session_path_for_key(key), session_id, cwd, binding)
+}
+
+/// The record file of *key* itself, an alias never followed: the path a
+/// writer pins once it has chosen its target.
+fn own_session_path(key: &str) -> PathBuf {
+    grok_home().join("hive").join(format!("{key}.session"))
+}
+
+fn write_record_at(
+    path: &Path,
+    session_id: &str,
+    cwd: &str,
+    binding: Option<&RecordBinding>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    fs::write(path, record_json(session_id, cwd, binding).to_string())?;
+    Ok(())
+}
+
+fn record_json(session_id: &str, cwd: &str, binding: Option<&RecordBinding>) -> Value {
     let mut record = json!({"sessionId": session_id, "cwd": cwd});
     if let Some(binding) = binding {
         for (field, value) in binding_fields(binding) {
             record[field] = Value::from(value);
         }
     }
-    fs::write(&path, record.to_string())?;
-    Ok(())
+    record
 }
 
 /// Set (or, with `None`, clear) the binding on an existing record, every
@@ -220,8 +238,67 @@ pub fn bind_session_key(key: &str, binding: Option<&RecordBinding>) -> Result<()
     Ok(())
 }
 
+/// The pane TUI's record write at launch (`hive grok` on a pane). A member
+/// pane resolves to its member key, whose record the mint has already
+/// written with its binding before the TUI is launched onto the session:
+/// that binding stays when the TUI carries the same session, so the record
+/// the mint bound is not unbound by the launch that follows it. Another
+/// session on the key is a record the mint did not write; it starts unbound.
+///
+/// The write pins the record file it resolved to and never follows an
+/// alias again. A member's own record, and a launch's, is updated through
+/// one handle opened without create: read, decided and rewritten on that
+/// handle, so a record deleted since the resolve is not recreated and one
+/// replaced since (a kill and a fresh mint at the same path) is another
+/// file this write never reaches. A pane key's record is created. A
+/// member aliased to a launch writes the launch's record under the
+/// launch's lock like every other read-then-write of it (`handoff`),
+/// resolving the alias again under the lock; a member no longer naming
+/// the locked launch is refused rather than re-targeted.
 pub fn write_pane_session(pane: &str, session_id: &str, cwd: &str) -> Result<()> {
-    write_session_key(&resolve_pane_key(pane), session_id, cwd, None)
+    let key = resolve_pane_key(pane);
+    let target = canonical_key(&key);
+    #[cfg(test)]
+    super::tests::pane_write_interleave();
+    if is_launch_key(&target) {
+        let _lock = super::handoff::launch_lock(&target)?;
+        anyhow::ensure!(
+            canonical_key(&key) == target,
+            "{key} no longer resolves to launch {target}"
+        );
+        return update_record_keeping_binding(&own_session_path(&target), session_id, cwd);
+    }
+    if member_from_key(&key).is_some() {
+        return update_record_keeping_binding(&own_session_path(&key), session_id, cwd);
+    }
+    write_record_at(&own_session_path(&key), session_id, cwd, None)
+}
+
+/// Rewrite the record at *path* on one handle: the binding it holds stays
+/// when the session is unchanged. No file at *path* is nothing to update.
+fn update_record_keeping_binding(path: &Path, session_id: &str, cwd: &str) -> Result<()> {
+    use std::io::{Read, Seek, Write};
+
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(false)
+        .open(path)
+        .map_err(|error| {
+            anyhow::anyhow!("no session record at {} to update: {error}", path.display())
+        })?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    let binding = parse_record(&text)
+        .filter(|record| record.session_id == session_id)
+        .and_then(|record| record.binding);
+    #[cfg(test)]
+    super::tests::record_update_interleave();
+    let record = record_json(session_id, cwd, binding.as_ref());
+    file.set_len(0)?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    file.write_all(record.to_string().as_bytes())?;
+    Ok(())
 }
 
 /// The session hive minted for a key, with the cwd recorded at spawn and
@@ -234,8 +311,15 @@ pub struct SessionRecord {
 }
 
 pub fn read_session_key(key: &str) -> Option<SessionRecord> {
-    let text = fs::read_to_string(session_path_for_key(key)).ok()?;
-    let data: Value = serde_json::from_str(&text).ok()?;
+    read_record_at(&session_path_for_key(key))
+}
+
+fn read_record_at(path: &Path) -> Option<SessionRecord> {
+    parse_record(&fs::read_to_string(path).ok()?)
+}
+
+fn parse_record(text: &str) -> Option<SessionRecord> {
+    let data: Value = serde_json::from_str(text).ok()?;
     let obj = data.as_object()?;
     let field = |name: &str| {
         obj.get(name)
