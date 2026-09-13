@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
-use crate::adapters::grok_leader::PromptResult;
+use crate::adapters::grok_leader::{Confirmation, PromptResult};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::message::{format_hive_envelope, format_node_envelope};
 use crate::team::Team;
@@ -32,14 +32,19 @@ pub(crate) fn resolve_live_agent_impl(team_name: &str, agent_name: &str) -> Resu
 /// leader. A member already online is a no-op; a leader that does not
 /// come up, or a session that does not load, is an explicit refusal —
 /// nothing is sent to a session that did not load, and no bus row is
-/// written for it. Every other CLI is untouched.
-fn revive_target(target: &Agent) -> Result<()> {
+/// written for it. What comes back is this request's own confirmation
+/// of the identity revived — the team instance, member, session and
+/// connection — which the dispatch below submits on, or not at all;
+/// another request's revive of the same member confirms for that
+/// request and cannot stand in for this one. Every other CLI is
+/// untouched and confirms nothing.
+fn revive_target(target: &Agent) -> Result<Option<Confirmation>> {
     if target.cli != "grok" {
-        return Ok(());
+        return Ok(None);
     }
     let key = crate::adapters::grok_leader::member_key(&target.team_name, &target.name);
     match hooked_gl_revive_key(&key) {
-        Ok(_) => Ok(()),
+        Ok(revival) => Ok(Some(revival.confirmation)),
         Err(failure) => bail!(
             "grok member '{}' could not be revived for this send ({failure})",
             target.name
@@ -131,8 +136,9 @@ pub(crate) fn send_payload(
     let (team, target) = hooked_resolve_live_agent(team_name, target_agent)?;
 
     // A grok target's session is loaded here, before the gate, so the gate
-    // reads the state the load replayed, not a cold unknown.
-    revive_target(&target)?;
+    // reads the state the load replayed, not a cold unknown; the dispatch
+    // carries what this revive confirmed.
+    let confirmation = revive_target(&target)?;
 
     // Side effect only: errors if target is waiting for a user answer.
     hooked_check_send_gate(&target)?;
@@ -218,7 +224,7 @@ pub(crate) fn send_payload(
                 }
             }
         }
-        _ => match hooked_agent_dispatch_turn(&target, &envelope) {
+        _ => match hooked_agent_dispatch_turn(&target, &envelope, confirmation.as_ref()) {
             Ok(handle) => Some(handle),
             Err(error) => {
                 let result = refused(error);

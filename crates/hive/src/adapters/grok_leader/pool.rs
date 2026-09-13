@@ -26,16 +26,34 @@ pub struct PromptId {
     pub rid: u64,
 }
 
+/// The identity a revival confirmed, handed to the caller that asked for
+/// it and checked again at the submission boundary: the member and the
+/// team instance (the record's binding, as the registry then agreed to
+/// it), the session the client loaded, and the connection itself (the
+/// client generation). The submission it was made for carries it to the
+/// prompt; a later revive on the same key hands its own caller another
+/// one and changes nothing about this one — a submission on a
+/// confirmation whose identity is no longer the key's is refused, whether
+/// the binding stopped holding or a valid later binding replaced it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confirmation {
+    pub key: String,
+    pub binding: RecordBinding,
+    pub session_id: String,
+    pub generation: u64,
+}
+
 /// What a revival left: whether it raised the leader (`false` for a member
-/// that was online — a no-op, not a failure) and the session's state as the
-/// handshake's `session/load` replayed it. The state is a snapshot the
-/// caller's own gate reads for itself; nothing here says the turn is
-/// closed.
+/// that was online — a no-op, not a failure), the session's state as the
+/// handshake's `session/load` replayed it, and the identity it confirmed.
+/// The state is a snapshot the caller's own gate reads for itself; nothing
+/// here says the turn is closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revival {
     pub raised: bool,
     pub input_state: String,
     pub turn_open: Option<bool>,
+    pub confirmation: Confirmation,
 }
 
 /// Why a revival did not end with a client on the member's session. Told
@@ -67,6 +85,9 @@ pub trait LeaderClient: Send + Sync {
     fn generation(&self) -> u64 {
         unreachable!("generation not expected on this client")
     }
+    fn session_id(&self) -> Option<String> {
+        unreachable!("session_id not expected on this client")
+    }
     fn prompt(&self, _text: &str) -> Result<bool> {
         unreachable!("prompt not expected on this client")
     }
@@ -93,6 +114,9 @@ pub trait LeaderClient: Send + Sync {
 impl LeaderClient for GrokStdioClient {
     fn generation(&self) -> u64 {
         GrokStdioClient::generation(self)
+    }
+    fn session_id(&self) -> Option<String> {
+        GrokStdioClient::session_id(self)
     }
     fn prompt(&self, text: &str) -> Result<bool> {
         Ok(GrokStdioClient::prompt(self, text))
@@ -150,9 +174,6 @@ fn key_is_rostered(key: &str) -> bool {
 pub(super) struct PoolState {
     pub(super) clients: HashMap<String, Arc<GrokStdioClient>>,
     pub(super) cooldown: HashMap<String, Instant>,
-    /// The client generation the last `revive_key` confirmed per key: a
-    /// submission on a revived key goes out on that client or not at all.
-    confirmed: HashMap<String, u64>,
 }
 
 /// One persistent stdio client per daemon key.
@@ -219,29 +240,50 @@ impl GrokClientPool {
         self.acting_client(key).is_some()
     }
 
-    /// Deliver text as a prompt over the key's leader.
+    /// Deliver text as a prompt over the key's leader, from a pool that
+    /// never revived the key — a spawning or joining CLI's own, or the
+    /// cvim sendback — binding once to a leader already listening
+    /// (`client_for_key` never spawns).
     ///
     /// Returns [`PROMPT_QUEUED`] when the leader echoed the prompt back, else
     /// None: no daemon, no session record, an rpc error, or an ack timeout.
     /// A busy session is not bounced — the leader queues the prompt FIFO and
     /// runs it when the current turn ends, the same as typing into the TUI.
-    /// A leader that is gone is not raised here: that is `revive_key`, run
-    /// by the submission's entry before its gate.
+    /// A leader that is gone is not raised here: that is `revive_key`.
     pub fn send_to_key(&self, key: &str, text: &str) -> Option<&'static str> {
-        let client = self.submission_client(key)?;
+        let client = self.acting_client(key)?;
         match client.prompt(text) {
             Ok(true) => Some(PROMPT_QUEUED),
             _ => None,
         }
     }
 
-    /// A workflow node's task as a tracked prompt over the key's leader:
-    /// the connection and request ids let `prompt_result_for_key` read the
-    /// turn's outcome. `Err` covers no daemon and no session record too.
-    pub fn dispatch_to_key(&self, key: &str, text: &str) -> Result<PromptId, String> {
-        let client = self
-            .submission_client(key)
-            .ok_or_else(|| format!("no grok leader client on {key}"))?;
+    /// `send_to_key` on the identity a revive confirmed: the prompt goes
+    /// out on that connection, to that session, for that member of that
+    /// team instance, or not at all (`confirmed_client`).
+    pub fn send_confirmed(&self, confirmation: &Confirmation, text: &str) -> Option<&'static str> {
+        let client = self.confirmed_client(confirmation)?;
+        match client.prompt(text) {
+            Ok(true) => Some(PROMPT_QUEUED),
+            _ => None,
+        }
+    }
+
+    /// A workflow node's task as a tracked prompt on the identity a revive
+    /// confirmed: the connection and request ids let `prompt_result_for_key`
+    /// read the turn's outcome. `Err` covers an identity that is no longer
+    /// the key's, a leader gone, and a client rebound since.
+    pub fn dispatch_confirmed(
+        &self,
+        confirmation: &Confirmation,
+        text: &str,
+    ) -> Result<PromptId, String> {
+        let client = self.confirmed_client(confirmation).ok_or_else(|| {
+            format!(
+                "no grok leader client on {} for the identity its revive confirmed",
+                confirmation.key
+            )
+        })?;
         let rid = client.prompt_tracked(text).map_err(|e| e.to_string())?;
         Ok(PromptId {
             generation: client.generation(),
@@ -249,7 +291,7 @@ impl GrokClientPool {
         })
     }
 
-    /// The outcome of a prompt `dispatch_to_key` sent; None with no client
+    /// The outcome of a prompt `dispatch_confirmed` sent; None with no client
     /// on the key or one that never sent it (reconnected since).
     pub fn prompt_result_for_key(&self, key: &str, id: PromptId) -> Option<PromptResult> {
         let client = self.acting_client(key)?;
@@ -340,49 +382,42 @@ impl GrokClientPool {
         Some(client)
     }
 
-    /// The client a submission goes out on.
-    ///
-    /// A key this pool has revived (`revive_key`) submits only on the
-    /// client that revival confirmed — the same connection, alive, still
-    /// on the session the record names. The binding is not reinterpreted
-    /// down here: a client rebound since (another generation), a record
-    /// that names another session, or a leader that is gone fails the
-    /// submission, and nothing on this path loads the new session or
-    /// raises a leader; a stale client is closed. A key this pool never
-    /// revived (a spawning or joining CLI's own pool) binds once to a
-    /// leader already listening — `client_for_key` never spawns.
-    fn submission_client(&self, key: &str) -> Option<Arc<dyn LeaderClient>> {
+    /// The client a confirmed submission goes out on: the connection the
+    /// revive confirmed (the pooled client of that generation, alive, on
+    /// the confirmed session), and the key's identity here and now still
+    /// the confirmed one — the record naming that session and bound to
+    /// that member of that team instance, the registry agreeing
+    /// (`binding_holds`). Nothing is reinterpreted down here: a client
+    /// rebound since (another generation) is the runtime's and is left
+    /// alone; a dead client, or one whose record names another session,
+    /// is closed; a binding that stopped holding, or a valid later binding
+    /// of the same key — the same name, another team instance — refuses
+    /// the submission while the client stays for whoever revives next.
+    /// Nothing on this path loads a session or raises a leader.
+    fn confirmed_client(&self, confirmation: &Confirmation) -> Option<Arc<dyn LeaderClient>> {
         #[cfg(test)]
         {
             if let Some(factory) = self.client_override.lock().unwrap().as_ref() {
-                return factory(key);
+                return factory(&confirmation.key);
             }
         }
-        let (held, confirmed) = {
-            let state = self.state.lock().unwrap();
-            (
-                state.clients.get(key).cloned(),
-                state.confirmed.get(key).copied(),
-            )
-        };
-        let Some(generation) = confirmed else {
-            return self
-                .client_for_key(key)
-                .map(|client| client as Arc<dyn LeaderClient>);
-        };
-        let client = held?;
-        if client.generation() != generation {
+        let key = confirmation.key.as_str();
+        let client = self.state.lock().unwrap().clients.get(key).cloned()?;
+        if client.generation() != confirmation.generation {
             return None;
         }
-        let on_record = read_session_key(key).is_some_and(|record| {
-            client.session_id().as_deref() == Some(record.session_id.as_str())
-        });
-        if client.is_alive() && on_record {
-            return Some(client);
+        let on_session = client.session_id().as_deref() == Some(confirmation.session_id.as_str());
+        let on_record = read_session_key(key)
+            .is_some_and(|record| record.session_id == confirmation.session_id);
+        if !client.is_alive() || !on_session || !on_record {
+            client.close();
+            self.state.lock().unwrap().clients.remove(key);
+            return None;
         }
-        client.close();
-        self.state.lock().unwrap().clients.remove(key);
-        None
+        if binding_holds(key).ok().as_ref() != Some(&confirmation.binding) {
+            return None;
+        }
+        Some(client)
     }
 
     /// Bring a member's session back under a client before a submission:
@@ -395,7 +430,12 @@ impl GrokClientPool {
     /// raised on the record's key. Either way the connect cooldown a cold
     /// runtime read may have left is cleared before the handshake, which
     /// `session/load`s the recorded session. No prompt goes out and no
-    /// bus row is written: the caller's gate reads the loaded state next.
+    /// bus row is written: the caller's gate reads the loaded state next,
+    /// and its submission carries the `Confirmation` — the binding this
+    /// check passed, the session the client loaded, the client's
+    /// generation — which is the caller's alone: nothing in the pool
+    /// remembers it, so a second revive on the key confirms for its own
+    /// caller and cannot replace what this one confirmed.
     pub fn revive_key(&self, key: &str) -> Result<Revival, ReviveFailure> {
         let binding = binding_holds(key).map_err(ReviveFailure::NotRetained)?;
         let raised = if probe_socket(&socket_path_for_key(key)) {
@@ -412,11 +452,9 @@ impl GrokClientPool {
         let client = self.acting_client(key).ok_or_else(|| {
             ReviveFailure::Handshake(format!("no client came up on {key} after the handshake"))
         })?;
-        self.state
-            .lock()
-            .unwrap()
-            .confirmed
-            .insert(key.to_string(), client.generation());
+        let session_id = client.session_id().ok_or_else(|| {
+            ReviveFailure::Handshake(format!("the client on {key} loaded no session"))
+        })?;
         Ok(Revival {
             raised,
             input_state: client
@@ -424,6 +462,12 @@ impl GrokClientPool {
                 .map(|runtime| runtime.input_state)
                 .unwrap_or_else(|| "unknown".to_string()),
             turn_open: client.turn_open(),
+            confirmation: Confirmation {
+                key: key.to_string(),
+                binding,
+                session_id,
+                generation: client.generation(),
+            },
         })
     }
 
@@ -509,14 +553,8 @@ pub fn send_to_key(key: &str, text: &str) -> Option<&'static str> {
     pool().send_to_key(key, text)
 }
 
-pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(String, PromptId), String> {
-    let key = resolve_pane_key(pane);
-    let id = pool().dispatch_to_key(&key, text)?;
-    Ok((key, id))
-}
-
-pub fn dispatch_to_key(key: &str, text: &str) -> Result<PromptId, String> {
-    pool().dispatch_to_key(key, text)
+pub fn dispatch_confirmed(confirmation: &Confirmation, text: &str) -> Result<PromptId, String> {
+    pool().dispatch_confirmed(confirmation, text)
 }
 
 pub fn prompt_result_for_key(key: &str, id: PromptId) -> Option<PromptResult> {

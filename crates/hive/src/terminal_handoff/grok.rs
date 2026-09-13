@@ -54,6 +54,7 @@ pub(crate) fn binding_matches(session: &Session, target: &Target) -> bool {
             &key,
             &session.id,
             &target.team,
+            &target.created_at,
             &target.member,
             &target.pane,
         )
@@ -66,6 +67,7 @@ pub(crate) fn clear_binding(session: &Session, target: &Target) {
             &key,
             &session.id,
             &target.team,
+            &target.created_at,
             &target.member,
             &target.pane,
         );
@@ -93,9 +95,10 @@ mod tests {
         env.set("GROK_HOME", tmp.path().join("g"));
         env.set("HIVE_HOME", tmp.path().join("h"));
         let s = Session::grok("l-ab12", "sid-1", "/w");
+        let sock = tmp.path().join("g/hive/l-ab12.sock");
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let _leader = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         grok_leader::write_session_key("l-ab12", "sid-1", "/w", None).unwrap();
-        let alias = grok_leader::alias_path_for_key("m-honey.rex");
-        std::fs::write(&alias, "l-ab12").unwrap();
         let target = Target {
             team: "honey".into(),
             member: "rex".into(),
@@ -106,9 +109,22 @@ mod tests {
             owns_window: false,
             new_session: false,
         };
+        s.bind(&target).unwrap();
+        let alias = grok_leader::alias_path_for_key("m-honey.rex");
+        assert!(alias.exists());
+        assert!(s.binding_matches(&target));
+        // the same name bound at another team instance is not this
+        // target's binding
+        let other = Target {
+            created_at: "2".into(),
+            ..target.clone()
+        };
+        assert!(!s.binding_matches(&other));
         s.clear_binding(&target, false);
         assert!(!alias.exists());
-        assert!(grok_leader::read_session_key("l-ab12").is_some());
+        let record = grok_leader::read_session_key("l-ab12").unwrap();
+        assert_eq!(record.session_id, "sid-1");
+        assert_eq!(record.binding, None);
     }
 
     #[test]

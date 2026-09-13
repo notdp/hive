@@ -13,7 +13,7 @@ use anyhow::bail;
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
 use crate::adapters::codex_app_server::TurnStartFailure;
-use crate::adapters::grok_leader::{PromptId, RecordBinding};
+use crate::adapters::grok_leader::{Confirmation, PromptId, RecordBinding};
 
 use super::support::{wait_codex_attached, wait_grok_session_ready, AGENT_STARTUP_TIMEOUT};
 #[cfg(test)]
@@ -781,31 +781,19 @@ pub(super) fn hooked_grok_send_to_key(key: &str, text: &str) -> Option<&'static 
     crate::adapters::grok_leader::send_to_key(key, text)
 }
 
-pub(super) fn hooked_grok_dispatch_to_pane(
-    pane_id: &str,
+pub(super) fn hooked_grok_dispatch(
+    confirmation: &Confirmation,
     text: &str,
-) -> Result<(String, PromptId), String> {
+) -> Result<PromptId, String> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
-        h.grok_sent.push((pane_id.to_string(), text.to_string()));
-        h.grok_dispatch.clone()
-    }) {
-        return v
-            .unwrap_or_else(|| Err("grok dispatch not hooked".to_string()))
-            .map(|rid| (format!("key-of-{pane_id}"), rid));
-    }
-    crate::adapters::grok_leader::dispatch_to_pane(pane_id, text)
-}
-
-pub(super) fn hooked_grok_dispatch_to_key(key: &str, text: &str) -> Result<PromptId, String> {
-    #[cfg(test)]
-    if let Some(v) = testhook::with(|h| {
-        h.grok_sent_key.push((key.to_string(), text.to_string()));
+        h.grok_sent_key
+            .push((confirmation.key.to_string(), text.to_string()));
         h.grok_dispatch.clone()
     }) {
         return v.unwrap_or_else(|| Err("grok dispatch not hooked".to_string()));
     }
-    crate::adapters::grok_leader::dispatch_to_key(key, text)
+    crate::adapters::grok_leader::dispatch_confirmed(confirmation, text)
 }
 
 pub(super) fn hooked_grok_interrupt_pane(pane_id: &str) -> Option<&'static str> {

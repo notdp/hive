@@ -157,7 +157,7 @@ pub struct Hook {
     pub grok_create_member_session: bool,
     pub grok_send_to_pane: Option<&'static str>,
     pub grok_send_to_key: Option<&'static str>,
-    /// `Ok(PromptId)` or the error `dispatch_to_pane` / `dispatch_to_key` answer.
+    /// `Ok(PromptId)` or the error `dispatch_confirmed` answers.
     pub grok_dispatch: Option<Result<PromptId, String>>,
     pub grok_interrupt_pane: Option<&'static str>,
     pub grok_interrupt_key: Option<&'static str>,

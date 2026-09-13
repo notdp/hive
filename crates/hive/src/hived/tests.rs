@@ -28,7 +28,9 @@ use super::*;
 use crate::adapters::claude_bg::EngineSession;
 use crate::adapters::claude_view::PaneView;
 use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome, ThreadRuntime, TurnResult};
-use crate::adapters::grok_leader::{PromptResult, Revival, ReviveFailure, SessionRuntime};
+use crate::adapters::grok_leader::{
+    Confirmation, PromptResult, RecordBinding, Revival, ReviveFailure, SessionRuntime,
+};
 
 /// Collectors the hook closures push into: `(target, option, value)` tmux
 /// writes, `(event, payload)` notify emits, `(argv, stderr path)` spawns and
@@ -4155,7 +4157,7 @@ fn test_handle_request_node_dispatch_carries_no_sender() {
     hook.agent_send = Some(Arc::new(|_agent, _text, _sender| {
         panic!("a node dispatch is a tracked turn, never a plain send")
     }));
-    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, text| {
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, text, _confirmation| {
         handed_sink.lock().unwrap().push(text.to_string());
         Ok(TurnHandle::Codex {
             thread_id: "thr-b".to_string(),
@@ -5269,13 +5271,30 @@ fn saved_operation(workspace: &Path, id: &str) -> Value {
     .unwrap()
 }
 
+/// What a revive of *key* confirms in these tests: the member and team
+/// instance the key names, the roster's session, one client generation.
+fn confirmation_of(key: &str) -> Confirmation {
+    let (team, member) = crate::adapters::grok_leader::member_from_key(key).unwrap_or_default();
+    Confirmation {
+        key: key.to_string(),
+        binding: RecordBinding {
+            team,
+            created_at: "123".to_string(),
+            member,
+        },
+        session_id: "sid-g".to_string(),
+        generation: 1,
+    }
+}
+
 /// A revive that found the member online: no leader raised, its state
 /// as loaded.
-fn online_revival() -> Revival {
+fn online_revival(key: &str) -> Revival {
     Revival {
         raised: false,
         input_state: "ready".to_string(),
         turn_open: Some(false),
+        confirmation: confirmation_of(key),
     }
 }
 
@@ -5447,7 +5466,7 @@ fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
         gated_sink.lock().unwrap().push(target.name.clone());
         Ok(())
     }));
-    hook.agent_dispatch_turn = Some(Arc::new(move |agent, text| {
+    hook.agent_dispatch_turn = Some(Arc::new(move |agent, text, _confirmation| {
         handed_sink
             .lock()
             .unwrap()
@@ -5504,7 +5523,7 @@ fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
     // A refused turn is a refused dispatch: the row is on the ledger (the
     // dispatch was attempted), nothing is held for it.
     testhook::update(|h| {
-        h.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+        h.agent_dispatch_turn = Some(Arc::new(|_agent, _text, _confirmation| {
             Err(DeliveryError(
                 "codex pane %1 did not accept the turn".to_string(),
             ))
@@ -5534,7 +5553,7 @@ fn test_node_dispatch_writes_a_senderless_row_and_a_from_less_envelope() {
     // A turn the engine took without a trackable id is dispatched, flagged,
     // and held as untracked.
     testhook::update(|h| {
-        h.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+        h.agent_dispatch_turn = Some(Arc::new(|_agent, _text, _confirmation| {
             Ok(TurnHandle::Untracked("result without turn.id".to_string()))
         }))
     });
@@ -5716,6 +5735,7 @@ fn raising_revival(
             raised: true,
             input_state: state.to_string(),
             turn_open: Some(false),
+            confirmation: confirmation_of(key),
         })
     })
 }
@@ -5761,6 +5781,84 @@ fn wire_grok_send(
     hook.gl_retained = Some(Arc::new(|_key| true));
 }
 
+/// The dispatch of a grok send carries the confirmation this request's
+/// own revive returned — the identity and connection it confirmed, as
+/// the pool checks it again at the prompt — and a codex target, which is
+/// not revived, carries none.
+#[test]
+fn test_send_hands_its_own_revive_confirmation_to_the_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws");
+    bus::init_workspace(&workspace).unwrap();
+    let sequence: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let loaded: Arc<Mutex<Option<&'static str>>> = Arc::new(Mutex::new(None));
+    let handed: Arc<Mutex<Vec<Option<Confirmation>>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_grok_send(&mut hook, &workspace, &sequence, &loaded);
+    let confirmed = Confirmation {
+        session_id: "sid-of-this-revive".to_string(),
+        generation: 7,
+        ..confirmation_of("m-team-x.g")
+    };
+    let revive_loaded = Arc::clone(&loaded);
+    let revive_confirms = confirmed.clone();
+    hook.gl_revive_key = Some(Arc::new(move |key| {
+        assert_eq!(key, revive_confirms.key);
+        *revive_loaded.lock().unwrap() = Some("ready");
+        Ok(Revival {
+            raised: true,
+            input_state: "ready".to_string(),
+            turn_open: Some(false),
+            confirmation: revive_confirms.clone(),
+        })
+    }));
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, _text, confirmation| {
+        handed_sink.lock().unwrap().push(confirmation.cloned());
+        Ok(TurnHandle::Grok {
+            key: "m-team-x.g".to_string(),
+            prompt_id: PromptId {
+                generation: 7,
+                rid: 1,
+            },
+        })
+    }));
+    let _guard = testhook::install(hook);
+
+    let payload = send_payload_for_test(&workspace, "a", "g", "hi", "");
+    assert_eq!(payload["ok"], Value::Bool(true), "{payload:?}");
+    assert_eq!(*handed.lock().unwrap(), vec![Some(confirmed)]);
+
+    // a codex target: no revive, no confirmation
+    let handed: Arc<Mutex<Vec<Option<Confirmation>>>> = Arc::new(Mutex::new(Vec::new()));
+    let handed_sink = Arc::clone(&handed);
+    let mut hook = Hook::default();
+    wire_send(&mut hook, &workspace);
+    let team = Team {
+        name: "team-x".to_string(),
+        workspace: workspace.to_string_lossy().to_string(),
+        created_at: 123.0,
+        tmux_session: "dev".to_string(),
+        tmux_window: "dev:0".to_string(),
+        ..Default::default()
+    };
+    hook.resolve_live_agent = Some(Arc::new(move |_team, _agent| {
+        Ok((team.clone(), fake_agent("c", "%2", "codex")))
+    }));
+    hook.gl_revive_key = Some(Arc::new(|_key| panic!("a codex target is not revived")));
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, _text, confirmation| {
+        handed_sink.lock().unwrap().push(confirmation.cloned());
+        Ok(TurnHandle::Codex {
+            thread_id: "thr-c".to_string(),
+            turn_id: "turn-1".to_string(),
+        })
+    }));
+    let _guard = testhook::install(hook);
+    let payload = send_payload_for_test(&workspace, "a", "c", "hi", "");
+    assert_eq!(payload["ok"], Value::Bool(true), "{payload:?}");
+    assert_eq!(*handed.lock().unwrap(), vec![None]);
+}
+
 #[test]
 fn test_send_revives_a_grok_target_before_the_gate_which_reads_the_loaded_state() {
     let tmp = tempfile::tempdir().unwrap();
@@ -5773,7 +5871,7 @@ fn test_send_revives_a_grok_target_before_the_gate_which_reads_the_loaded_state(
     let mut hook = Hook::default();
     wire_grok_send(&mut hook, &workspace, &sequence, &loaded);
     hook.gl_revive_key = Some(raising_revival(&sequence, &loaded, "ready"));
-    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, text| {
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, text, _confirmation| {
         handed_sink.lock().unwrap().push(text.to_string());
         Ok(TurnHandle::Grok {
             key: "m-team-x.g".to_string(),
@@ -5810,7 +5908,7 @@ fn test_send_gate_refuses_a_revived_grok_target_whose_load_shows_it_waiting() {
     let mut hook = Hook::default();
     wire_grok_send(&mut hook, &workspace, &sequence, &loaded);
     hook.gl_revive_key = Some(raising_revival(&sequence, &loaded, "waiting_user"));
-    hook.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+    hook.agent_dispatch_turn = Some(Arc::new(|_agent, _text, _confirmation| {
         panic!("a waiting target must not be handed the message")
     }));
     let _guard = testhook::install(hook);
@@ -5850,7 +5948,7 @@ fn test_send_refuses_a_grok_target_whose_revive_fails_before_any_row() {
         wire_grok_send(&mut hook, &workspace, &sequence, &loaded);
         let refused = failure.clone();
         hook.gl_revive_key = Some(Arc::new(move |_key| Err(refused.clone())));
-        hook.agent_dispatch_turn = Some(Arc::new(|_agent, _text| {
+        hook.agent_dispatch_turn = Some(Arc::new(|_agent, _text, _confirmation| {
             panic!("nothing is handed over after a failed revive")
         }));
         let _guard = testhook::install(hook);
@@ -5921,8 +6019,9 @@ fn test_revive_action_reports_the_revival_and_needs_admission() {
                     raised: true,
                     input_state: "ready".to_string(),
                     turn_open: None,
+                    confirmation: confirmation_of(key),
                 }),
-                "m-team-b.g" => Ok(online_revival()),
+                "m-team-b.g" => Ok(online_revival(key)),
                 _ => Err(ReviveFailure::NotRetained(
                     "the roster row names another session".to_string(),
                 )),
@@ -6016,7 +6115,7 @@ fn test_send_with_live_cli_still_uses_native_transport() {
                 let cli = cli_name.to_string();
                 move |_team, _agent| Ok((fake_team("team-x", vec![]), fake_agent("v", "%9", &cli)))
             })),
-            gl_revive_key: Some(Arc::new(|_key| Ok(online_revival()))),
+            gl_revive_key: Some(Arc::new(|key| Ok(online_revival(key)))),
             ..Default::default()
         };
         let _guard = testhook::install(hook);
@@ -6030,8 +6129,10 @@ fn test_send_with_live_cli_still_uses_native_transport() {
                 assert_eq!(sent[0].0, "%9");
             }
             "grok" => {
-                let sent = crate::agent::testhook::with(|h| h.grok_sent.clone()).unwrap();
-                assert_eq!(sent[0].0, "%9");
+                // a grok turn is addressed by the member key its revive
+                // confirmed, not by the pane
+                let sent = crate::agent::testhook::with(|h| h.grok_sent_key.clone()).unwrap();
+                assert_eq!(sent[0].0, crate::adapters::grok_leader::member_key("", "v"));
             }
             _ => {
                 let writes = crate::agent::testhook::with(|h| h.inbox_writes.clone()).unwrap();
@@ -8433,7 +8534,7 @@ fn wire_node_dispatch(hook: &mut Hook, workspace: &str, team: &str) -> Arc<Atomi
         Ok((t.clone(), fake_agent("b", "%9", "codex")))
     }));
     hook.check_send_gate = Some(Arc::new(|_target| Ok(())));
-    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, _text| {
+    hook.agent_dispatch_turn = Some(Arc::new(move |_agent, _text, _confirmation| {
         counted.fetch_add(1, Ordering::SeqCst);
         Ok(TurnHandle::Codex {
             thread_id: "thr-1".to_string(),

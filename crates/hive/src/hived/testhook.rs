@@ -11,7 +11,7 @@ use crate::adapters::claude_view::PaneView;
 use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome, ThreadRuntime, TurnResult};
 use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::{
-    PromptResult, Revival, ReviveFailure, SessionRecord, SessionRuntime,
+    Confirmation, PromptResult, Revival, ReviveFailure, SessionRecord, SessionRuntime,
 };
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
@@ -156,8 +156,13 @@ pub struct Hook {
     pub agent_send:
         Option<Arc<dyn Fn(&Agent, &str, &str) -> Result<String, DeliveryError> + Send + Sync>>,
     #[allow(clippy::type_complexity)]
-    pub agent_dispatch_turn:
-        Option<Arc<dyn Fn(&Agent, &str) -> Result<TurnHandle, DeliveryError> + Send + Sync>>,
+    pub agent_dispatch_turn: Option<
+        Arc<
+            dyn Fn(&Agent, &str, Option<&Confirmation>) -> Result<TurnHandle, DeliveryError>
+                + Send
+                + Sync,
+        >,
+    >,
     // hived self-seams
     pub resolve_live_agent: Option<S2<anyhow::Result<(Team, Agent)>>>,
     pub check_send_gate: Option<A1<anyhow::Result<()>>>,

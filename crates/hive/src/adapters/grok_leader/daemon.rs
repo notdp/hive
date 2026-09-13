@@ -584,14 +584,15 @@ pub fn kill_daemon_key(key: &str) {
         let _ = fs::remove_file(path);
     }
     let _ = fs::remove_file(sock.with_extension("session"));
-    // The member's alias goes under the same lock a bind or rollback holds,
-    // and only while it still names the launch this kill reaped; the lock
-    // file itself stays — flock is by inode, and a lock file unlinked under
-    // a holder lets the next join lock a fresh one beside it.
+    // The member's alias goes under the launch's lock, the one a bind or
+    // rollback of that launch holds, and only while it still names the
+    // launch this kill reaped; the lock file itself stays — flock is by
+    // inode, and a lock file unlinked under a holder lets the next join
+    // lock a fresh one beside it.
     let Some(bound_launch) = bound_launch else {
         return;
     };
-    if let Ok(_lock) = super::alias_lock(key) {
+    if let Ok(_lock) = super::launch_lock(&bound_launch) {
         if super::alias_target(key).as_deref() == Some(bound_launch.as_str()) {
             let _ = fs::remove_file(alias_path_for_key(key));
         }

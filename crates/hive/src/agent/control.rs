@@ -2,6 +2,7 @@ use anyhow::bail;
 
 use crate::adapters::claude_sessions;
 use crate::adapters::codex_app_server::TurnStartFailure;
+use crate::adapters::grok_leader::Confirmation;
 
 use super::seams::*;
 use super::spawn::Agent;
@@ -139,7 +140,18 @@ impl Agent {
     /// subagents natively. `Err` is the task not with the member; an
     /// engine that took it and handed back no id is `Untracked`. A lost
     /// answer is `Unknown`, never a retryable delivery error.
-    pub fn dispatch_turn(&self, text: &str) -> Result<TurnHandle, DeliveryError> {
+    ///
+    /// A grok member's turn goes out only on the identity the caller's
+    /// revive confirmed (*confirmation*, `GrokClientPool::revive_key`):
+    /// the pool submits on that connection, session, member and team
+    /// instance or refuses. A grok dispatch with no confirmation is
+    /// refused here — nothing binds a client for it. A codex member
+    /// takes none.
+    pub fn dispatch_turn(
+        &self,
+        text: &str,
+        confirmation: Option<&Confirmation>,
+    ) -> Result<TurnHandle, DeliveryError> {
         match self.cli.as_str() {
             "codex" | "grok" => {}
             other => {
@@ -150,7 +162,7 @@ impl Agent {
             }
         }
         if self.pane_id.is_empty() {
-            return self.dispatch_turn_headless(text);
+            return self.dispatch_turn_headless(text, confirmation);
         }
         let probe = hooked_detect_cli_process_for_pane(&self.pane_id);
         let profile_name = probe.as_ref().map(|p| p.name).unwrap_or_default();
@@ -186,16 +198,14 @@ impl Agent {
                 ))),
             };
         }
-        match hooked_grok_dispatch_to_pane(&self.pane_id, text) {
-            Ok((key, prompt_id)) => Ok(TurnHandle::Grok { key, prompt_id }),
-            Err(reason) => Err(DeliveryError(format!(
-                "grok pane {} did not accept the prompt ({reason})",
-                self.pane_id
-            ))),
-        }
+        self.dispatch_grok(text, confirmation)
     }
 
-    fn dispatch_turn_headless(&self, text: &str) -> Result<TurnHandle, DeliveryError> {
+    fn dispatch_turn_headless(
+        &self,
+        text: &str,
+        confirmation: Option<&Confirmation>,
+    ) -> Result<TurnHandle, DeliveryError> {
         if self.cli == "codex" {
             let thread_id = self.session_id.clone().unwrap_or_default();
             if thread_id.is_empty() {
@@ -214,9 +224,28 @@ impl Agent {
                 ))),
             };
         }
-        let key = crate::adapters::grok_leader::member_key(&self.team_name, &self.name);
-        match hooked_grok_dispatch_to_key(&key, text) {
-            Ok(prompt_id) => Ok(TurnHandle::Grok { key, prompt_id }),
+        self.dispatch_grok(text, confirmation)
+    }
+
+    /// The grok member's tracked prompt on the confirmed identity; the
+    /// handle's key is the confirmation's, the member's own.
+    fn dispatch_grok(
+        &self,
+        text: &str,
+        confirmation: Option<&Confirmation>,
+    ) -> Result<TurnHandle, DeliveryError> {
+        let Some(confirmation) = confirmation else {
+            return Err(DeliveryError(format!(
+                "grok member '{}' was not revived for this dispatch; \
+                 nothing is submitted without the identity a revive confirmed",
+                self.name
+            )));
+        };
+        match hooked_grok_dispatch(confirmation, text) {
+            Ok(prompt_id) => Ok(TurnHandle::Grok {
+                key: confirmation.key.clone(),
+                prompt_id,
+            }),
             Err(reason) => Err(DeliveryError(format!(
                 "grok member '{}' did not accept the prompt ({reason})",
                 self.name

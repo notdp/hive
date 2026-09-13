@@ -2316,6 +2316,54 @@ fn test_uuid4_shape() {
     assert!(matches!(sid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
 }
 
+/// A grok member's tracked turn goes out only on the identity a revive
+/// confirmed: with none, the dispatch is refused before any transport is
+/// asked; with one, the pool is asked on it and the handle rides its key
+/// — for a pane member and a headless one alike.
+#[test]
+fn test_grok_dispatch_needs_a_revive_confirmation_and_rides_its_key() {
+    use crate::adapters::grok_leader::{Confirmation, PromptId, RecordBinding};
+    let confirmation = Confirmation {
+        key: "m-team.node".to_string(),
+        binding: RecordBinding {
+            team: "team".to_string(),
+            created_at: "123".to_string(),
+            member: "node".to_string(),
+        },
+        session_id: "sid-1".to_string(),
+        generation: 3,
+    };
+    for pane in ["%1", ""] {
+        let _guard = testhook::install(Hook {
+            cli_probe: Some("grok".to_string()),
+            grok_dispatch: Some(Ok(PromptId {
+                generation: 3,
+                rid: 9,
+            })),
+            ..Hook::default()
+        });
+        let mut agent = testhook::fake_agent("node", "team", pane, "grok");
+        agent.session_id = Some("sid-1".to_string());
+        let err = agent.dispatch_turn("task", None).unwrap_err();
+        assert!(err.0.contains("not revived"), "{err}");
+        assert!(hook(|h| h.grok_sent_key.clone()).is_empty());
+        assert_eq!(
+            agent.dispatch_turn("task", Some(&confirmation)),
+            Ok(TurnHandle::Grok {
+                key: "m-team.node".to_string(),
+                prompt_id: PromptId {
+                    generation: 3,
+                    rid: 9,
+                },
+            })
+        );
+        assert_eq!(
+            hook(|h| h.grok_sent_key.clone()),
+            vec![("m-team.node".to_string(), "task".to_string())]
+        );
+    }
+}
+
 #[test]
 fn test_codex_dispatch_preserves_unknown_for_pane_and_headless_members() {
     use crate::adapters::codex_app_server::TurnStartFailure;
@@ -2329,7 +2377,7 @@ fn test_codex_dispatch_preserves_unknown_for_pane_and_headless_members() {
         let mut agent = testhook::fake_agent("node", "team", pane, "codex");
         agent.session_id = Some("thread".to_string());
         assert_eq!(
-            agent.dispatch_turn("task"),
+            agent.dispatch_turn("task", None),
             Ok(TurnHandle::Unknown("answer lost".to_string()))
         );
     }

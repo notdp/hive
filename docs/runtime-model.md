@@ -1363,10 +1363,21 @@ orphan reap are the explicit ends, unchanged.
 What the exit leaves is the session record — `{sessionId, cwd, team,
 createdAt, member}`, the binding written at the mint (`session/new`, the
 resume and fork lanes) or when a create/join binds a launch
-(`bind_launch`, which binds the record before it publishes the alias and
-puts the previous binding back when the alias is refused; a rollback
-clears only its own). The member is `retained` while that binding holds
-(the field above). A record from before the binding existed carries no
+(`bind_launch`). A bind binds the record before it publishes the alias,
+and every write to a launch's record and to the aliases naming it — the
+bind's record write and alias publish, its restore of the binding it
+read when the alias is refused, a rollback, a kill's alias removal — runs
+under that launch's lock (`launch_lock`, `<launch>.bind-lock`): a bind
+refused after another bind of the same launch succeeded puts back what
+it read under the lock, never the unbound record it would have read
+before, so the succeeded bind's record and alias survive. A rollback
+carries the identity of its own bind — the launch, its session, and the
+team instance (`createdAt`) with the member — and undoes the alias and
+the record's binding only while nothing later owns them: a record since
+bound to the same member name of another team instance, or the launch
+re-minted onto another session and bound to that name again, is a later
+bind of the same name, and the earlier bind's rollback undoes nothing.
+The member is `retained` while that binding holds (the field above). A record from before the binding existed carries no
 `team`/`createdAt`/`member` and is never retained: such a member is
 killed and spawned again, or its terminal re-runs create/join; hive does
 not guess a binding onto a same-named record.
@@ -1383,11 +1394,23 @@ sent and no bus row is written by a revive. The send gate then reads the
 state the load replayed: a session that loads mid-permission is
 `waiting_user` and the send is refused there, before any row; a load that
 fails is an explicit refusal, never a send into a session that did not
-load. From the revive to the prompt the submission rides the client the
-revive confirmed: a record that names another session by then, a client
-rebound since, or a leader gone is a failed submission — nothing loads the
-new session or raises a leader on the pool's submission path, and nothing
-is sent twice. Where the row was already written (`bus::write_send_event`
+load. The revive hands its caller a confirmation of the identity it
+revived — the team instance and member (the record's binding as the
+registry agreed to it), the session the client loaded, and the connection
+(the client generation) — and the submission carries that confirmation
+to the prompt. At the submission boundary the key's identity must still
+be the confirmed one, re-read there: the pooled client of that generation,
+alive, on that session; the record naming that session; the registry
+holding that binding (`binding_holds`) — and the binding must be the
+confirmed one, not merely a valid one: a record that names another
+session by then, a client rebound since, a leader gone, a team instance
+or roster row changed, or a later valid binding of the same key (the same
+name and session under another instance of the team) is a failed
+submission — nothing loads the new session or raises a leader on the
+pool's submission path, and nothing is sent twice. The confirmation is
+the requesting thread's own: the pool keeps no per-key record of what it
+last confirmed, so a second request's revive of the same member confirms
+for that request and can neither replace nor stand in for the first's. Where the row was already written (`bus::write_send_event`
 precedes the engine call), that row and its terminal operation stay:
 a refused transport after the row is not a row to delete.
 

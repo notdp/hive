@@ -435,7 +435,7 @@ mod tests {
             let workspace = std::env::var("HIVE_JOURNAL_TEST_WORKSPACE").unwrap();
             let mut hook = hooks(&workspace);
             let crash_at_accept = mode == "accepted";
-            hook.agent_dispatch_turn = Some(Arc::new(move |_, _| {
+            hook.agent_dispatch_turn = Some(Arc::new(move |_, _, _| {
                 if crash_at_accept {
                     std::process::exit(86);
                 }
@@ -574,7 +574,7 @@ mod tests {
         let workspace = tmp.path().to_str().unwrap();
         crate::bus::init_workspace(workspace).unwrap();
         let mut hook = hooks(workspace);
-        hook.agent_dispatch_turn = Some(Arc::new(|_, _| Ok(codex_handle())));
+        hook.agent_dispatch_turn = Some(Arc::new(|_, _, _| Ok(codex_handle())));
         hook.cas_turn_result = Some(Arc::new(|_| {
             Some(TurnResult {
                 thread_id: "thread".into(),
@@ -615,7 +615,7 @@ mod tests {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let called = Arc::clone(&calls);
         let mut hook = hooks(workspace);
-        hook.agent_dispatch_turn = Some(Arc::new(move |_, _| {
+        hook.agent_dispatch_turn = Some(Arc::new(move |_, _, _| {
             if called.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 Err(crate::agent::DeliveryError(
                     "refused before acceptance".into(),

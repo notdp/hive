@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -2339,10 +2339,10 @@ fn tracked_pool() -> TrackedPool {
 }
 
 #[test]
-fn test_pool_dispatch_to_key_returns_the_rid() {
+fn test_pool_dispatch_confirmed_returns_the_rid() {
     let (grok_pool, sent, _asked) = tracked_pool();
     assert_eq!(
-        grok_pool.dispatch_to_key("p19", "task"),
+        grok_pool.dispatch_confirmed(&override_confirmation("p19"), "task"),
         Ok(PromptId {
             generation: 1,
             rid: 7
@@ -2378,10 +2378,12 @@ fn test_pool_prompt_result_for_key_relays_the_client() {
 }
 
 #[test]
-fn test_pool_dispatch_to_key_err_without_client() {
+fn test_pool_dispatch_confirmed_err_without_client() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| None));
-    let err = grok_pool.dispatch_to_key("p19", "task").unwrap_err();
+    let err = grok_pool
+        .dispatch_confirmed(&override_confirmation("p19"), "task")
+        .unwrap_err();
     assert!(err.contains("p19"), "{err}");
     assert_eq!(
         grok_pool.prompt_result_for_key(
@@ -2404,12 +2406,12 @@ impl LeaderClient for FakeRaisingTrackedClient {
 }
 
 #[test]
-fn test_pool_dispatch_to_key_err_when_client_raises() {
+fn test_pool_dispatch_confirmed_err_when_client_raises() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() =
         Some(Box::new(|_key| Some(Arc::new(FakeRaisingTrackedClient))));
     assert_eq!(
-        grok_pool.dispatch_to_key("p19", "task"),
+        grok_pool.dispatch_confirmed(&override_confirmation("p19"), "task"),
         Err("broken pipe".to_string())
     );
 }
@@ -3099,7 +3101,9 @@ fn test_pool_old_prompt_id_cannot_read_replacement_clients_result() {
     let (first, first_proc) = loaded(None, vec![]);
     let handout = first.clone();
     *pool.client_override.lock().unwrap() = Some(Box::new(move |_key| Some(handout.clone())));
-    let old_id = pool.dispatch_to_key("p19", "old task").unwrap();
+    let old_id = pool
+        .dispatch_confirmed(&override_confirmation("p19"), "old task")
+        .unwrap();
     first_proc.feed(&agent_chunk(Some("old-prompt"), "OLD RESULT"));
     first_proc.feed(&prompt_response(old_id.rid, "old-prompt", "end_turn"));
     assert_eq!(
@@ -3115,7 +3119,9 @@ fn test_pool_old_prompt_id_cannot_read_replacement_clients_result() {
     let (replacement, replacement_proc) = loaded(None, vec![]);
     let handout = replacement.clone();
     *pool.client_override.lock().unwrap() = Some(Box::new(move |_key| Some(handout.clone())));
-    let new_id = pool.dispatch_to_key("p19", "new task").unwrap();
+    let new_id = pool
+        .dispatch_confirmed(&override_confirmation("p19"), "new task")
+        .unwrap();
     assert_eq!(
         old_id.rid, new_id.rid,
         "client counters restart at handshake"
@@ -3235,8 +3241,12 @@ fn test_bind_launch_writes_the_alias_once_and_refuses_a_second_engine() {
             binding: Some(binding("honey", "1", "orch")),
         })
     );
-    assert!(launch_is_bound("l-ab12", "sid-1", "honey", "orch", "%3"));
-    assert!(!launch_is_bound("l-ab12", "sid-2", "honey", "orch", "%3"));
+    assert!(launch_is_bound(
+        "l-ab12", "sid-1", "honey", "1", "orch", "%3"
+    ));
+    assert!(!launch_is_bound(
+        "l-ab12", "sid-2", "honey", "1", "orch", "%3"
+    ));
     assert_eq!(bound_member("l-ab12").as_deref(), Some("m-honey.orch"));
     assert_eq!(bound_member("l-zz99"), None);
     // idempotent from either side
@@ -3310,14 +3320,18 @@ fn test_rollback_launch_removes_only_its_own_alias_and_binding_and_keeps_the_lea
     let hive_dir = bed.tmp.path().join("hive");
     let _listener = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
     bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "orch", "%3").unwrap();
-    rollback_launch("l-cd34", "sid-9", "honey", "orch", "%3").unwrap();
-    assert!(launch_is_bound("l-ab12", "sid-1", "honey", "orch", "%3"));
+    rollback_launch("l-cd34", "sid-9", "honey", "1", "orch", "%3").unwrap();
+    assert!(launch_is_bound(
+        "l-ab12", "sid-1", "honey", "1", "orch", "%3"
+    ));
     assert_eq!(
         read_session_key("l-ab12").unwrap().binding,
         Some(binding("honey", "1", "orch"))
     );
-    rollback_launch("l-ab12", "sid-1", "honey", "orch", "%3").unwrap();
-    assert!(!launch_is_bound("l-ab12", "sid-1", "honey", "orch", "%3"));
+    rollback_launch("l-ab12", "sid-1", "honey", "1", "orch", "%3").unwrap();
+    assert!(!launch_is_bound(
+        "l-ab12", "sid-1", "honey", "1", "orch", "%3"
+    ));
     assert!(!hive_dir.join("m-honey.orch.alias").exists());
     // the leader's socket and record are the launcher's, untouched — the
     // record unbound again, its session kept
@@ -3330,19 +3344,151 @@ fn test_rollback_launch_removes_only_its_own_alias_and_binding_and_keeps_the_lea
             binding: None,
         })
     );
-    rollback_launch("l-ab12", "sid-1", "honey", "orch", "%3").unwrap();
+    rollback_launch("l-ab12", "sid-1", "honey", "1", "orch", "%3").unwrap();
 
     // a launch since bound to another member keeps that binding when the
     // first member's bind is rolled back
     bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "orch", "%3").unwrap();
     bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "rex", "%4").unwrap();
-    rollback_launch("l-ab12", "sid-1", "honey", "orch", "%3").unwrap();
+    rollback_launch("l-ab12", "sid-1", "honey", "1", "orch", "%3").unwrap();
     assert!(!hive_dir.join("m-honey.orch.alias").exists());
-    assert!(launch_is_bound("l-ab12", "sid-1", "honey", "rex", "%4"));
+    assert!(launch_is_bound(
+        "l-ab12", "sid-1", "honey", "1", "rex", "%4"
+    ));
     assert_eq!(
         read_session_key("l-ab12").unwrap().binding,
         Some(binding("honey", "1", "rex"))
     );
+}
+
+/// A launch bound to a member name, then bound to the same name again
+/// under another instance of the team (recreated, the launch still on
+/// its session) or after the launch was re-minted onto another session:
+/// the alias and the record's binding are the later bind's, and the
+/// earlier bind's rollback — the same name, not the same identity —
+/// undoes nothing. The later bind's own rollback undoes it.
+#[test]
+fn test_rollback_launch_keeps_a_same_name_bind_of_another_instance_or_session() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _listener = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "orch", "%3").unwrap();
+    bind_launch("l-ab12", "sid-1", "/w", "honey", "2", "orch", "%4").unwrap();
+    assert_eq!(
+        read_session_key("l-ab12").unwrap().binding,
+        Some(binding("honey", "2", "orch"))
+    );
+    assert!(launch_is_bound(
+        "l-ab12", "sid-1", "honey", "2", "orch", "%4"
+    ));
+    assert!(!launch_is_bound(
+        "l-ab12", "sid-1", "honey", "1", "orch", "%3"
+    ));
+    rollback_launch("l-ab12", "sid-1", "honey", "1", "orch", "%3").unwrap();
+    assert_eq!(alias_target("m-honey.orch").as_deref(), Some("l-ab12"));
+    assert_eq!(
+        read_session_key("l-ab12").unwrap().binding,
+        Some(binding("honey", "2", "orch")),
+        "the earlier instance's rollback cleared the later bind"
+    );
+    // the launch re-minted onto another session, bound to the name again
+    write_session_key(
+        "l-ab12",
+        "sid-2",
+        "/w",
+        Some(&binding("honey", "2", "orch")),
+    )
+    .unwrap();
+    rollback_launch("l-ab12", "sid-1", "honey", "2", "orch", "%4").unwrap();
+    assert_eq!(alias_target("m-honey.orch").as_deref(), Some("l-ab12"));
+    assert_eq!(
+        read_session_key("l-ab12").unwrap().binding,
+        Some(binding("honey", "2", "orch"))
+    );
+    // its own rollback undoes it
+    rollback_launch("l-ab12", "sid-2", "honey", "2", "orch", "%4").unwrap();
+    assert!(alias_target("m-honey.orch").is_none());
+    assert_eq!(read_session_key("l-ab12").unwrap().binding, None);
+}
+
+/// Two binds of one launch to two members, started together on their
+/// own threads: one is refused (its member is another launch's), the
+/// other succeeds. Whichever the launch lock admits first, the refused
+/// bind restores the binding it read under the lock — so the succeeded
+/// bind's record and alias survive, never the unbound record the refused
+/// bind would have read before the lock.
+#[test]
+fn test_bind_launch_refused_beside_another_members_bind_keeps_that_bind() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _leader = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    let _other = bind_leader_socket(&hive_dir.join("l-cd34.sock"));
+    for round in 0..8 {
+        write_session_key("l-ab12", "sid-1", "/w", None).unwrap();
+        bind_launch("l-cd34", "sid-9", "/w", "honey", "1", "orch", "%5").unwrap();
+        let start = Arc::new(Barrier::new(2));
+        let succeeding = thread::spawn({
+            let start = Arc::clone(&start);
+            move || {
+                start.wait();
+                bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "rex", "%4")
+            }
+        });
+        start.wait();
+        let refused = bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "orch", "%3");
+        succeeding.join().unwrap().unwrap();
+        let err = refused.unwrap_err();
+        assert!(err.to_string().contains("already bound"), "{err}");
+        assert_eq!(
+            read_session_key("l-ab12").unwrap().binding,
+            Some(binding("honey", "1", "rex")),
+            "round {round}: the refused bind's restore overwrote the succeeded one"
+        );
+        assert_eq!(alias_target("m-honey.rex").as_deref(), Some("l-ab12"));
+        assert_eq!(alias_target("m-honey.orch").as_deref(), Some("l-cd34"));
+        rollback_launch("l-ab12", "sid-1", "honey", "1", "rex", "%4").unwrap();
+        rollback_launch("l-cd34", "sid-9", "honey", "1", "orch", "%5").unwrap();
+        assert_eq!(read_session_key("l-ab12").unwrap().binding, None);
+        assert!(alias_target("m-honey.rex").is_none());
+        assert!(alias_target("m-honey.orch").is_none());
+    }
+}
+
+/// The launch lock is the boundary: a bind writes nothing to the record
+/// and publishes nothing before it holds the lock, and a rollback removes
+/// nothing before it does.
+#[test]
+fn test_bind_and_rollback_write_nothing_before_they_hold_the_launch_lock() {
+    let bed = setup();
+    let hive_dir = bed.tmp.path().join("hive");
+    let _leader = bind_leader_socket(&hive_dir.join("l-ab12.sock"));
+    write_session_key("l-ab12", "sid-1", "/w", None).unwrap();
+    let held = launch_lock("l-ab12").unwrap();
+    let bind = thread::spawn(|| bind_launch("l-ab12", "sid-1", "/w", "honey", "1", "orch", "%3"));
+    thread::sleep(Duration::from_millis(200));
+    assert!(!bind.is_finished(), "the bind did not wait for the lock");
+    assert_eq!(read_session_key("l-ab12").unwrap().binding, None);
+    assert!(alias_target("m-honey.orch").is_none());
+    drop(held);
+    bind.join().unwrap().unwrap();
+    assert!(launch_is_bound(
+        "l-ab12", "sid-1", "honey", "1", "orch", "%3"
+    ));
+
+    let held = launch_lock("l-ab12").unwrap();
+    let rollback = thread::spawn(|| rollback_launch("l-ab12", "sid-1", "honey", "1", "orch", "%3"));
+    thread::sleep(Duration::from_millis(200));
+    assert!(
+        !rollback.is_finished(),
+        "the rollback did not wait for the lock"
+    );
+    assert!(launch_is_bound(
+        "l-ab12", "sid-1", "honey", "1", "orch", "%3"
+    ));
+    drop(held);
+    rollback.join().unwrap().unwrap();
+    assert!(alias_target("m-honey.orch").is_none());
+    assert_eq!(read_session_key("l-ab12").unwrap().binding, None);
 }
 
 #[test]
@@ -3363,9 +3509,9 @@ fn test_stop_launch_steps_back_once_a_member_owns_the_leader() {
     assert!(!hive_dir.join("l-ab12.sock").exists());
     assert!(!hive_dir.join("l-ab12.session").exists());
     assert!(!hive_dir.join("m-honey.orch.alias").exists());
-    // the lock file stays: flock is by inode, a later join must lock the
-    // same one
-    assert!(hive_dir.join("m-honey.orch.alias-lock").exists());
+    // the launch's lock file stays: flock is by inode, a bind or rollback
+    // racing this kill must lock the same one
+    assert!(hive_dir.join("l-ab12.bind-lock").exists());
     drop(listener);
     // unbound: the launcher's stop removes the key's files
     let _listener = bind_leader_socket(&hive_dir.join("l-cd34.sock"));
@@ -3604,6 +3750,18 @@ fn revivable_engine() -> (Arc<Mutex<usize>>, Arc<FakeProc>) {
     (spawns, proc)
 }
 
+/// A confirmation on *key* for a submission a test override answers: the
+/// override stands in for the client and every identity check with it,
+/// so the fields are nominal.
+fn override_confirmation(key: &str) -> Confirmation {
+    Confirmation {
+        key: key.to_string(),
+        binding: binding("cedar", "123", "worker"),
+        session_id: SID.to_string(),
+        generation: 0,
+    }
+}
+
 fn methods(proc: &FakeProc) -> Vec<String> {
     proc.sent()
         .iter()
@@ -3792,7 +3950,16 @@ fn test_submission_does_not_raise_a_leader_for_a_retained_member() {
     let (spawns, proc) = revivable_engine();
     let pool = GrokClientPool::new();
     assert_eq!(pool.send_to_key(key, "hello"), None);
-    let err = pool.dispatch_to_key(key, "task").unwrap_err();
+    // a confirmation this pool never made — another process's revive —
+    // holds no client here and raises none
+    let foreign = Confirmation {
+        key: key.to_string(),
+        binding: binding("cedar", "123", "worker"),
+        session_id: SID.to_string(),
+        generation: 1,
+    };
+    assert_eq!(pool.send_confirmed(&foreign, "hello"), None);
+    let err = pool.dispatch_confirmed(&foreign, "task").unwrap_err();
     assert!(err.contains(key), "{err}");
     assert_eq!(*spawns.lock().unwrap(), 0);
     assert!(proc.sent().is_empty());
@@ -3814,6 +3981,12 @@ fn test_revive_raises_the_leader_loads_the_session_and_sends_nothing() {
     let revival = pool.revive_key(key).unwrap();
     assert!(revival.raised);
     assert_eq!(revival.turn_open, None); // an empty replay: no turn evidence
+    assert_eq!(revival.confirmation.key, key);
+    assert_eq!(
+        revival.confirmation.binding,
+        binding("cedar", "123", "worker")
+    );
+    assert_eq!(revival.confirmation.session_id, SID);
     assert_eq!(*spawns.lock().unwrap(), 1);
     assert!(!pool.state.lock().unwrap().cooldown.contains_key(key));
     // initialize + session/load of the recorded session; no session/new,
@@ -3828,15 +4001,20 @@ fn test_revive_raises_the_leader_loads_the_session_and_sends_nothing() {
     assert!(!retained(key));
 
     // a second revive is a no-op on an online member: nothing raised,
-    // nothing reloaded, the same client
+    // nothing reloaded, the same client, the same identity confirmed
     let again = pool.revive_key(key).unwrap();
     assert!(!again.raised);
+    assert_eq!(again.confirmation, revival.confirmation);
+    assert_eq!(again.confirmation.generation, client.generation());
     assert_eq!(*spawns.lock().unwrap(), 1);
     assert_eq!(methods(&proc), vec!["initialize", "session/load"]);
     assert!(Arc::ptr_eq(&client, &pool.client_for_key(key).unwrap()));
 
     // and the submission after it goes out on that client
-    assert_eq!(pool.send_to_key(key, "hello"), Some(PROMPT_QUEUED));
+    assert_eq!(
+        pool.send_confirmed(&revival.confirmation, "hello"),
+        Some(PROMPT_QUEUED)
+    );
     assert_eq!(
         methods(&proc),
         vec!["initialize", "session/load", "session/prompt"]
@@ -3899,13 +4077,16 @@ fn test_submission_after_revive_fails_when_the_leader_is_gone_and_raises_no_othe
     retained_member(&mut bed, key);
     let (spawns, proc) = revivable_engine();
     let pool = GrokClientPool::new();
-    assert!(pool.revive_key(key).unwrap().raised);
+    let revival = pool.revive_key(key).unwrap();
+    assert!(revival.raised);
     // the leader exits between the revive and the prompt (a kill: the
     // pool's client goes with it, then the socket)
     pool.drop_key(key);
     fs::remove_file(socket_path_for_key(key)).unwrap();
-    assert_eq!(pool.send_to_key(key, "hello"), None);
-    assert!(pool.dispatch_to_key(key, "task").is_err());
+    assert_eq!(pool.send_confirmed(&revival.confirmation, "hello"), None);
+    assert!(pool
+        .dispatch_confirmed(&revival.confirmation, "task")
+        .is_err());
     assert_eq!(*spawns.lock().unwrap(), 1, "no second leader");
     assert_eq!(methods(&proc), vec!["initialize", "session/load"]);
     assert!(proc.terminated());
@@ -3925,14 +4106,17 @@ fn test_submission_after_revive_fails_when_the_record_is_swapped_and_rebinds_not
         Ok(handed.clone() as Arc<dyn LeaderProc>)
     });
     let pool = GrokClientPool::new();
-    assert!(pool.revive_key(key).unwrap().raised);
+    let revival = pool.revive_key(key).unwrap();
+    assert!(revival.raised);
     assert_eq!(*stdio_spawns.lock().unwrap(), 1);
     // the record now names another session (a respawn under the same
     // name landed between the gate and the prompt)
     let other = "22222222-2222-3333-4444-555555555555";
     write_session_key(key, other, CWD, Some(&binding("cedar", "123", "worker"))).unwrap();
-    assert_eq!(pool.send_to_key(key, "hello"), None);
-    assert!(pool.dispatch_to_key(key, "task").is_err());
+    assert_eq!(pool.send_confirmed(&revival.confirmation, "hello"), None);
+    assert!(pool
+        .dispatch_confirmed(&revival.confirmation, "task")
+        .is_err());
     // no client on the new session, no prompt on the old, no second leader
     assert_eq!(*stdio_spawns.lock().unwrap(), 1);
     assert_eq!(*spawns.lock().unwrap(), 1);
@@ -3971,8 +4155,10 @@ fn test_submission_after_revive_fails_on_a_client_rebound_since() {
     retained_member(&mut bed, key);
     let (spawns, proc) = revivable_engine();
     let pool = GrokClientPool::new();
-    assert!(pool.revive_key(key).unwrap().raised);
+    let revival = pool.revive_key(key).unwrap();
+    assert!(revival.raised);
     let confirmed = pool.client_for_key(key).unwrap();
+    assert_eq!(revival.confirmation.generation, confirmed.generation());
     // the connection drops and a runtime read reconnects on the same session
     proc.eof();
     let handle = confirmed.reader.lock().unwrap().take();
@@ -3985,16 +4171,185 @@ fn test_submission_after_revive_fails_on_a_client_rebound_since() {
     set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
     let rebound = pool.client_for_key(key).unwrap();
     assert_ne!(rebound.generation(), confirmed.generation());
-    assert_eq!(pool.send_to_key(key, "hello"), None);
-    assert!(pool.dispatch_to_key(key, "task").is_err());
+    assert_eq!(pool.send_confirmed(&revival.confirmation, "hello"), None);
+    assert!(pool
+        .dispatch_confirmed(&revival.confirmation, "task")
+        .is_err());
     assert_eq!(methods(&replacement), vec!["initialize", "session/load"]);
     assert_eq!(*spawns.lock().unwrap(), 1);
     // the rebound client is the runtime's, left alone; a revive confirms
-    // it and the next submission goes out
+    // it — another confirmation, this connection's — and the submission
+    // on that one goes out
     assert!(rebound.is_alive());
-    assert!(!pool.revive_key(key).unwrap().raised);
-    assert_eq!(pool.send_to_key(key, "hello"), Some(PROMPT_QUEUED));
+    let again = pool.revive_key(key).unwrap();
+    assert!(!again.raised);
+    assert_eq!(again.confirmation.generation, rebound.generation());
+    assert_ne!(again.confirmation, revival.confirmation);
+    assert_eq!(
+        pool.send_confirmed(&again.confirmation, "hello"),
+        Some(PROMPT_QUEUED)
+    );
     teardown(&rebound, &replacement);
+}
+
+/// The prompts a fake leader was sent, in order.
+fn prompts(proc: &FakeProc) -> Vec<String> {
+    proc.sent()
+        .iter()
+        .filter(|msg| msg.get("method").and_then(Value::as_str) == Some("session/prompt"))
+        .map(|msg| {
+            msg["params"]["prompt"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+/// The registry's instance of the team changes after the revive (a
+/// same-named team recreated), the record untouched: the identity the
+/// revive confirmed is no longer the key's, and the submission on it is
+/// refused before any prompt.
+#[test]
+fn test_submission_after_revive_refuses_a_registry_instance_changed_since() {
+    let mut bed = setup();
+    let key = "m-cedar.worker";
+    retained_member(&mut bed, key);
+    let (spawns, proc) = revivable_engine();
+    let pool = GrokClientPool::new();
+    let revival = pool.revive_key(key).unwrap();
+    let client = pool.client_for_key(key).unwrap();
+    record_cedar("456", Some(SID));
+    assert!(binding_holds(key).is_err());
+    let result = pool.send_confirmed(&revival.confirmation, "stale-instance");
+    let sent = methods(&proc);
+    teardown(&client, &proc);
+    assert_eq!(
+        result, None,
+        "old instance reached native transport: {sent:?}"
+    );
+    assert_eq!(sent, vec!["initialize", "session/load"]);
+    assert_eq!(*spawns.lock().unwrap(), 1);
+}
+
+/// The member's roster row is gone after the revive (a kill landed):
+/// the tracked dispatch on the confirmation is refused, nothing sent.
+#[test]
+fn test_submission_after_revive_refuses_a_roster_row_gone_since() {
+    let mut bed = setup();
+    let key = "m-cedar.worker";
+    retained_member(&mut bed, key);
+    let (spawns, proc) = revivable_engine();
+    let pool = GrokClientPool::new();
+    let revival = pool.revive_key(key).unwrap();
+    let client = pool.client_for_key(key).unwrap();
+    record_cedar("123", None);
+    assert!(binding_holds(key).is_err());
+    let result = pool.dispatch_confirmed(&revival.confirmation, "removed-member");
+    let sent = methods(&proc);
+    teardown(&client, &proc);
+    assert!(
+        result.is_err(),
+        "removed member reached native transport: {result:?} {sent:?}"
+    );
+    assert_eq!(sent, vec!["initialize", "session/load"]);
+    assert_eq!(*spawns.lock().unwrap(), 1);
+}
+
+/// The key is validly bound again after the revive — the same name and
+/// session under another instance of the team, registry and record
+/// agreeing — so the current binding holds, but it is another identity
+/// than the one this revive confirmed: the earlier confirmation is
+/// refused, the client (the record's still) stays for the next revive,
+/// and that revive confirms the new identity, on which a submission
+/// goes out.
+#[test]
+fn test_submission_after_revive_refuses_a_later_valid_binding_on_the_same_session() {
+    let mut bed = setup();
+    let key = "m-cedar.worker";
+    retained_member(&mut bed, key);
+    let (spawns, proc) = revivable_engine();
+    let pool = GrokClientPool::new();
+    let revival = pool.revive_key(key).unwrap();
+    let client = pool.client_for_key(key).unwrap();
+    record_cedar("456", Some(SID));
+    bind_session_key(key, Some(&binding("cedar", "456", "worker"))).unwrap();
+    assert!(binding_holds(key).is_ok());
+    assert_eq!(
+        pool.send_confirmed(&revival.confirmation, "replaced-binding"),
+        None
+    );
+    assert!(pool
+        .dispatch_confirmed(&revival.confirmation, "replaced-binding")
+        .is_err());
+    assert_eq!(methods(&proc), vec!["initialize", "session/load"]);
+    assert!(client.is_alive(), "the client is the record's, left alone");
+    assert!(Arc::ptr_eq(&client, &pool.client_for_key(key).unwrap()));
+
+    let again = pool.revive_key(key).unwrap();
+    assert!(!again.raised);
+    assert_eq!(
+        again.confirmation.binding,
+        binding("cedar", "456", "worker")
+    );
+    assert_eq!(
+        again.confirmation.generation,
+        revival.confirmation.generation
+    );
+    assert_ne!(again.confirmation, revival.confirmation);
+    assert_eq!(
+        pool.send_confirmed(&again.confirmation, "new-identity"),
+        Some(PROMPT_QUEUED)
+    );
+    assert_eq!(prompts(&proc), vec!["new-identity"]);
+    assert_eq!(*spawns.lock().unwrap(), 1);
+    teardown(&client, &proc);
+}
+
+/// Two requests on one key, each with its own revive, as the hived serves
+/// them (one thread per request): A revives; the member is rebound — the
+/// same name and session under another instance of the team — and B
+/// revives that, on the same connection. A's submission on what A
+/// confirmed is refused; B's on what B confirmed goes out. What B
+/// confirmed never stood in for A: no shared state a second revive could
+/// overwrite from under the first.
+#[test]
+fn test_two_requests_revive_apart_and_the_earlier_confirmation_is_refused() {
+    let mut bed = setup();
+    let key = "m-cedar.worker";
+    retained_member(&mut bed, key);
+    let (spawns, proc) = revivable_engine();
+    let pool = Arc::new(GrokClientPool::new());
+    let a = pool.revive_key(key).unwrap();
+    assert!(a.raised);
+    record_cedar("456", Some(SID));
+    bind_session_key(key, Some(&binding("cedar", "456", "worker"))).unwrap();
+    let barrier = Arc::new(Barrier::new(2));
+    let request_b = thread::spawn({
+        let pool = Arc::clone(&pool);
+        let barrier = Arc::clone(&barrier);
+        move || {
+            let b = pool.revive_key(key).unwrap();
+            barrier.wait(); // B has revived; A submits on A's confirmation
+            barrier.wait(); // A was refused; B submits on B's
+            let sent = pool.send_confirmed(&b.confirmation, "from-b");
+            (b, sent)
+        }
+    });
+    barrier.wait();
+    assert_eq!(pool.send_confirmed(&a.confirmation, "from-a"), None);
+    assert!(pool.dispatch_confirmed(&a.confirmation, "from-a").is_err());
+    assert_eq!(methods(&proc), vec!["initialize", "session/load"]);
+    barrier.wait();
+    let (b, sent) = request_b.join().unwrap();
+    assert!(!b.raised);
+    assert_eq!(b.confirmation.binding, binding("cedar", "456", "worker"));
+    assert_eq!(b.confirmation.generation, a.confirmation.generation);
+    assert_eq!(sent, Some(PROMPT_QUEUED));
+    assert_eq!(prompts(&proc), vec!["from-b"]);
+    assert_eq!(*spawns.lock().unwrap(), 1);
+    let client = pool.client_for_key(key).unwrap();
+    teardown(&client, &proc);
 }
 
 #[test]

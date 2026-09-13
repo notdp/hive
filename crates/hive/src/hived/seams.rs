@@ -18,7 +18,7 @@ use crate::adapters::codex_app_server::TurnResult;
 use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::PromptResult;
 use crate::adapters::grok_leader::SessionRecord;
-use crate::adapters::grok_leader::{Revival, ReviveFailure};
+use crate::adapters::grok_leader::{Confirmation, Revival, ReviveFailure};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
 
@@ -816,12 +816,13 @@ pub(super) fn hooked_agent_send(
 pub(super) fn hooked_agent_dispatch_turn(
     agent: &Agent,
     text: &str,
+    confirmation: Option<&Confirmation>,
 ) -> std::result::Result<TurnHandle, DeliveryError> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.agent_dispatch_turn.clone()).flatten() {
-        return f(agent, text);
+        return f(agent, text, confirmation);
     }
-    agent.dispatch_turn(text)
+    agent.dispatch_turn(text, confirmation)
 }
 
 // --- self seams (this module's own entry points, replaceable in tests) ----

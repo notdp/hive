@@ -3012,9 +3012,19 @@ mod tests {
                     raised: true,
                     input_state: "ready".to_string(),
                     turn_open: Some(false),
+                    confirmation: crate::adapters::grok_leader::Confirmation {
+                        key: key.to_string(),
+                        binding: crate::adapters::grok_leader::RecordBinding {
+                            team: team.to_string(),
+                            created_at: "123".to_string(),
+                            member: "g".to_string(),
+                        },
+                        session_id: "sid-g".to_string(),
+                        generation: 1,
+                    },
                 })
             })),
-            agent_dispatch_turn: Some(Arc::new(move |_agent, text| {
+            agent_dispatch_turn: Some(Arc::new(move |_agent, text, _confirmation| {
                 handed_sink.lock().unwrap().push(text.to_string());
                 Ok(TurnHandle::Codex {
                     thread_id: "thr-1".to_string(),
@@ -3146,7 +3156,7 @@ mod tests {
         let uncertain_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls = uncertain_calls.clone();
         crate::hived::testhook::update(|h| {
-            h.agent_dispatch_turn = Some(Arc::new(move |_agent, _text| {
+            h.agent_dispatch_turn = Some(Arc::new(move |_agent, _text, _confirmation| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(TurnHandle::Unknown("turn/start timed out".to_string()))
             }));
