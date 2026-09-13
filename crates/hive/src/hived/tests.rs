@@ -6455,6 +6455,9 @@ fn loop_probe_env(status: &'static str) -> LoopProbeEnv {
     let mut env = EnvGuard::cleared(&[HIVED_REEXEC_LOCK_ENV]);
     let tmp = tempfile::tempdir().unwrap();
     env.set("HIVE_HOME", tmp.path().join(".hive"));
+    // The sleep path asks the real Grok pool which keys it holds, and the
+    // pool reads and writes session records under this root.
+    env.set("GROK_HOME", tmp.path().join(".grok"));
     let workspace = tmp.path().to_string_lossy().to_string();
     let probes = Arc::new(Mutex::new(0usize));
     let bindings = Arc::new(Mutex::new(0usize));
@@ -7171,7 +7174,6 @@ fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
     let observed = Arc::clone(&backfills);
     let swept = Arc::new(Mutex::new(Vec::new()));
     let dropped = Arc::clone(&swept);
-    let killed = Arc::clone(&swept);
     testhook::update(|h| {
         h.monotonic = Some(Arc::new(move || {
             *clock.lock().unwrap() as f64 * HIVED_SLEEP_AFTER_SECONDS
@@ -7193,9 +7195,6 @@ fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
         h.gl_pool_drop_key = Some(Arc::new(move |key| {
             dropped.lock().unwrap().push(format!("drop {key}"))
         }));
-        h.gl_park_daemon_key = Some(Arc::new(move |key| {
-            killed.lock().unwrap().push(format!("park {key}"))
-        }));
     });
     hived_loop(&env.workspace, "probe", "probe:1", "@1");
     assert_eq!(*env.serves.lock().unwrap(), 2);
@@ -7209,10 +7208,90 @@ fn test_hived_sleeps_without_display_or_obligations_and_preserves_registry() {
     assert!(crate::registry::load("probe").is_some());
     assert!(!hooked_run_dir(&env.workspace).join("operations").exists());
     assert_eq!(*backfills.lock().unwrap(), 3);
+    assert_eq!(*swept.lock().unwrap(), ["drop m-probe.worker"]);
+}
+
+/// Sleep gives up this desk's own clients and nothing else. The leader on
+/// a member's socket is grok's own process and the TUI in its pane is one
+/// of that leader's clients: a reap here would take a human's session down
+/// with the desk. The cost is a leader that outlives the hived, which the
+/// next send finds already up.
+#[test]
+fn test_sleep_drops_owned_clients_without_parking_leaders() {
+    use crate::adapters::grok_leader as gl;
+    let env = sleep_probe_env();
+    // The real pool answers which keys are idle and takes the drops.
+    testhook::update(|h| h.gl_idle_owned_keys = None);
+    let alpha = "m-probe.alpha";
+    let beta = "m-probe.beta";
+    let foreign = "m-other.worker";
+    let mut table = Vec::new();
+    for (key, pid) in [(alpha, 4100), (beta, 4200), (foreign, 4300)] {
+        let (leader, tui) = gl::tests::socket_process_args(key);
+        table.push((pid, leader));
+        table.push((pid + 1, tui));
+    }
+    let signalled = gl::tests::watch_process_signals(table);
+    let alpha_proc = gl::tests::pool_idle_fake_client(alpha);
+    let beta_proc = gl::tests::pool_idle_fake_client(beta);
+    let foreign_proc = gl::tests::pool_idle_fake_client(foreign);
+    for (key, pid) in [(alpha, 4100), (beta, 4200), (foreign, 4300)] {
+        let sock = gl::socket_path_for_key(key);
+        fs::write(&sock, "").unwrap();
+        fs::write(sock.with_extension("pid"), pid.to_string()).unwrap();
+    }
     assert_eq!(
-        *swept.lock().unwrap(),
-        ["drop m-probe.worker", "park m-probe.worker"]
+        gl::pool().idle_owned_keys("probe").map(|mut keys| {
+            keys.sort();
+            keys
+        }),
+        Some(vec![alpha.to_string(), beta.to_string()])
     );
+
+    let server = sleep_server();
+    let mut state = SleepState::default();
+    // A member mid-turn is not idle: no sleep, however long the desk sits.
+    gl::tests::feed_turn_open(&alpha_proc, alpha, true);
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 0.0));
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 601.0));
+    // A key whose alias rebound it elsewhere is evidence nobody can read.
+    gl::tests::feed_turn_open(&alpha_proc, alpha, false);
+    fs::write(gl::alias_path_for_key(beta), "l-rebound").unwrap();
+    assert_eq!(gl::pool().idle_owned_keys("probe"), None);
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1202.0));
+    fs::remove_file(gl::alias_path_for_key(beta)).unwrap();
+    assert!(!alpha_proc.terminated() && !beta_proc.terminated());
+
+    assert!(!state.tick(&env.workspace, "probe", "@1", None, &server, 1800.0));
+    assert!(state.tick(&env.workspace, "probe", "@1", None, &server, 2401.0));
+
+    assert_eq!(display_events(&env, "hived.sleep").len(), 1);
+    assert!(
+        alpha_proc.terminated() && beta_proc.terminated(),
+        "both owned clients are closed"
+    );
+    assert!(
+        !foreign_proc.terminated(),
+        "another team's client is not this desk's to drop"
+    );
+    assert_eq!(
+        gl::pool().idle_owned_keys("other"),
+        Some(vec![foreign.to_string()])
+    );
+    assert!(
+        signalled.lock().unwrap().is_empty(),
+        "no leader or TUI was signalled: {:?}",
+        signalled.lock().unwrap()
+    );
+    for key in [alpha, beta] {
+        let sock = gl::socket_path_for_key(key);
+        assert!(sock.exists(), "{key} keeps its leader socket");
+        assert!(sock.with_extension("pid").exists());
+        assert!(
+            gl::read_session_key(key).is_some(),
+            "{key} keeps its session"
+        );
+    }
 }
 
 #[test]
