@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::codex_app_server::TurnStartFailure;
-use crate::adapters::grok_leader::PromptId;
+use crate::adapters::grok_leader::{PromptId, RecordBinding};
 use crate::agent::Agent;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -89,10 +89,11 @@ pub struct Hook {
 
     /// (team, member) leaders raised by identity (resume/fork lanes).
     pub grok_leaders: Vec<(String, String)>,
-    /// (team, member, session id, cwd) engine mints — the fresh lane.
-    pub grok_minted: Vec<(String, String, String, String)>,
-    /// (daemon key, session id, cwd) records hive wrote itself.
-    pub grok_sessions: Vec<(String, String, String)>,
+    /// (team, team instance, member, session id, cwd) engine mints — the
+    /// fresh lane.
+    pub grok_minted: Vec<(String, String, String, String, String)>,
+    /// (daemon key, session id, cwd, binding) records hive wrote itself.
+    pub grok_sessions: Vec<(String, String, String, RecordBinding)>,
     pub grok_sent: Vec<(String, String)>,
     pub grok_sent_key: Vec<(String, String)>,
     pub grok_interrupted_panes: Vec<String>,
@@ -156,11 +157,12 @@ pub struct Hook {
     pub grok_create_member_session: bool,
     pub grok_send_to_pane: Option<&'static str>,
     pub grok_send_to_key: Option<&'static str>,
-    /// `Ok(PromptId)` or the error `dispatch_to_pane` / `dispatch_to_key` answer.
+    /// `Ok(PromptId)` or the error `dispatch_confirmed` answers.
     pub grok_dispatch: Option<Result<PromptId, String>>,
     pub grok_interrupt_pane: Option<&'static str>,
     pub grok_interrupt_key: Option<&'static str>,
     pub grok_probe_socket: Option<bool>,
+    pub grok_retained: Option<bool>,
     /// `#{pane_pid}` a kill reads before tearing the pane down.
     pub pane_pid: Option<u32>,
 }

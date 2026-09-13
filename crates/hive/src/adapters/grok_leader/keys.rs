@@ -153,44 +153,110 @@ pub fn pane_session_path(pane: &str) -> PathBuf {
     session_path_for_key(&resolve_pane_key(pane))
 }
 
-pub fn write_session_key(key: &str, session_id: &str, cwd: &str) -> Result<()> {
+/// The member a session record is bound to: the team instance
+/// (`team::created_at_key`) and the member name, written at the mint
+/// (`create_member_session`, the resume and fork lanes) or when a create
+/// or join binds a launch (`handoff::bind_launch`). A record without one
+/// — a launch nobody has bound, or one written before the binding existed
+/// — names no member and is never revived (`binding::retained`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordBinding {
+    pub team: String,
+    pub created_at: String,
+    pub member: String,
+}
+
+const BINDING_FIELDS: [&str; 3] = ["team", "createdAt", "member"];
+
+fn binding_fields(binding: &RecordBinding) -> [(&'static str, &str); 3] {
+    [
+        ("team", binding.team.as_str()),
+        ("createdAt", binding.created_at.as_str()),
+        ("member", binding.member.as_str()),
+    ]
+}
+
+/// Write the key's record whole: the session, its cwd, and the binding
+/// when the record is a member's.
+pub fn write_session_key(
+    key: &str,
+    session_id: &str,
+    cwd: &str,
+    binding: Option<&RecordBinding>,
+) -> Result<()> {
     let path = session_path_for_key(key);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(
-        &path,
-        json!({"sessionId": session_id, "cwd": cwd}).to_string(),
-    )?;
+    let mut record = json!({"sessionId": session_id, "cwd": cwd});
+    if let Some(binding) = binding {
+        for (field, value) in binding_fields(binding) {
+            record[field] = Value::from(value);
+        }
+    }
+    fs::write(&path, record.to_string())?;
+    Ok(())
+}
+
+/// Set (or, with `None`, clear) the binding on an existing record, every
+/// other field of it kept as it was: the session, its cwd, and anything
+/// hive does not know.
+pub fn bind_session_key(key: &str, binding: Option<&RecordBinding>) -> Result<()> {
+    let path = session_path_for_key(key);
+    let text = fs::read_to_string(&path)?;
+    let mut record: Value = serde_json::from_str(&text)?;
+    let Some(fields) = record.as_object_mut() else {
+        anyhow::bail!("session record {} is not an object", path.display());
+    };
+    for field in BINDING_FIELDS {
+        fields.remove(field);
+    }
+    if let Some(binding) = binding {
+        for (field, value) in binding_fields(binding) {
+            fields.insert(field.to_string(), Value::from(value));
+        }
+    }
+    fs::write(&path, record.to_string())?;
     Ok(())
 }
 
 pub fn write_pane_session(pane: &str, session_id: &str, cwd: &str) -> Result<()> {
-    write_session_key(&resolve_pane_key(pane), session_id, cwd)
+    write_session_key(&resolve_pane_key(pane), session_id, cwd, None)
 }
 
-/// The session hive minted for a key, with the cwd recorded at spawn.
+/// The session hive minted for a key, with the cwd recorded at spawn and
+/// the member the record is bound to, when it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionRecord {
     pub session_id: String,
     pub cwd: String,
+    pub binding: Option<RecordBinding>,
 }
 
 pub fn read_session_key(key: &str) -> Option<SessionRecord> {
     let text = fs::read_to_string(session_path_for_key(key)).ok()?;
     let data: Value = serde_json::from_str(&text).ok()?;
     let obj = data.as_object()?;
-    let session_id = obj
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .filter(|sid| !sid.is_empty())?;
-    let cwd = obj
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|cwd| !cwd.is_empty())?;
+    let field = |name: &str| {
+        obj.get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let session_id = field("sessionId")?;
+    let cwd = field("cwd")?;
+    let binding = match (field("team"), field("createdAt"), field("member")) {
+        (Some(team), Some(created_at), Some(member)) => Some(RecordBinding {
+            team,
+            created_at,
+            member,
+        }),
+        _ => None,
+    };
     Some(SessionRecord {
-        session_id: session_id.to_string(),
-        cwd: cwd.to_string(),
+        session_id,
+        cwd,
+        binding,
     })
 }
 

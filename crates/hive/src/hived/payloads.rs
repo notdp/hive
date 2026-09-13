@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
-use crate::adapters::grok_leader::PromptResult;
+use crate::adapters::grok_leader::{Confirmation, PromptResult};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::message::{format_hive_envelope, format_node_envelope};
 use crate::team::Team;
@@ -15,6 +15,9 @@ use crate::{bus, devlog};
 
 use super::*;
 
+/// The target of a send, while it can take one: alive (`Agent::is_alive`,
+/// which for a pane-less grok member also admits a retained one — leader
+/// gone, session record still its own, revived by `revive_target` next).
 pub(crate) fn resolve_live_agent_impl(team_name: &str, agent_name: &str) -> Result<(Team, Agent)> {
     let team = hooked_team_load(team_name)?;
     let agent = team.get(agent_name)?;
@@ -22,6 +25,69 @@ pub(crate) fn resolve_live_agent_impl(team_name: &str, agent_name: &str) -> Resu
         bail!("agent '{agent_name}' is not alive");
     }
     Ok((team, agent))
+}
+
+/// Bring a grok target's session under this hived's client before the
+/// send gate reads it: the one place a submission raises a member's
+/// leader. A member already online is a no-op; a leader that does not
+/// come up, or a session that does not load, is an explicit refusal —
+/// nothing is sent to a session that did not load, and no bus row is
+/// written for it. What comes back is this request's own confirmation
+/// of the identity revived — the team instance, member, session and
+/// connection — which the dispatch below submits on, or not at all;
+/// another request's revive of the same member confirms for that
+/// request and cannot stand in for this one. Every other CLI is
+/// untouched and confirms nothing.
+fn revive_target(target: &Agent) -> Result<Option<Confirmation>> {
+    if target.cli != "grok" {
+        return Ok(None);
+    }
+    let key = crate::adapters::grok_leader::member_key(&target.team_name, &target.name);
+    match hooked_gl_revive_key(&key) {
+        Ok(revival) => Ok(Some(revival.confirmation)),
+        Err(failure) => bail!(
+            "grok member '{}' could not be revived for this send ({failure})",
+            target.name
+        ),
+    }
+}
+
+/// `revive`: the same revival a send runs before its gate, on its own —
+/// what `hive workflow run` asks for a retained member before it waits
+/// for the member's turn to close. No prompt, no dispatch, no bus row.
+/// `revived` says whether a leader was raised (an online member answers
+/// `revived: false` with `ok: true`); a failure answers `ok: false` with
+/// its reason.
+pub(crate) fn revive_payload(team_name: &str, agent_name: &str) -> Result<Map<String, Value>> {
+    let team = hooked_team_load(team_name)?;
+    let agent = team.get(agent_name)?;
+    if agent.cli != "grok" {
+        bail!(
+            "member '{agent_name}' runs {}; only a grok member is revived",
+            agent.cli
+        );
+    }
+    let key = crate::adapters::grok_leader::member_key(&agent.team_name, &agent.name);
+    let mut payload = Map::new();
+    payload.insert("agent".to_string(), Value::from(agent_name));
+    match hooked_gl_revive_key(&key) {
+        Ok(revival) => {
+            payload.insert("ok".to_string(), Value::Bool(true));
+            payload.insert("revived".to_string(), Value::Bool(revival.raised));
+            payload.insert("inputState".to_string(), Value::from(revival.input_state));
+            payload.insert(
+                "turnOpen".to_string(),
+                revival.turn_open.map(Value::Bool).unwrap_or(Value::Null),
+            );
+        }
+        Err(failure) => {
+            payload.insert("ok".to_string(), Value::Bool(false));
+            payload.insert("revived".to_string(), Value::Bool(false));
+            payload.insert("reason".to_string(), Value::from(failure.to_string()));
+            payload.insert("error".to_string(), Value::from(failure.to_string()));
+        }
+    }
+    Ok(payload)
 }
 
 /// Raise when the target agent is waiting on its human.
@@ -68,6 +134,11 @@ pub(crate) fn send_payload(
     artifact: &str,
 ) -> Result<Map<String, Value>> {
     let (team, target) = hooked_resolve_live_agent(team_name, target_agent)?;
+
+    // A grok target's session is loaded here, before the gate, so the gate
+    // reads the state the load replayed, not a cold unknown; the dispatch
+    // carries what this revive confirmed.
+    let confirmation = revive_target(&target)?;
 
     // Side effect only: errors if target is waiting for a user answer.
     hooked_check_send_gate(&target)?;
@@ -153,7 +224,7 @@ pub(crate) fn send_payload(
                 }
             }
         }
-        _ => match hooked_agent_dispatch_turn(&target, &envelope) {
+        _ => match hooked_agent_dispatch_turn(&target, &envelope, confirmation.as_ref()) {
             Ok(handle) => Some(handle),
             Err(error) => {
                 let result = refused(error);
@@ -302,6 +373,13 @@ pub(crate) fn doctor_payload(
         diag.insert(
             "cliAlive".to_string(),
             Value::Bool(cli_alive.as_bool().unwrap_or(false)),
+        );
+    }
+    // `alive` above admits a retained member; this says when that is why.
+    if let Some(retained) = runtime.get("retained") {
+        diag.insert(
+            "retained".to_string(),
+            Value::Bool(retained.as_bool().unwrap_or(false)),
         );
     }
     for key in ["model", "sessionId", "inputState"] {

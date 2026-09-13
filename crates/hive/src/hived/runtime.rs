@@ -474,9 +474,10 @@ fn claude_session_runtime(session_id: &str) -> Option<Map<String, Value>> {
 /// Runtime of a member with no pane (its window is gone): the engine's own
 /// state is the only evidence.
 ///
-/// ``alive`` mirrors engine liveness (there is no pane to be alive), and
-/// ``headless`` marks the row so consumers can tell a closed display from a
-/// dead engine.
+/// ``alive`` mirrors engine liveness (there is no pane to be alive) — or,
+/// for grok, ``retained``: no leader, but a session record a submission
+/// revives — and ``headless`` marks the row so consumers can tell a
+/// closed display from a dead engine.
 pub(crate) fn headless_member_runtime(agent: &Agent) -> Map<String, Value> {
     let mut runtime = Map::new();
     runtime.insert("alive".to_string(), Value::Bool(false));
@@ -513,12 +514,20 @@ pub(crate) fn headless_member_runtime(agent: &Agent) -> Map<String, Value> {
         let key = crate::adapters::grok_leader::member_key(&agent.team_name, &agent.name);
         match hooked_gl_runtime_for_key(&key) {
             None => {
+                // No leader answers. `retained` is whether a submission
+                // would revive the member's own session (its record still
+                // names it): a snapshot, re-checked by the revival itself.
                 runtime.insert("cliAlive".to_string(), Value::Bool(false));
+                runtime.insert(
+                    "retained".to_string(),
+                    Value::Bool(hooked_gl_retained(&key)),
+                );
                 runtime.insert("inputState".to_string(), Value::from("unknown"));
                 runtime.insert("inputReason".to_string(), Value::from("no_leader_runtime"));
             }
             Some(rt) => {
                 runtime.insert("cliAlive".to_string(), Value::Bool(true));
+                runtime.insert("retained".to_string(), Value::Bool(false));
                 for (key, value) in grok_runtime_fields(&rt) {
                     runtime.insert(key, value);
                 }
@@ -539,7 +548,8 @@ pub(crate) fn headless_member_runtime(agent: &Agent) -> Map<String, Value> {
         runtime.insert("inputState".to_string(), Value::from("unknown"));
         runtime.insert("inputReason".to_string(), Value::from("no_engine_identity"));
     }
-    let alive = runtime.get("cliAlive") == Some(&Value::Bool(true));
+    let alive = runtime.get("cliAlive") == Some(&Value::Bool(true))
+        || runtime.get("retained") == Some(&Value::Bool(true));
     runtime.insert("alive".to_string(), Value::Bool(alive));
     runtime
 }

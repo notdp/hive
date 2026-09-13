@@ -8,8 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::keys::{
-    alias_path_for_key, daemon_env_for_pane, key_from_alias_name, key_from_socket_name, member_key,
-    resolve_pane_key, socket_path_for_key,
+    alias_path_for_key, daemon_env_for_pane, is_launch_key, key_from_alias_name,
+    key_from_socket_name, member_key, resolve_pane_key, socket_path_for_key,
 };
 use super::{grok_home, DAEMON_START_TIMEOUT};
 use crate::adapters::base::washed_spawner_env;
@@ -429,9 +429,12 @@ fn leader_pid(sock: &Path) -> Option<libc::pid_t> {
 /// Start (or reuse) the leader daemon on *key*'s socket.
 ///
 /// `setsid()` gives it a session of its own, detaching it from the
-/// short-lived CLI; the hived
-/// reaps member daemons the registry no longer lists, and pane-keyed ones
-/// when their pane dies.
+/// short-lived CLI. The argv leaves grok's exit-on-disconnect in force: the
+/// leader lives while a client holds it (a pane TUI, the hived's pool
+/// client, a launcher's terminal) and exits on its own once the last one
+/// disconnects, leaving the session record for a revival
+/// (`GrokClientPool::revive_key`). The hived still reaps member daemons
+/// the registry no longer lists, and pane-keyed ones when their pane dies.
 fn spawn_daemon_key(key: &str, env: HashMap<String, String>, grok_bin: &str, timeout: f64) -> bool {
     let sock = socket_path_for_key(key);
     if let Some(parent) = sock.parent() {
@@ -466,7 +469,6 @@ fn spawn_daemon_key(key: &str, env: HashMap<String, String>, grok_bin: &str, tim
         "--leader-socket".to_string(),
         sock.to_string_lossy().into_owned(),
         "--no-auto-update".to_string(),
-        "--no-exit-on-disconnect".to_string(),
     ];
     let child = match spawn_leader(&argv, &env) {
         Ok(child) => child,
@@ -563,33 +565,47 @@ fn terminate_process_group(pid: libc::pid_t) {
 /// done. Only a pid verified as this key's leader is signalled; a stale
 /// record naming a dead or recycled pid is removed without touching the
 /// process.
+///
+/// A launch's files decide whether a bind of that launch may proceed —
+/// its socket is what the bind probes, its session record what the bind
+/// reads and writes — so on a launch key, reached directly or through a
+/// member's alias, they go under the launch's lock (`launch_lock`), the
+/// one a bind or rollback of the launch holds; a bind waiting behind
+/// this kill then finds no leader once it holds the lock. The reap of
+/// the processes precedes the lock: it takes seconds, signals only pids
+/// verified as this socket's, and touches no file. The lock file itself
+/// stays — flock is by inode, and a lock file unlinked under a holder
+/// lets the next join lock a fresh one beside it.
 pub fn kill_daemon_key(key: &str) {
     // The alias this kill resolved through, read once up front: the reap
     // below takes seconds, and a join could bind the member to another
     // launch meanwhile — that alias is not this kill's to remove.
     let bound_launch = super::alias_target(key);
+    let launch = bound_launch
+        .clone()
+        .or_else(|| is_launch_key(key).then(|| key.to_string()));
     let sock = grok_home()
         .join("hive")
-        .join(format!("{}.sock", bound_launch.as_deref().unwrap_or(key)));
+        .join(format!("{}.sock", launch.as_deref().unwrap_or(key)));
     let mut signalled: Vec<libc::pid_t> = Vec::new();
     reap_socket_once(&sock, &mut signalled);
     reap_socket_once(&sock, &mut signalled);
+    // A lock that cannot be opened guards nothing: a bind of the launch
+    // fails on the same open, so there is no bind to wait for.
+    let _lock = launch
+        .as_deref()
+        .and_then(|launch| super::launch_lock(launch).ok());
     for path in [
         sock.clone(),
         sock.with_extension("lock"),
         sock.with_extension("pid"),
+        sock.with_extension("session"),
     ] {
         let _ = fs::remove_file(path);
     }
-    let _ = fs::remove_file(sock.with_extension("session"));
-    // The member's alias goes under the same lock a bind or rollback holds,
-    // and only while it still names the launch this kill reaped; the lock
-    // file itself stays — flock is by inode, and a lock file unlinked under
-    // a holder lets the next join lock a fresh one beside it.
-    let Some(bound_launch) = bound_launch else {
-        return;
-    };
-    if let Ok(_lock) = super::alias_lock(key) {
+    // The member's alias goes only while it still names the launch this
+    // kill reaped.
+    if let Some(bound_launch) = bound_launch {
         if super::alias_target(key).as_deref() == Some(bound_launch.as_str()) {
             let _ = fs::remove_file(alias_path_for_key(key));
         }

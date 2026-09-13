@@ -23,6 +23,9 @@ pub struct SpawnOptions {
     pub cli: String,
     pub workspace: String,
     pub session_mode: String,
+    /// The team instance (`team::created_at_key`) the member is spawned
+    /// into: a grok member's session record is bound to it.
+    pub created_at: String,
 }
 
 impl Default for SpawnOptions {
@@ -40,6 +43,7 @@ impl Default for SpawnOptions {
             cli: "claude".to_string(),
             workspace: String::new(),
             session_mode: "fork".to_string(),
+            created_at: String::new(),
         }
     }
 }
@@ -519,7 +523,8 @@ impl _MintContext<'_> {
         let grok_session_id = match (&opts.session_id, opts.session_mode.as_str()) {
             (None, _) => {
                 let sid = uuid4();
-                if !hooked_grok_create_member_session(team_name, name, &sid, cwd) {
+                if !hooked_grok_create_member_session(team_name, &opts.created_at, name, &sid, cwd)
+                {
                     // Grok runtime state lives on the member's leader;
                     // without a materialized session the TUI would run
                     // detached from hive. Same deal as codex: give the pane
@@ -553,7 +558,12 @@ impl _MintContext<'_> {
                 } else {
                     uuid4()
                 };
-                hooked_grok_write_session_key(&key, &sid, cwd)?;
+                let binding = crate::adapters::grok_leader::RecordBinding {
+                    team: team_name.to_string(),
+                    created_at: opts.created_at.clone(),
+                    member: name.to_string(),
+                };
+                hooked_grok_write_session_key(&key, &sid, cwd, &binding)?;
                 if mode != "resume" {
                     // `--session-id` names the branch the TUI creates.
                     parts.push("--session-id".to_string());

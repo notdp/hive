@@ -244,6 +244,26 @@ pub fn request_connect_grok(workspace: &str, pane: &str) -> Option<Map<String, V
     request_admitted(workspace, &payload, 3.0).ok()
 }
 
+/// Ask the hived to revive a grok member (`revive`): raise its leader when
+/// it has exited and load its recorded session, or do nothing for one
+/// online. Admitted like a send — it may start a process — but sends no
+/// prompt. The answer's `ok` is the revival; `revived` says whether a
+/// leader was raised; a failure carries `reason`.
+pub(crate) fn request_revive(
+    workspace: &str,
+    team: &str,
+    agent: &str,
+) -> Result<Map<String, Value>, RequestFailure> {
+    let mut payload = action_payload("revive");
+    payload.insert("team".to_string(), Value::from(team));
+    payload.insert("agent".to_string(), Value::from(agent));
+    request_admitted(
+        workspace,
+        &payload,
+        crate::adapters::grok_leader::SUBMIT_TIMEOUT + REQUEST_SLACK,
+    )
+}
+
 /// What a ping answer says about the hived on the workspace socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HivedIdentity {

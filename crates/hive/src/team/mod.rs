@@ -33,6 +33,15 @@ use crate::tmux;
 pub const LEAD_AGENT_NAME: &str = "orch";
 const TMUX_REQUIRED_MESSAGE: &str = "Hive requires tmux. Start or attach to a tmux session first.";
 
+/// What `Team::member_liveness` reads off the hived's team runtime for one
+/// member: `alive` is `cliAlive || retained`, `retained` the grok-only
+/// "leader gone, session revivable" state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemberLiveness {
+    pub alive: bool,
+    pub retained: bool,
+}
+
 /// The registry's instance key for a team created at *created_at*
 /// (epoch seconds): an empty key for a team with no known creation time,
 /// which every registry write treats as "no instance check".
@@ -153,6 +162,8 @@ struct SpawnCall {
     skill: String,
     extra_env: Option<HashMap<String, String>>,
     cli: String,
+    /// The team instance the member joins (`created_at_key`).
+    created_at: String,
 }
 
 // --- cross-module seams: each wrapper runs the real call unless the test
@@ -181,6 +192,7 @@ fn agent_spawn(call: SpawnCall) -> Result<Agent> {
                 .as_ref()
                 .map(|env| env.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
             cli: call.cli.clone(),
+            created_at: call.created_at.clone(),
             ..Default::default()
         },
     )
@@ -690,6 +702,7 @@ impl Team {
             skill: skill.to_string(),
             extra_env: extra_env.cloned(),
             cli: cli.to_string(),
+            created_at: self.created_at_key(),
         });
         let agent = match spawned {
             Ok(agent) => agent,
@@ -746,32 +759,49 @@ impl Team {
         identity::current_pane_id().unwrap_or_default()
     }
 
-    /// Whether a member can still receive a dispatch and answer. The hived's
-    /// team runtime is the authority (`cliAlive` — an engine that is gone
-    /// reads offline even if a pane still shows its last screen); without a
-    /// usable hived answer (`usable_runtime`), a bound live pane stands in.
+    /// Whether a member can still receive a dispatch and answer
+    /// (`member_liveness().alive`).
     pub fn member_alive(&self, name: &str) -> bool {
+        self.member_liveness(name).alive
+    }
+
+    /// Whether a member can still take a dispatch, and whether that is
+    /// only because it is retained. The hived's team runtime is the
+    /// authority: `cliAlive` (an engine that is gone reads offline even if
+    /// a pane still shows its last screen) or `retained` (a grok member
+    /// whose leader has exited but whose session a submission revives —
+    /// a snapshot the hived re-checks at the submission). Without a usable
+    /// hived answer (`usable_runtime`), a bound live pane stands in and
+    /// nothing is retained.
+    pub fn member_liveness(&self, name: &str) -> MemberLiveness {
         let Some(agent) = self.agent_named(name) else {
-            return false;
+            return MemberLiveness::default();
         };
         if !self.workspace.is_empty() {
             if let Some(runtime) = usable_runtime(request_team_runtime(&self.workspace, &self.name))
             {
-                if let Some(member) = runtime
+                let flag = |member: &Map<String, Value>, field: &str| {
+                    member.get(field).and_then(Value::as_bool).unwrap_or(false)
+                };
+                return runtime
                     .get("members")
                     .and_then(Value::as_object)
                     .and_then(|m| m.get(name))
                     .and_then(Value::as_object)
-                {
-                    return member
-                        .get("cliAlive")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                }
-                return false;
+                    .map(|member| {
+                        let retained = flag(member, "retained");
+                        MemberLiveness {
+                            alive: flag(member, "cliAlive") || retained,
+                            retained,
+                        }
+                    })
+                    .unwrap_or_default();
             }
         }
-        !agent.pane_id.is_empty()
+        MemberLiveness {
+            alive: !agent.pane_id.is_empty(),
+            retained: false,
+        }
     }
 
     /// Retire a member: kill its engine/pane, drop the roster row here and

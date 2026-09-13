@@ -22,6 +22,15 @@
 //! is private, so hive never talks to the socket directly: the stdio
 //! subprocess is the supported door.
 //!
+//! A leader lives by its clients (grok's exit-on-disconnect stays in
+//! force: `daemon.rs`) and exits once the last one is gone, leaving the
+//! key's session record bound to the member it was minted for. While that
+//! binding still names the registry's current instance and row, the
+//! member is retained (`binding.rs`), and a submission's entry revives it
+//! — raises the leader and loads the session — before anything is sent
+//! (`GrokClientPool::revive_key`). The pool's submission path never raises
+//! a leader itself.
+//!
 //! Which session that client drives is not discoverable from the leader
 //! (`session/list` returns every session of the cwd), which is why hive
 //! names the session at the mint and keeps the key's `.session` file. The
@@ -37,12 +46,14 @@
 use std::env;
 use std::path::PathBuf;
 
+mod binding;
 mod client;
 mod daemon;
 mod handoff;
 mod keys;
 mod pool;
 
+pub use binding::*;
 pub use client::*;
 pub use daemon::*;
 pub use handoff::*;

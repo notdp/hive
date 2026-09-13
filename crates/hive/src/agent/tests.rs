@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
+use crate::adapters::grok_leader::RecordBinding;
 use crate::testenv::EnvGuard;
 
 use super::testhook::{self, fake_engine, Hook};
@@ -18,6 +19,7 @@ fn hook<T>(f: impl FnOnce(&mut Hook) -> T) -> T {
 fn spawn_opts(f: impl FnOnce(&mut SpawnOptions)) -> SpawnOptions {
     let mut opts = SpawnOptions {
         cwd: "/tmp".to_string(),
+        created_at: "123".to_string(),
         ..SpawnOptions::default()
     };
     f(&mut opts);
@@ -916,10 +918,16 @@ fn test_spawn_grok_mints_the_engine_by_identity_then_attaches_the_pane() {
     .unwrap();
     let minted = hook(|h| h.grok_minted.clone());
     assert_eq!(minted.len(), 1);
-    let (team, member, session_id, cwd) = minted[0].clone();
+    let (team, created_at, member, session_id, cwd) = minted[0].clone();
+    // the mint binds the record to this team instance and member
     assert_eq!(
-        (team.as_str(), member.as_str(), cwd.as_str()),
-        ("t", "w1", "/work/dir")
+        (
+            team.as_str(),
+            created_at.as_str(),
+            member.as_str(),
+            cwd.as_str()
+        ),
+        ("t", "123", "w1", "/work/dir")
     );
     assert!(!session_id.is_empty());
     // hive never writes the record itself here: session/new owns it
@@ -978,12 +986,19 @@ fn test_spawn_grok_resume_raises_the_leader_by_identity_and_keeps_the_session_id
         hook(|h| h.grok_leaders.clone()),
         vec![("t".to_string(), "w1".to_string())]
     );
+    // and the record names the resumed id on the member key, bound to
+    // this team instance and member
     assert_eq!(
         hook(|h| h.grok_sessions.clone()),
         vec![(
             "m-t.w1".to_string(),
             "sess-abc".to_string(),
-            "/tmp".to_string()
+            "/tmp".to_string(),
+            RecordBinding {
+                team: "t".to_string(),
+                created_at: "123".to_string(),
+                member: "w1".to_string(),
+            }
         )]
     );
     assert_eq!(
@@ -1022,8 +1037,16 @@ fn test_spawn_grok_fork_mints_a_new_session_id_for_the_branch() {
         hook(|h| h.grok_leaders.clone()),
         vec![("t".to_string(), "w1".to_string())]
     );
-    let (key, forked_id, _cwd) = hook(|h| h.grok_sessions[0].clone());
+    let (key, forked_id, _cwd, binding) = hook(|h| h.grok_sessions[0].clone());
     assert_eq!(key, "m-t.w1");
+    assert_eq!(
+        binding,
+        RecordBinding {
+            team: "t".to_string(),
+            created_at: "123".to_string(),
+            member: "w1".to_string(),
+        }
+    );
     assert_ne!(forked_id, "sess-abc");
     assert_eq!(
         launch.split_whitespace().collect::<Vec<_>>(),
@@ -1753,7 +1776,7 @@ fn test_spawn_grok_waits_on_the_minted_session_dir_not_the_banner() {
     )
     .unwrap();
     let waited = hook(|h| h.waited_grok.clone());
-    let minted = hook(|h| h.grok_minted[0].2.clone());
+    let minted = hook(|h| h.grok_minted[0].3.clone());
     assert_eq!(waited, vec![("%0".to_string(), minted)]); // the id hive minted, not the pane's cwd
 }
 
@@ -2045,6 +2068,15 @@ fn test_headless_is_alive_probes_the_engine() {
 
     hook(|h| h.grok_probe_socket = Some(true));
     assert!(headless("grok", Some("sid-1")).is_alive());
+    // a grok leader that has exited: alive only while the member is
+    // retained (its record still names it), dead otherwise
+    hook(|h| {
+        h.grok_probe_socket = Some(false);
+        h.grok_retained = Some(true);
+    });
+    assert!(headless("grok", Some("sid-1")).is_alive());
+    hook(|h| h.grok_retained = Some(false));
+    assert!(!headless("grok", Some("sid-1")).is_alive());
 
     hook(|h| h.job_row_ids = vec!["job-1".to_string()]);
     assert!(headless("claude", Some("job-1")).is_alive()); // asleep is not dead
@@ -2284,6 +2316,55 @@ fn test_uuid4_shape() {
     assert!(matches!(sid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
 }
 
+/// A grok member's tracked turn goes out only on the identity a revive
+/// confirmed: with none, the dispatch is refused before any transport is
+/// asked; with one, the pool is asked on it and the handle rides its key
+/// — for a pane member and a headless one alike.
+#[test]
+fn test_grok_dispatch_needs_a_revive_confirmation_and_rides_its_key() {
+    use crate::adapters::grok_leader::{Confirmation, PromptId, RecordBinding};
+    let confirmation = Confirmation {
+        key: "m-team.node".to_string(),
+        binding: RecordBinding {
+            team: "team".to_string(),
+            created_at: "123".to_string(),
+            member: "node".to_string(),
+        },
+        session_id: "sid-1".to_string(),
+        socket_path: "/grok/hive/m-team.node.sock".to_string(),
+        generation: 3,
+    };
+    for pane in ["%1", ""] {
+        let _guard = testhook::install(Hook {
+            cli_probe: Some("grok".to_string()),
+            grok_dispatch: Some(Ok(PromptId {
+                generation: 3,
+                rid: 9,
+            })),
+            ..Hook::default()
+        });
+        let mut agent = testhook::fake_agent("node", "team", pane, "grok");
+        agent.session_id = Some("sid-1".to_string());
+        let err = agent.dispatch_turn("task", None).unwrap_err();
+        assert!(err.0.contains("not revived"), "{err}");
+        assert!(hook(|h| h.grok_sent_key.clone()).is_empty());
+        assert_eq!(
+            agent.dispatch_turn("task", Some(&confirmation)),
+            Ok(TurnHandle::Grok {
+                key: "m-team.node".to_string(),
+                prompt_id: PromptId {
+                    generation: 3,
+                    rid: 9,
+                },
+            })
+        );
+        assert_eq!(
+            hook(|h| h.grok_sent_key.clone()),
+            vec![("m-team.node".to_string(), "task".to_string())]
+        );
+    }
+}
+
 #[test]
 fn test_codex_dispatch_preserves_unknown_for_pane_and_headless_members() {
     use crate::adapters::codex_app_server::TurnStartFailure;
@@ -2297,7 +2378,7 @@ fn test_codex_dispatch_preserves_unknown_for_pane_and_headless_members() {
         let mut agent = testhook::fake_agent("node", "team", pane, "codex");
         agent.session_id = Some("thread".to_string());
         assert_eq!(
-            agent.dispatch_turn("task"),
+            agent.dispatch_turn("task", None),
             Ok(TurnHandle::Unknown("answer lost".to_string()))
         );
     }

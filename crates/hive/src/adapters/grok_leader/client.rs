@@ -725,7 +725,9 @@ impl GrokStdioClient {
     /// Both values come from the key's session file — cwd is recorded at
     /// spawn time, so no tmux query is needed here.
     pub fn handshake(&self) -> bool {
-        let SessionRecord { session_id, cwd } = match read_session_key(&self.key) {
+        let SessionRecord {
+            session_id, cwd, ..
+        } = match read_session_key(&self.key) {
             Some(session) => session,
             None => return false,
         };

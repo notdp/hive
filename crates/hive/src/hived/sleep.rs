@@ -51,9 +51,10 @@ impl Retirement {
     /// own process, and the TUI in its pane is one of its clients: a
     /// reap here would take the human's session down with it. Retiring
     /// for want of a viewer is not authority to collect someone else's
-    /// engine. The price is a leader that outlives the desk; the next
-    /// send reuses it if it is still up, else starts one from the
-    /// session record.
+    /// engine. The leader lives by its clients: with a TUI still on it
+    /// it outlives the desk, with none it exits on its own once this
+    /// client is gone, and the next submission revives it from the
+    /// session record (`GrokClientPool::revive_key`).
     pub(super) fn drop_clients(self) {
         for key in &self.grok_keys {
             hooked_gl_pool_drop_key(key);

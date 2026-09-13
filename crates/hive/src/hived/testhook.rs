@@ -10,7 +10,9 @@ use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::claude_view::PaneView;
 use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome, ThreadRuntime, TurnResult};
 use crate::adapters::grok_leader::PromptId;
-use crate::adapters::grok_leader::{PromptResult, SessionRecord, SessionRuntime};
+use crate::adapters::grok_leader::{
+    Confirmation, PromptResult, Revival, ReviveFailure, SessionRecord, SessionRuntime,
+};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
 use serde_json::{Map, Value};
@@ -138,6 +140,8 @@ pub struct Hook {
     pub gl_kill_daemon_key: Option<S1<()>>,
     pub gl_pool_drop_key: Option<S1<()>>,
     pub gl_connect_pane: Option<S1<bool>>,
+    pub gl_retained: Option<S1<bool>>,
+    pub gl_revive_key: Option<S1<Result<Revival, ReviveFailure>>>,
     // notify / plugin
     #[allow(clippy::type_complexity)]
     pub notify_debug_emit: Option<Arc<dyn Fn(&str, &str, &[(&str, Value)]) + Send + Sync>>,
@@ -152,8 +156,13 @@ pub struct Hook {
     pub agent_send:
         Option<Arc<dyn Fn(&Agent, &str, &str) -> Result<String, DeliveryError> + Send + Sync>>,
     #[allow(clippy::type_complexity)]
-    pub agent_dispatch_turn:
-        Option<Arc<dyn Fn(&Agent, &str) -> Result<TurnHandle, DeliveryError> + Send + Sync>>,
+    pub agent_dispatch_turn: Option<
+        Arc<
+            dyn Fn(&Agent, &str, Option<&Confirmation>) -> Result<TurnHandle, DeliveryError>
+                + Send
+                + Sync,
+        >,
+    >,
     // hived self-seams
     pub resolve_live_agent: Option<S2<anyhow::Result<(Team, Agent)>>>,
     pub check_send_gate: Option<A1<anyhow::Result<()>>>,

@@ -18,6 +18,7 @@ use crate::adapters::codex_app_server::TurnResult;
 use crate::adapters::grok_leader::PromptId;
 use crate::adapters::grok_leader::PromptResult;
 use crate::adapters::grok_leader::SessionRecord;
+use crate::adapters::grok_leader::{Confirmation, Revival, ReviveFailure};
 use crate::agent::{Agent, DeliveryError, TurnHandle};
 use crate::team::Team;
 
@@ -714,6 +715,22 @@ pub(super) fn hooked_gl_connect_pane(pane: &str) -> bool {
     crate::adapters::grok_leader::connect_pane(pane)
 }
 
+pub(super) fn hooked_gl_retained(key: &str) -> bool {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_retained.clone()).flatten() {
+        return f(key);
+    }
+    crate::adapters::grok_leader::retained(key)
+}
+
+pub(super) fn hooked_gl_revive_key(key: &str) -> Result<Revival, ReviveFailure> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.gl_revive_key.clone()).flatten() {
+        return f(key);
+    }
+    crate::adapters::grok_leader::pool().revive_key(key)
+}
+
 // --- notify / plugin seams -------------------------------------------------
 
 pub(super) fn hooked_notify_debug_emit(workspace: &str, event: &str, fields: &[(&str, Value)]) {
@@ -799,12 +816,13 @@ pub(super) fn hooked_agent_send(
 pub(super) fn hooked_agent_dispatch_turn(
     agent: &Agent,
     text: &str,
+    confirmation: Option<&Confirmation>,
 ) -> std::result::Result<TurnHandle, DeliveryError> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.agent_dispatch_turn.clone()).flatten() {
-        return f(agent, text);
+        return f(agent, text, confirmation);
     }
-    agent.dispatch_turn(text)
+    agent.dispatch_turn(text, confirmation)
 }
 
 // --- self seams (this module's own entry points, replaceable in tests) ----
