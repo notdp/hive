@@ -11,8 +11,12 @@
 //! its own (and `forkedFromSessionId`), so its record never names the
 //! parent's CLI sessions as its own. Layout and keys observed on desktop
 //! 1.46388 with Claude Code 2.1.263, not a published contract: every read is
-//! defensive, disagreement between the copies the app keeps per account is
-//! "unknown", and nothing here writes.
+//! defensive, and nothing here writes. The app keeps a copy per account and
+//! org it has been signed into and updates only the current account's, so
+//! copies disagree after an account switch: the copy with the latest
+//! `lastActivityAt` is the conversation's, older ones are the previous
+//! account's frozen view. Copies that disagree at the same activity time are
+//! "unknown".
 
 use std::env;
 use std::fs;
@@ -74,7 +78,9 @@ fn parse_record(obj: &serde_json::Map<String, Value>) -> Option<DesktopRecord> {
 
 /// The desktop's record for *host_session_id*, or None when there is none,
 /// one is unreadable, or the copies the app keeps under different accounts
-/// disagree — an unknown never drives a roster write.
+/// disagree at the same activity time — an unknown never drives a roster
+/// write. Among disagreeing copies the latest `lastActivityAt` wins: the
+/// app updates only the current account's copy.
 pub fn desktop_record(host_session_id: &str) -> Option<DesktopRecord> {
     scan_record(host_session_id).ok().flatten()
 }
@@ -103,7 +109,10 @@ fn scan_record(host_session_id: &str) -> Result<Option<DesktopRecord>, ()> {
         return Err(());
     }
     let root = sessions_root();
-    let mut found: Option<DesktopRecord> = None;
+    // every copy with its activity time: the latest is the conversation's,
+    // older ones a previous account's frozen view whatever they say, and
+    // only copies that disagree at the latest time conflict
+    let mut copies: Vec<(DesktopRecord, f64)> = Vec::new();
     // a directory that cannot be listed may hold a copy that disagrees:
     // unknown, never "absent"
     for account in list_dirs(&root).ok_or(())? {
@@ -115,16 +124,27 @@ fn scan_record(host_session_id: &str) -> Result<Option<DesktopRecord>, ()> {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(_) => return Err(()),
             }
-            let record = read_json_object(&path)
-                .and_then(|o| parse_record(&o))
-                .ok_or(())?;
-            match &found {
-                Some(seen) if *seen != record => return Err(()),
-                _ => found = Some(record),
-            }
+            let obj = read_json_object(&path).ok_or(())?;
+            let record = parse_record(&obj).ok_or(())?;
+            let at = obj
+                .get("lastActivityAt")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            copies.push((record, at));
         }
     }
-    Ok(found)
+    let Some(latest) = copies.iter().map(|(_, at)| *at).reduce(f64::max) else {
+        return Ok(None);
+    };
+    let mut at_latest = copies
+        .into_iter()
+        .filter(|(_, at)| *at == latest)
+        .map(|(record, _)| record);
+    let record = at_latest.next().ok_or(())?;
+    if at_latest.any(|other| other != record) {
+        return Err(());
+    }
+    Ok(Some(record))
 }
 
 /// The subdirectories of *dir*; an absent *dir* is no directories, any
@@ -235,11 +255,12 @@ mod tests {
     }
 
     #[test]
-    fn test_desktop_record_is_unknown_when_account_copies_disagree() {
+    fn test_desktop_record_is_unknown_when_account_copies_disagree_at_the_same_time() {
         let tmp = TempDir::new().unwrap();
         let mut env = EnvGuard::new();
         env.set("HOME", tmp.path());
-        let same = json!({"cliSessionId": "new", "priorCliSessionIds": ["old"]});
+        let same =
+            json!({"cliSessionId": "new", "priorCliSessionIds": ["old"], "lastActivityAt": 5});
         write_record(tmp.path(), "a1", "o1", "local_x", same.clone());
         write_record(tmp.path(), "a2", "o2", "local_x", same);
         assert!(desktop_record("local_x").is_some());
@@ -249,10 +270,93 @@ mod tests {
             "a2",
             "o2",
             "local_x",
-            json!({"cliSessionId": "other", "priorCliSessionIds": ["old"]}),
+            json!({"cliSessionId": "other", "priorCliSessionIds": ["old"], "lastActivityAt": 5}),
         );
         assert_eq!(desktop_record("local_x"), None);
         assert_eq!(record_presence("local_x"), RecordPresence::Unknown);
+        // copies without an activity time are as old as each other
+        write_record(
+            tmp.path(),
+            "a1",
+            "o1",
+            "local_z",
+            json!({"cliSessionId": "one"}),
+        );
+        write_record(
+            tmp.path(),
+            "a2",
+            "o2",
+            "local_z",
+            json!({"cliSessionId": "two"}),
+        );
+        assert_eq!(record_presence("local_z"), RecordPresence::Unknown);
+    }
+
+    #[test]
+    fn test_desktop_record_takes_the_latest_copy_over_a_previous_accounts() {
+        // An account switch leaves the old account's copy behind, frozen at
+        // the CLI session the conversation ran then; the app updates the
+        // current account's copy alone, and its activity time says so.
+        let tmp = TempDir::new().unwrap();
+        let mut env = EnvGuard::new();
+        env.set("HOME", tmp.path());
+        write_record(
+            tmp.path(),
+            "old-account",
+            "o1",
+            "local_x",
+            json!({"cliSessionId": "before-switch", "priorCliSessionIds": ["first"], "lastActivityAt": 1000}),
+        );
+        write_record(
+            tmp.path(),
+            "new-account",
+            "o2",
+            "local_x",
+            json!({"cliSessionId": "after-switch", "priorCliSessionIds": ["first", "before-switch"], "lastActivityAt": 2000}),
+        );
+        assert_eq!(
+            desktop_record("local_x"),
+            Some(DesktopRecord {
+                cli_session_id: "after-switch".to_string(),
+                prior_cli_session_ids: vec!["first".to_string(), "before-switch".to_string()],
+            })
+        );
+        assert_eq!(record_presence("local_x"), RecordPresence::Present);
+        // directory order does not decide: the older copy listed later loses too
+        write_record(
+            tmp.path(),
+            "zz-account",
+            "o3",
+            "local_x",
+            json!({"cliSessionId": "before-switch", "lastActivityAt": 1500}),
+        );
+        assert_eq!(
+            desktop_record("local_x").unwrap().cli_session_id,
+            "after-switch"
+        );
+        // two older copies that disagree with each other are both history:
+        // the one latest copy still decides, wherever the listing puts it
+        for (accounts, latest) in [
+            (["a1", "a2", "a3"], "a3"),
+            (["b1", "b2", "b3"], "b1"),
+            (["c1", "c2", "c3"], "c2"),
+        ] {
+            let host = format!("local_{latest}");
+            for account in accounts {
+                let body = if account == latest {
+                    json!({"cliSessionId": "current", "lastActivityAt": 3000})
+                } else {
+                    json!({"cliSessionId": format!("old-{account}"), "lastActivityAt": 1000})
+                };
+                write_record(tmp.path(), account, "org", &host, body);
+            }
+            assert_eq!(
+                desktop_record(&host).map(|r| r.cli_session_id),
+                Some("current".to_string()),
+                "{host}"
+            );
+            assert_eq!(record_presence(&host), RecordPresence::Present);
+        }
     }
 
     #[cfg(unix)]
