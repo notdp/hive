@@ -135,6 +135,22 @@ fn set_record_update_interleave(hook: impl FnOnce() + 'static) {
     RECORD_UPDATE_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
+thread_local! {
+    static FIRST_LAUNCH_INTERLEAVE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Runs once inside a first launch's record creation, after its roster
+/// read and before the create, the store lock held.
+pub(super) fn first_launch_interleave() {
+    if let Some(hook) = FIRST_LAUNCH_INTERLEAVE.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+fn set_first_launch_interleave(hook: impl FnOnce() + 'static) {
+    FIRST_LAUNCH_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
 fn set_pane_write_interleave(hook: impl FnOnce() + 'static) {
     PANE_WRITE_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
@@ -2082,8 +2098,10 @@ fn test_write_pane_session_does_not_follow_an_alias_published_after_its_resolve(
         record_cedar("456", Some("new-session"));
         assert!(binding_holds("m-cedar.worker").is_ok());
     });
+    // the member's own record is gone and its row names the new launch's
+    // session: nothing to update, nothing to mint
     let err = write_pane_session("%9", SID, "/old-pane").unwrap_err();
-    assert!(err.to_string().contains("no session record"), "{err}");
+    assert!(err.to_string().contains("already names session"), "{err}");
     assert_eq!(
         read_session_key("l-cd34").unwrap(),
         SessionRecord {
@@ -2102,8 +2120,13 @@ fn test_write_pane_session_creates_a_pane_record_but_not_a_member_one() {
     write_pane_session("%7", "sid-3", "/w").unwrap();
     assert_eq!(read_session_key("p7").unwrap().session_id, "sid-3");
     tag_cedar_worker();
+    // a member key with no record and no roster row awaiting a session
     let err = write_pane_session("%9", SID, CWD).unwrap_err();
-    assert!(err.to_string().contains("no session record"), "{err}");
+    assert!(
+        err.to_string().contains("not on the roster")
+            || err.to_string().contains("not in the registry"),
+        "{err}"
+    );
     assert!(!bed.tmp.path().join("hive/m-cedar.worker.session").exists());
 }
 
@@ -2151,6 +2174,168 @@ fn test_write_pane_session_does_not_overwrite_a_record_replaced_after_its_read()
         }
     );
     assert!(binding_holds("m-cedar.worker").is_ok());
+}
+
+fn record_cedar_worker_without_session(created_at: &str) {
+    let row = json!({"name": "worker", "cli": "grok"})
+        .as_object()
+        .unwrap()
+        .clone();
+    crate::registry::record_team("cedar", CWD, created_at, &[row], "").unwrap();
+}
+
+#[test]
+fn test_write_pane_session_mints_a_bound_record_for_a_member_registered_without_a_session() {
+    // `hive fork` registers the member and launches its TUI; the TUI's
+    // launch names the session and writes the first record, bound.
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    tag_cedar_worker();
+    record_cedar_worker_without_session("123");
+    write_pane_session("%9", "sid-fork", "/w").unwrap();
+    assert_eq!(
+        read_session_key("m-cedar.worker").unwrap(),
+        SessionRecord {
+            session_id: "sid-fork".to_string(),
+            cwd: "/w".to_string(),
+            binding: Some(binding("cedar", "123", "worker")),
+        }
+    );
+    // the same launch again is an update, the binding kept
+    write_pane_session("%9", "sid-fork", "/w2").unwrap();
+    assert_eq!(read_session_key("m-cedar.worker").unwrap().cwd, "/w2");
+    assert_eq!(
+        read_session_key("m-cedar.worker").unwrap().binding,
+        Some(binding("cedar", "123", "worker"))
+    );
+}
+
+#[test]
+fn test_write_pane_session_refuses_a_first_launch_the_roster_does_not_await() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    tag_cedar_worker();
+    let record = bed.tmp.path().join("hive/m-cedar.worker.session");
+    // the row already names another session: not this launch's to mint
+    record_cedar("123", Some("sid-other"));
+    let err = write_pane_session("%9", "sid-fork", "/w").unwrap_err();
+    assert!(err.to_string().contains("already names session"), "{err}");
+    assert!(!record.exists());
+    // no row at all: a member killed since, or never registered
+    record_cedar("123", None);
+    let err = write_pane_session("%9", "sid-fork", "/w").unwrap_err();
+    assert!(err.to_string().contains("not on the roster"), "{err}");
+    assert!(!record.exists());
+}
+
+#[test]
+fn test_write_pane_session_first_launch_never_overwrites_a_record_minted_since() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    tag_cedar_worker();
+    record_cedar_worker_without_session("123");
+    // a mint of the same member lands between the roster read and the create
+    set_first_launch_interleave(|| {
+        write_session_key(
+            "m-cedar.worker",
+            "fresh-mint",
+            "/fresh",
+            Some(&binding("cedar", "123", "worker")),
+        )
+        .unwrap();
+    });
+    let err = write_pane_session("%9", "stale-fork", "/old").unwrap_err();
+    assert!(err.to_string().contains("appeared"), "{err}");
+    assert_eq!(
+        read_session_key("m-cedar.worker").unwrap(),
+        SessionRecord {
+            session_id: "fresh-mint".to_string(),
+            cwd: "/fresh".to_string(),
+            binding: Some(binding("cedar", "123", "worker")),
+        }
+    );
+}
+
+#[test]
+fn test_write_pane_session_first_launch_holds_the_store_lock_against_a_kill() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    tag_cedar_worker();
+    record_cedar_worker_without_session("123");
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    // a kill of the member arrives while the launch holds the store lock:
+    // it waits, and removes the row only once the record is published
+    set_first_launch_interleave(move || {
+        let kill = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let removed = crate::registry::remove_member("cedar", "worker", "123");
+            done_tx.send(removed.is_ok()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            !kill.is_finished(),
+            "the kill did not wait for the store lock"
+        );
+        assert!(
+            crate::registry::load("cedar").and_then(|entry| entry
+                .get("members")
+                .and_then(Value::as_array)
+                .map(|rows| rows.len()))
+                == Some(1),
+            "the row went under the store lock"
+        );
+    });
+    write_pane_session("%9", "sid-fork", "/w").unwrap();
+    assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+    assert_eq!(
+        read_session_key("m-cedar.worker").unwrap().binding,
+        Some(binding("cedar", "123", "worker"))
+    );
+    let rows = crate::registry::load("cedar").and_then(|entry| {
+        entry
+            .get("members")
+            .and_then(Value::as_array)
+            .map(|rows| rows.len())
+    });
+    assert_eq!(rows, Some(0));
+}
+
+#[test]
+fn test_spawn_member_daemon_raises_one_leader_for_two_raisers_at_once() {
+    let bed = setup();
+    let spawns: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let both_done = Arc::new(std::sync::Barrier::new(2));
+    let raisers: Vec<_> = (0..2)
+        .map(|_| {
+            let spawns = spawns.clone();
+            let both_done = both_done.clone();
+            thread::spawn(move || {
+                // the seams are per thread: each raiser fakes its own spawn
+                set_daemon_spawn(move |argv, _env| {
+                    *spawns.lock().unwrap() += 1;
+                    thread::sleep(Duration::from_millis(150));
+                    touch_leader_socket(argv);
+                    Ok(Box::new(FakeDaemonChild {
+                        pid: 7778,
+                        returncode: None,
+                        panic_on_terminate: true,
+                    }) as Box<dyn DaemonChild>)
+                });
+                let raised = spawn_member_daemon("honey", "rex");
+                // the fake leader's lock lives in this thread: stay until
+                // the other raiser has seen it
+                both_done.wait();
+                raised
+            })
+        })
+        .collect();
+    for raiser in raisers {
+        assert!(raiser.join().unwrap(), "a raiser reported no leader");
+    }
+    assert_eq!(*spawns.lock().unwrap(), 1, "both raisers spawned a leader");
+    assert!(bed.tmp.path().join("hive/m-honey.rex.raise-lock").exists());
 }
 
 #[test]

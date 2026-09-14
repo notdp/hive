@@ -399,6 +399,9 @@ fn spawn_daemon_key(key: &str, env: HashMap<String, String>, grok_bin: &str, tim
             return false;
         }
     }
+    let Ok(_raise) = raise_lock(key) else {
+        return false;
+    };
     if probe_socket(&sock) {
         return true;
     }
@@ -447,6 +450,31 @@ fn spawn_daemon_key(key: &str, env: HashMap<String, String>, grok_bin: &str, tim
     }
     child.terminate();
     false
+}
+
+/// The key's raise lock (`<key>.raise-lock`), held from the probe that
+/// finds no leader to the leader's readiness: two raises of one key at
+/// once — two submissions reviving one cold member — would each find
+/// nothing and spawn, and the second leader dies on the first one's lock
+/// while its raiser goes on to a socket it never bound. The second raiser
+/// waits here instead and finds the leader the first raised.
+fn raise_lock(key: &str) -> io::Result<fs::File> {
+    use std::os::unix::io::AsRawFd;
+
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(
+            super::grok_home()
+                .join("hive")
+                .join(format!("{key}.raise-lock")),
+        )?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(file)
 }
 
 /// Daemon keys that currently have a leader socket on disk.

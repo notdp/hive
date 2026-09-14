@@ -206,6 +206,36 @@ fn write_record_at(
     Ok(())
 }
 
+/// Create the record at *path*, never over one already there.
+fn create_record_at(
+    path: &Path,
+    session_id: &str,
+    cwd: &str,
+    binding: &RecordBinding,
+) -> Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "a session record appeared at {} since: {error}",
+                path.display()
+            )
+        })?;
+    file.write_all(
+        record_json(session_id, cwd, Some(binding))
+            .to_string()
+            .as_bytes(),
+    )?;
+    Ok(())
+}
+
 fn record_json(session_id: &str, cwd: &str, binding: Option<&RecordBinding>) -> Value {
     let mut record = json!({"sessionId": session_id, "cwd": cwd});
     if let Some(binding) = binding {
@@ -268,10 +298,69 @@ pub fn write_pane_session(pane: &str, session_id: &str, cwd: &str) -> Result<()>
         );
         return update_record_keeping_binding(&own_session_path(&target), session_id, cwd);
     }
-    if member_from_key(&key).is_some() {
-        return update_record_keeping_binding(&own_session_path(&key), session_id, cwd);
+    if let Some((team, member)) = member_from_key(&key) {
+        let path = own_session_path(&key);
+        if path.exists() {
+            return update_record_keeping_binding(&path, session_id, cwd);
+        }
+        // The roster read and the record's creation are one step under the
+        // registry's store lock, the lock every roster write takes: a kill
+        // of the member (`remove_member`) waits for it and then removes the
+        // record this launch made, as it would any member's. The creation
+        // never overwrites — a record that appeared since is another
+        // launch's, and this one is refused.
+        let _store = crate::registry::locked()?;
+        let binding = first_launch_binding(&team, &member, session_id)?;
+        #[cfg(test)]
+        super::tests::first_launch_interleave();
+        return create_record_at(&path, session_id, cwd, &binding);
     }
     write_record_at(&own_session_path(&key), session_id, cwd, None)
+}
+
+/// The binding of a member record its TUI's first launch writes: a member
+/// registered before any session was minted for it (`hive fork`, a join
+/// of a pane) has a roster row with no session yet, and the session its
+/// `hive grok` launch names is the one that row will carry. A row naming
+/// another session, a row that is gone (a killed member whose stale
+/// launch still writes), or no team at all is nothing to mint for.
+fn first_launch_binding(team: &str, member: &str, session_id: &str) -> Result<RecordBinding> {
+    let entry = crate::registry::load(team)
+        .ok_or_else(|| anyhow::anyhow!("team '{team}' is not in the registry"))?;
+    let created_at = match entry.get("createdAt") {
+        Some(Value::String(text)) => text.parse::<f64>().ok(),
+        Some(Value::Number(number)) => number.as_f64(),
+        _ => None,
+    }
+    .map(crate::team::created_at_key)
+    .filter(|key| !key.is_empty())
+    .ok_or_else(|| anyhow::anyhow!("team '{team}' has no createdAt"))?;
+    let row = entry
+        .get("members")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .filter_map(Value::as_object)
+                .find(|row| row.get("name").and_then(Value::as_str) == Some(member))
+        })
+        .ok_or_else(|| anyhow::anyhow!("'{member}' is not on the roster of '{team}'"))?;
+    anyhow::ensure!(
+        row.get("cli").and_then(Value::as_str) == Some("grok"),
+        "'{team}.{member}' is not a grok member"
+    );
+    let recorded = row
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        recorded.is_empty() || recorded == session_id,
+        "'{team}.{member}' already names session {recorded}"
+    );
+    Ok(RecordBinding {
+        team: team.to_string(),
+        created_at,
+        member: member.to_string(),
+    })
 }
 
 /// Rewrite the record at *path* on one handle: the binding it holds stays
