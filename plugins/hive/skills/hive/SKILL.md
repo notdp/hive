@@ -33,7 +33,7 @@ create/join 返回 `handoff: "transferred"` 时,原终端自动进入团窗口,�
 
 桌面 Claude 的 human 另开终端看团,此时建团、spawn 后提供独立的 ```bash 命令块 `hive attach <team>`,块内只放命令。交接结果要求恢复,或 human 主动询问如何打开团窗口时,也可提供 attach 命令。
 
-只对桌面 Claude:改标题工具 `mcp__ccd_session_mgmt__set_session_title` 是延迟加载的,先用 `ToolSearch` 搜索 `select:mcp__ccd_session_mgmt__set_session_title` 加载 schema,再调用。session 入册后,在原标题**前面**插 `[<team>.<member>] `;orch 用 `[<team>.orch] `。原标题为空就只留徽章,退队或删团时摘掉。human 和 `hive ccd ls` 靠徽章识别成员。tmux pane 的 border 已带队籍,不用改标题。
+只对桌面 Claude:改标题工具 `mcp__ccd_session_mgmt__set_session_title` 是延迟加载的,先用 `ToolSearch` 搜索 `select:mcp__ccd_session_mgmt__set_session_title` 加载 schema,再调用。session 入册后,在原标题**前面**插 `[<team>.<member>] `;orch 用 `[<team>.orch] `。原标题为空就只留徽章。**摘徽章是退场的一部分,不是可选项**:被 `hive kill`、自己 `hive delete`、或以任何方式离开团的那一刻,用同一个工具把标题改回原样;删团的 orch 同样要摘。残留的徽章会让 human 和 `hive ccd ls` 把一个已经不在团里的 session 当成成员,消息发错人。human 和 `hive ccd ls` 靠徽章识别成员。tmux pane 的 border 已带队籍,不用改标题。
 
 ## 消息:`<HIVE>` 信封
 
@@ -86,7 +86,7 @@ push 模型:新消息由 runtime 注入并唤醒你。刚出生没任务、问�
 
 ### 被打回、打断、退场
 
-回报 ≠ 结束:打回和追问会带着你的上下文回来,接着答、接着改。被 `hive interrupt` 或任务发送者新指令打断:以最新指令为准,不辩护旧计划。验收通过后任务发送者 `hive kill` 你;只对 claude:tmux 外 session 退队时摘掉标题徽章。
+回报 ≠ 结束:打回和追问会带着你的上下文回来,接着答、接着改。被 `hive interrupt` 或任务发送者新指令打断:以最新指令为准,不辩护旧计划。验收通过后任务发送者 `hive kill` 你;只对 claude:tmux 外 session 退队时**立刻**摘掉标题徽章、恢复原标题(见入口一节,徽章残留 = 误导 human 和 `hive ccd ls`)。
 
 ## 要发起协作
 
