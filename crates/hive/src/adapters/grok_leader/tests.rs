@@ -3007,6 +3007,50 @@ fn test_pool_interrupt_key_none_when_client_raises() {
 }
 
 #[test]
+fn test_pool_two_connects_of_one_key_at_once_share_one_client() {
+    // two submissions reviving one cold member connect the key at once:
+    // one stdio client is spawned and both callers hold it
+    let mut bed = setup();
+    retained_member(&mut bed, "m-cedar.worker");
+    let _leader = bind_leader_socket(&bed.tmp.path().join("hive/m-cedar.worker.sock"));
+    let grok_pool = Arc::new(GrokClientPool::new());
+    let spawns: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let both_in = Arc::new(std::sync::Barrier::new(2));
+    let connectors: Vec<_> = (0..2)
+        .map(|_| {
+            let grok_pool = grok_pool.clone();
+            let spawns = spawns.clone();
+            let both_in = both_in.clone();
+            thread::spawn(move || {
+                // the spawn seam is per thread: each connector fakes its own
+                set_stdio_spawn(move |_| {
+                    *spawns.lock().unwrap() += 1;
+                    thread::sleep(Duration::from_millis(150));
+                    Ok(
+                        FakeProc::new(Some(responder(Some(on_prompt_queue_echo()), vec![])))
+                            as Arc<dyn LeaderProc>,
+                    )
+                });
+                both_in.wait();
+                grok_pool.client_for_key("m-cedar.worker")
+            })
+        })
+        .collect();
+    let clients: Vec<Arc<GrokStdioClient>> = connectors
+        .into_iter()
+        .map(|c| c.join().unwrap().expect("a connector got no client"))
+        .collect();
+    assert_eq!(
+        *spawns.lock().unwrap(),
+        1,
+        "both connectors spawned a client"
+    );
+    assert!(Arc::ptr_eq(&clients[0], &clients[1]));
+    assert_eq!(clients[0].generation(), clients[1].generation());
+    assert!(clients[0].is_alive());
+}
+
+#[test]
 fn test_pool_compact_key_unavailable_without_client() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(|_key| None));
