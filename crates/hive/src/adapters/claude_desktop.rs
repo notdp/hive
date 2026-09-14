@@ -109,9 +109,10 @@ fn scan_record(host_session_id: &str) -> Result<Option<DesktopRecord>, ()> {
         return Err(());
     }
     let root = sessions_root();
-    // the latest copy and its activity time; a copy that disagrees at the
-    // same time is a conflict, an older one a previous account's frozen view
-    let mut found: Option<(DesktopRecord, f64)> = None;
+    // every copy with its activity time: the latest is the conversation's,
+    // older ones a previous account's frozen view whatever they say, and
+    // only copies that disagree at the latest time conflict
+    let mut copies: Vec<(DesktopRecord, f64)> = Vec::new();
     // a directory that cannot be listed may hold a copy that disagrees:
     // unknown, never "absent"
     for account in list_dirs(&root).ok_or(())? {
@@ -129,15 +130,21 @@ fn scan_record(host_session_id: &str) -> Result<Option<DesktopRecord>, ()> {
                 .get("lastActivityAt")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0);
-            found = match found {
-                None => Some((record, at)),
-                Some((seen, seen_at)) if at > seen_at => Some((record, at)),
-                Some((seen, seen_at)) if at < seen_at || seen == record => Some((seen, seen_at)),
-                Some(_) => return Err(()),
-            };
+            copies.push((record, at));
         }
     }
-    Ok(found.map(|(record, _)| record))
+    let Some(latest) = copies.iter().map(|(_, at)| *at).reduce(f64::max) else {
+        return Ok(None);
+    };
+    let mut at_latest = copies
+        .into_iter()
+        .filter(|(_, at)| *at == latest)
+        .map(|(record, _)| record);
+    let record = at_latest.next().ok_or(())?;
+    if at_latest.any(|other| other != record) {
+        return Err(());
+    }
+    Ok(Some(record))
 }
 
 /// The subdirectories of *dir*; an absent *dir* is no directories, any
@@ -327,6 +334,29 @@ mod tests {
             desktop_record("local_x").unwrap().cli_session_id,
             "after-switch"
         );
+        // two older copies that disagree with each other are both history:
+        // the one latest copy still decides, wherever the listing puts it
+        for (accounts, latest) in [
+            (["a1", "a2", "a3"], "a3"),
+            (["b1", "b2", "b3"], "b1"),
+            (["c1", "c2", "c3"], "c2"),
+        ] {
+            let host = format!("local_{latest}");
+            for account in accounts {
+                let body = if account == latest {
+                    json!({"cliSessionId": "current", "lastActivityAt": 3000})
+                } else {
+                    json!({"cliSessionId": format!("old-{account}"), "lastActivityAt": 1000})
+                };
+                write_record(tmp.path(), account, "org", &host, body);
+            }
+            assert_eq!(
+                desktop_record(&host).map(|r| r.cli_session_id),
+                Some("current".to_string()),
+                "{host}"
+            );
+            assert_eq!(record_presence(&host), RecordPresence::Present);
+        }
     }
 
     #[cfg(unix)]
