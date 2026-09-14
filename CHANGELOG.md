@@ -4,6 +4,24 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.21.3
+
+### Features
+
+- Grok leaders reclaim natively: `--no-exit-on-disconnect` is gone, and a retained member is revived on `send` and on a workflow dispatch instead of being re-spawned (#231)
+
+### Fixes
+
+- A grok pane TUI's launch keeps the binding the mint gave it; record writes pin their target and update on one handle (#232)
+- A grok leader's liveness is its lock, never a connection; a workflow run raises the hived before it judges its member (#233)
+- A fork's grok member gets its bound record at its TUI's first launch; a leader is raised under a per-key raise lock (#234)
+- The latest account copy of a desktop record wins over a previous account's frozen one (#235)
+- Two connects of one grok key at once share one pooled client (#236)
+
+### Internal
+
+- The hive skill names the desktop title tool in full (`mcp__ccd_session_mgmt__set_session_title`, loaded via `ToolSearch select:`) and makes removing the `[team.member]` badge part of leaving a team (#237)
+
 ## 0.21.2
 
 ### Fixes
