@@ -206,6 +206,36 @@ fn write_record_at(
     Ok(())
 }
 
+/// Create the record at *path*, never over one already there.
+fn create_record_at(
+    path: &Path,
+    session_id: &str,
+    cwd: &str,
+    binding: &RecordBinding,
+) -> Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "a session record appeared at {} since: {error}",
+                path.display()
+            )
+        })?;
+    file.write_all(
+        record_json(session_id, cwd, Some(binding))
+            .to_string()
+            .as_bytes(),
+    )?;
+    Ok(())
+}
+
 fn record_json(session_id: &str, cwd: &str, binding: Option<&RecordBinding>) -> Value {
     let mut record = json!({"sessionId": session_id, "cwd": cwd});
     if let Some(binding) = binding {
@@ -273,8 +303,17 @@ pub fn write_pane_session(pane: &str, session_id: &str, cwd: &str) -> Result<()>
         if path.exists() {
             return update_record_keeping_binding(&path, session_id, cwd);
         }
+        // The roster read and the record's creation are one step under the
+        // registry's store lock, the lock every roster write takes: a kill
+        // of the member (`remove_member`) waits for it and then removes the
+        // record this launch made, as it would any member's. The creation
+        // never overwrites — a record that appeared since is another
+        // launch's, and this one is refused.
+        let _store = crate::registry::locked()?;
         let binding = first_launch_binding(&team, &member, session_id)?;
-        return write_record_at(&path, session_id, cwd, Some(&binding));
+        #[cfg(test)]
+        super::tests::first_launch_interleave();
+        return create_record_at(&path, session_id, cwd, &binding);
     }
     write_record_at(&own_session_path(&key), session_id, cwd, None)
 }

@@ -135,6 +135,22 @@ fn set_record_update_interleave(hook: impl FnOnce() + 'static) {
     RECORD_UPDATE_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
+thread_local! {
+    static FIRST_LAUNCH_INTERLEAVE: RefCell<Option<Box<dyn FnOnce()>>> = RefCell::new(None);
+}
+
+/// Runs once inside a first launch's record creation, after its roster
+/// read and before the create, the store lock held.
+pub(super) fn first_launch_interleave() {
+    if let Some(hook) = FIRST_LAUNCH_INTERLEAVE.with(|slot| slot.borrow_mut().take()) {
+        hook();
+    }
+}
+
+fn set_first_launch_interleave(hook: impl FnOnce() + 'static) {
+    FIRST_LAUNCH_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
 fn set_pane_write_interleave(hook: impl FnOnce() + 'static) {
     PANE_WRITE_INTERLEAVE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
@@ -2210,6 +2226,80 @@ fn test_write_pane_session_refuses_a_first_launch_the_roster_does_not_await() {
     let err = write_pane_session("%9", "sid-fork", "/w").unwrap_err();
     assert!(err.to_string().contains("not on the roster"), "{err}");
     assert!(!record.exists());
+}
+
+#[test]
+fn test_write_pane_session_first_launch_never_overwrites_a_record_minted_since() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    tag_cedar_worker();
+    record_cedar_worker_without_session("123");
+    // a mint of the same member lands between the roster read and the create
+    set_first_launch_interleave(|| {
+        write_session_key(
+            "m-cedar.worker",
+            "fresh-mint",
+            "/fresh",
+            Some(&binding("cedar", "123", "worker")),
+        )
+        .unwrap();
+    });
+    let err = write_pane_session("%9", "stale-fork", "/old").unwrap_err();
+    assert!(err.to_string().contains("appeared"), "{err}");
+    assert_eq!(
+        read_session_key("m-cedar.worker").unwrap(),
+        SessionRecord {
+            session_id: "fresh-mint".to_string(),
+            cwd: "/fresh".to_string(),
+            binding: Some(binding("cedar", "123", "worker")),
+        }
+    );
+}
+
+#[test]
+fn test_write_pane_session_first_launch_holds_the_store_lock_against_a_kill() {
+    let mut bed = setup();
+    bed.env.set("HIVE_HOME", bed.tmp.path().join("home"));
+    tag_cedar_worker();
+    record_cedar_worker_without_session("123");
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    // a kill of the member arrives while the launch holds the store lock:
+    // it waits, and removes the row only once the record is published
+    set_first_launch_interleave(move || {
+        let kill = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let removed = crate::registry::remove_member("cedar", "worker", "123");
+            done_tx.send(removed.is_ok()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            !kill.is_finished(),
+            "the kill did not wait for the store lock"
+        );
+        assert!(
+            crate::registry::load("cedar").and_then(|entry| entry
+                .get("members")
+                .and_then(Value::as_array)
+                .map(|rows| rows.len()))
+                == Some(1),
+            "the row went under the store lock"
+        );
+    });
+    write_pane_session("%9", "sid-fork", "/w").unwrap();
+    assert!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+    assert_eq!(
+        read_session_key("m-cedar.worker").unwrap().binding,
+        Some(binding("cedar", "123", "worker"))
+    );
+    let rows = crate::registry::load("cedar").and_then(|entry| {
+        entry
+            .get("members")
+            .and_then(Value::as_array)
+            .map(|rows| rows.len())
+    });
+    assert_eq!(rows, Some(0));
 }
 
 #[test]
