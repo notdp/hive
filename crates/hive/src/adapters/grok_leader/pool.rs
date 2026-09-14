@@ -198,6 +198,12 @@ type ClientOverride = Box<dyn Fn(&str) -> Option<Arc<dyn LeaderClient>> + Send>;
 
 pub struct GrokClientPool {
     pub(super) state: Mutex<PoolState>,
+    /// One gate per key around `client_for_key`'s get-or-connect: two
+    /// callers connecting one key at once — two submissions reviving one
+    /// cold member — would each spawn a stdio client and the second's
+    /// insert would close the first's, under its caller's feet. The second
+    /// waits at the gate and takes the client the first connected.
+    connects: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     #[cfg(test)]
     pub(super) client_override: Mutex<Option<ClientOverride>>,
 }
@@ -205,6 +211,7 @@ pub struct GrokClientPool {
 impl GrokClientPool {
     pub fn new() -> GrokClientPool {
         GrokClientPool {
+            connects: Mutex::new(HashMap::new()),
             state: Mutex::new(PoolState::default()),
             #[cfg(test)]
             client_override: Mutex::new(None),
@@ -344,6 +351,8 @@ impl GrokClientPool {
     }
 
     pub(crate) fn client_for_key(&self, key: &str) -> Option<Arc<GrokStdioClient>> {
+        let gate = self.connect_gate(key);
+        let _connecting = gate.lock().unwrap_or_else(|e| e.into_inner());
         // A relaunched grok on the same key mints a new session id, and a
         // member rebound to another launch resolves to another socket, so
         // the record and the key's canonical socket — not just the client's
@@ -393,6 +402,15 @@ impl GrokClientPool {
             .clients
             .insert(key.to_string(), client.clone());
         Some(client)
+    }
+
+    fn connect_gate(&self, key: &str) -> Arc<Mutex<()>> {
+        self.connects
+            .lock()
+            .unwrap()
+            .entry(key.to_string())
+            .or_default()
+            .clone()
     }
 
     /// The client a confirmed submission goes out on: the connection the
