@@ -33,7 +33,7 @@ create/join 返回 `handoff: "transferred"` 时,原终端自动进入团窗口,�
 
 桌面 Claude 的 human 另开终端看团,此时建团、spawn 后提供独立的 ```bash 命令块 `hive attach <team>`,块内只放命令。交接结果要求恢复,或 human 主动询问如何打开团窗口时,也可提供 attach 命令。
 
-只对桌面 Claude:session 入册后,用宿主的改标题能力在原标题**前面**插 `[<team>.<member>] `;orch 用 `[<team>.orch] `。原标题为空就只留徽章,退队或删团时摘掉。human 和 `hive ccd ls` 靠徽章识别成员。tmux pane 的 border 已带队籍,不用改标题。
+只对桌面 Claude:改标题工具 `mcp__ccd_session_mgmt__set_session_title` 是延迟加载的,先用 `ToolSearch` 搜索 `select:mcp__ccd_session_mgmt__set_session_title` 加载 schema,再调用。session 入册后,在原标题**前面**插 `[<team>.<member>] `;orch 用 `[<team>.orch] `。原标题为空就只留徽章,退队或删团时摘掉。human 和 `hive ccd ls` 靠徽章识别成员。tmux pane 的 border 已带队籍,不用改标题。
 
 ## 消息:`<HIVE>` 信封
 
