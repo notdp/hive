@@ -31,7 +31,7 @@ hive attach <team> / hive kill <member> [-t <team>] / hive delete <team> [--down
 
 create/join 返回 `handoff: "transferred"` 时,原终端自动进入团窗口,按 `nextStep` 继续当前任务,省略 `hive attach` 提示。已在 tmux 团窗口中时也直接继续。
 
-桌面 Claude 的 human 另开终端看团,此时建团、spawn 后提供独立的 ```bash 命令块 `hive attach <team>`,块内只放命令。交接结果要求恢复,或 human 主动询问如何打开团窗口时,也可提供 attach 命令。
+桌面 Claude 建团(`hive create`)成功后,用 `mcp__terminal__run_in_terminal`(延迟加载,先 `ToolSearch` 搜 `select:mcp__terminal__run_in_terminal`)在 Terminal 面板开一个 tab 跑 `hive attach <team>`,human 就能看团。只在建团这一次跑:spawn、派发、kill 之后团窗口已经开着,再跑只会多开 tab。交接结果要求恢复,或 human 主动询问如何打开团窗口时,再跑一次或给 ```bash 命令块。
 
 只对桌面 Claude:改标题工具 `mcp__ccd_session_mgmt__set_session_title` 是延迟加载的,先用 `ToolSearch` 搜索 `select:mcp__ccd_session_mgmt__set_session_title` 加载 schema,再调用。session 入册后,在原标题**前面**插 `[<team>.<member>] `;orch 用 `[<team>.orch] `。原标题为空就只留徽章。退队或删团时,用同一个工具摘掉徽章,orch 也一样。留着徽章,human 和 `hive ccd ls` 就还会把你当作团成员。tmux pane 的 border 已带队籍,不用改标题。
 
