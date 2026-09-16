@@ -572,6 +572,17 @@ pub(super) fn hooked_cas_pane_thread_socket(pane: &str) -> Option<String> {
     crate::adapters::codex_app_server::read_pane_thread(pane).and_then(|record| record.tmux_socket)
 }
 
+/// Seconds since the pane's thread record was written; None for no record.
+pub(super) fn hooked_cas_pane_thread_age(pane: &str) -> Option<f64> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cas_pane_thread_age.clone()).flatten() {
+        return f(pane);
+    }
+    #[cfg(test)]
+    codex_home_redirected();
+    crate::adapters::codex_app_server::pane_thread_age_seconds(pane)
+}
+
 pub(super) fn hooked_cas_unsubscribe_thread(thread_id: &str) {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_unsubscribe_thread.clone()).flatten() {

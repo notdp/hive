@@ -121,6 +121,19 @@ pub fn thread_id_for_pane(pane: &str) -> Option<String> {
     read_pane_thread(pane).map(|record| record.thread_id)
 }
 
+/// Seconds since the pane's thread record was last written — by the spawn
+/// at the mint, then by the managed launcher at its exec. None when there
+/// is no record or its mtime cannot be read.
+pub fn pane_thread_age_seconds(pane: &str) -> Option<f64> {
+    let modified = fs::metadata(pane_thread_path(pane)).ok()?.modified().ok()?;
+    Some(
+        std::time::SystemTime::now()
+            .duration_since(modified)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0),
+    )
+}
+
 /// Inverse of [`pane_thread_path`]: `hive-pane-19.thread` -> `%19`.
 fn pane_from_record_name(name: &str) -> Option<String> {
     let slug = name.strip_prefix("hive-pane-")?.strip_suffix(".thread")?;

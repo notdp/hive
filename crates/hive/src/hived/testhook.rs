@@ -122,6 +122,7 @@ pub struct Hook {
     pub cas_thread_id_for_pane: Option<S1<Option<String>>>,
     pub cas_list_recorded_panes: Option<F0<Vec<String>>>,
     pub cas_pane_thread_socket: Option<S1<Option<String>>>,
+    pub cas_pane_thread_age: Option<S1<Option<f64>>>,
     pub cas_clear_pane_thread: Option<S1<()>>,
     pub cas_unsubscribe_thread: Option<S1<()>>,
     pub cas_drop_client: Option<F0<()>>,

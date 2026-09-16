@@ -220,6 +220,10 @@ pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
         if hooked_detect_cli_process_for_pane(&agent.pane_id).is_some() {
             continue; // CLI (codex or another agent) is on the TTY — leave it
         }
+        match hooked_cas_pane_thread_age(&agent.pane_id) {
+            Some(age) if age >= CODEX_REATTACH_NEWBORN_SECONDS => {}
+            _ => continue, // launch in flight (or an unreadable record): never type into it
+        }
         let last = codex_reattach_at()
             .lock()
             .unwrap_or_else(|e| e.into_inner())

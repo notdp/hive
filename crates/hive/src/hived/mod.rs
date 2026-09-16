@@ -103,6 +103,13 @@ const GROK_REAP_GRACE_SECONDS: f64 = 120.0;
 // One send_keys attempt per pane per cooldown window, so a slow-starting
 // codex is not typed at twice while the process check cannot see it yet.
 const CODEX_REATTACH_COOLDOWN_SECONDS: f64 = 60.0;
+// A thread record younger than this is a launch in flight: the spawn writes
+// it at the mint and types the launch into a pane whose shell may still be
+// initializing, so for a while the pane reads as "a shell, no codex" while
+// the launch already sits in its input queue. A reattach typed then lands in
+// the composer of the codex that launch starts. The managed launcher rewrites
+// the record at its exec, so the clock also restarts on every reattach.
+const CODEX_REATTACH_NEWBORN_SECONDS: f64 = 120.0;
 
 // waitingFor values that do not gate a send: a /status-style dialog open in
 // an attached viewer parks the status on "waiting", but the inbox still
