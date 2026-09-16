@@ -2066,7 +2066,7 @@ struct SuperState {
     panes: Vec<(String, String, String)>, // pane_id, agent, cli
     recorded: Vec<String>,
     record_sockets: HashMap<String, String>, // pane -> tmuxSocket; absent = names no server
-    record_ages: HashMap<String, f64>,       // pane -> record age; absent = long ago
+    record_ages: HashMap<String, Option<f64>>, // pane -> age; absent = old, None = unreadable
     own_socket: Option<String>,
     threads: HashMap<String, String>,
     cwds: HashMap<String, String>,
@@ -2151,13 +2151,11 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
             s_sockets.record_sockets.get(pane).cloned()
         })),
         cas_pane_thread_age: Some(Arc::new(move |pane| {
-            Some(
-                s_ages
-                    .record_ages
-                    .get(pane)
-                    .copied()
-                    .unwrap_or(f64::INFINITY),
-            )
+            s_ages
+                .record_ages
+                .get(pane)
+                .copied()
+                .unwrap_or(Some(f64::INFINITY))
         })),
         tmux_socket_path: Some(Arc::new(move || s_own.own_socket.clone())),
         cas_clear_pane_thread: Some(Arc::new(move |pane| {
@@ -2378,7 +2376,19 @@ fn test_supervisor_leaves_a_newborn_record_alone() {
     // launch is about to start.
     let mut state = super_state();
     state.cli_process = HashMap::new();
-    state.record_ages.insert("%1".into(), 3.0);
+    state.record_ages.insert("%1".into(), Some(119.999));
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    assert!(!calls.iter().any(|c| c.starts_with("send ")), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("codex.member.reattach")));
+}
+
+#[test]
+fn test_supervisor_skips_reattach_when_record_age_is_unknown() {
+    let mut state = super_state();
+    state.cli_process = HashMap::new();
+    state.record_ages.insert("%1".into(), None);
     let (_guard, calls) = super_env(state);
     codex_supervisor_tick("/tmp/ws", "t");
     let calls = calls.lock().unwrap();
@@ -2390,7 +2400,7 @@ fn test_supervisor_leaves_a_newborn_record_alone() {
 fn test_supervisor_reattaches_once_the_record_is_old_enough() {
     let mut state = super_state();
     state.cli_process = HashMap::new();
-    state.record_ages.insert("%1".into(), 121.0);
+    state.record_ages.insert("%1".into(), Some(120.0));
     let (_guard, calls) = super_env(state);
     codex_supervisor_tick("/tmp/ws", "t");
     assert!(calls

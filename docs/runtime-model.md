@@ -1274,7 +1274,15 @@ reverse-engineering it from the transcript.
   pane or team lifecycle: a dead daemon takes every attached TUI down with
   it within seconds. The hived supervises instead, respawning while live
   codex members exist and typing one guarded resume into a member's
-  retained shell.
+  retained shell. A reattach needs no CLI process on the pane TTY, a shell
+  as the current command, and a readable pane-thread record at least 120
+  seconds old. Spawn writes that record before queuing the launch; the
+  managed launcher writes it again before exec. This grace period gives a
+  slow-starting pane shell time to consume the queued launch without a
+  second command landing in the TUI's composer. It is a bounded delay,
+  not a readiness signal: startup beyond the grace period can still race,
+  and an early TUI exit waits out the remaining grace before recovery.
+  Each reattach attempt also has a 60-second in-memory cooldown.
 - **Auth is loaded once and only reloaded for the same account.** For
   managed ChatGPT auth, codex's auth manager reloads `auth.json` only when
   the on-disk account id equals the cached one
