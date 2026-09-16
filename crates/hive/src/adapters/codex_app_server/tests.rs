@@ -283,6 +283,29 @@ fn test_pane_thread_record_roundtrip() {
 }
 
 #[test]
+fn test_pane_thread_age_tracks_mtime_and_launcher_rewrite() {
+    let mut guard = EnvGuard::new();
+    let tmp = tempfile::tempdir().unwrap();
+    guard.set("CODEX_HOME", tmp.path());
+    assert_eq!(pane_thread_age_seconds("%19"), None);
+    write_pane_thread("%19", "tid-1", "/work", None).unwrap();
+    let file = fs::File::options()
+        .write(true)
+        .open(pane_thread_path("%19"))
+        .unwrap();
+    let now = std::time::SystemTime::now();
+    let offset = std::time::Duration::from_secs(3600);
+    file.set_times(fs::FileTimes::new().set_modified(now - offset))
+        .unwrap();
+    assert!(pane_thread_age_seconds("%19").unwrap() >= 3600.0);
+    file.set_times(fs::FileTimes::new().set_modified(now + offset))
+        .unwrap();
+    assert_eq!(pane_thread_age_seconds("%19"), Some(0.0));
+    write_pane_thread("%19", "tid-1", "/work", None).unwrap();
+    assert!(pane_thread_age_seconds("%19").unwrap() < 120.0);
+}
+
+#[test]
 fn test_pane_thread_record_without_socket_reads_back_none() {
     let mut guard = EnvGuard::new();
     let tmp = tempfile::tempdir().unwrap();

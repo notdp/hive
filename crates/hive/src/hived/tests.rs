@@ -2066,6 +2066,7 @@ struct SuperState {
     panes: Vec<(String, String, String)>, // pane_id, agent, cli
     recorded: Vec<String>,
     record_sockets: HashMap<String, String>, // pane -> tmuxSocket; absent = names no server
+    record_ages: HashMap<String, Option<f64>>, // pane -> age; absent = old, None = unreadable
     own_socket: Option<String>,
     threads: HashMap<String, String>,
     cwds: HashMap<String, String>,
@@ -2083,6 +2084,7 @@ fn super_state() -> SuperState {
         panes: vec![("%1".to_string(), "val".to_string(), "codex".to_string())],
         recorded: vec!["%1".to_string()],
         record_sockets: HashMap::new(),
+        record_ages: HashMap::new(),
         own_socket: Some(
             crate::tmux::default_socket_path()
                 .to_string_lossy()
@@ -2133,6 +2135,7 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
     let emit_sink = Arc::clone(&calls);
     let s_recorded = Arc::clone(&state);
     let s_sockets = Arc::clone(&state);
+    let s_ages = Arc::clone(&state);
     let s_own = Arc::clone(&state);
     let s_threads = Arc::clone(&state);
     let s_cwds = Arc::clone(&state);
@@ -2146,6 +2149,13 @@ fn super_env(state: SuperState) -> (testhook::Guard, Arc<Mutex<Vec<String>>>) {
         cas_list_recorded_panes: Some(Arc::new(move || s_recorded.recorded.clone())),
         cas_pane_thread_socket: Some(Arc::new(move |pane| {
             s_sockets.record_sockets.get(pane).cloned()
+        })),
+        cas_pane_thread_age: Some(Arc::new(move |pane| {
+            s_ages
+                .record_ages
+                .get(pane)
+                .copied()
+                .unwrap_or(Some(f64::INFINITY))
         })),
         tmux_socket_path: Some(Arc::new(move || s_own.own_socket.clone())),
         cas_clear_pane_thread: Some(Arc::new(move |pane| {
@@ -2356,6 +2366,47 @@ fn test_supervisor_reattaches_retained_shell() {
         &"emit codex.member.reattach {\"pane\":\"%1\",\"agent\":\"val\",\"thread\":\"tid-1\"}"
             .to_string()
     ));
+}
+
+#[test]
+fn test_supervisor_leaves_a_newborn_record_alone() {
+    // The spawn wrote the record and typed the launch, but the pane's shell
+    // is still initializing: a shell with no codex on it, for a while. A
+    // reattach typed now would land in the composer of the codex that
+    // launch is about to start.
+    let mut state = super_state();
+    state.cli_process = HashMap::new();
+    state.record_ages.insert("%1".into(), Some(119.999));
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    assert!(!calls.iter().any(|c| c.starts_with("send ")), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("codex.member.reattach")));
+}
+
+#[test]
+fn test_supervisor_skips_reattach_when_record_age_is_unknown() {
+    let mut state = super_state();
+    state.cli_process = HashMap::new();
+    state.record_ages.insert("%1".into(), None);
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    let calls = calls.lock().unwrap();
+    assert!(!calls.iter().any(|c| c.starts_with("send ")), "{calls:?}");
+    assert!(!calls.iter().any(|c| c.contains("codex.member.reattach")));
+}
+
+#[test]
+fn test_supervisor_reattaches_once_the_record_is_old_enough() {
+    let mut state = super_state();
+    state.cli_process = HashMap::new();
+    state.record_ages.insert("%1".into(), Some(120.0));
+    let (_guard, calls) = super_env(state);
+    codex_supervisor_tick("/tmp/ws", "t");
+    assert!(calls
+        .lock()
+        .unwrap()
+        .contains(&"send %1 hive codex resume 'tid-1'".to_string()));
 }
 
 #[test]
