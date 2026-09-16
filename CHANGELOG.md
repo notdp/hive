@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.21.4
+
+### Fixes
+
+- A codex reattach waits out the spawn's launch window: a pane-thread record younger than 120 seconds is never typed into, so the hived's guarded resume no longer lands in the composer of a codex whose launch is still queued behind an initializing shell (#238)
+
 ## 0.21.3
 
 ### Features
