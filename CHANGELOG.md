@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.21.5
+
+### Internal
+
+- Skill: a desktop Claude orch opens the team window itself with `hive attach` in a Terminal tab, once, right after `hive create`; no more Run-button command block after spawn (#239)
+
 ## 0.21.4
 
 ### Fixes
