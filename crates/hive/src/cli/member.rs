@@ -372,6 +372,21 @@ fn task_dispatch_workspace(t: &Team, task_artifact: Option<&str>) -> Result<Opti
     }
 }
 
+/// The sender a `--task` dispatch signs as, resolved before any spawn side
+/// effect for the same reason as the workspace: a caller with no member
+/// identity (a bare shell outside any bound pane) must be refused while
+/// the roster is still clean, not after the member is registered and its
+/// engine minted with no task to run. A spawn without `--task` signs
+/// nothing and needs no sender.
+fn task_dispatch_sender(task_artifact: Option<&str>) -> Result<Option<String>> {
+    match task_artifact {
+        Some(_) => identity::resolve_sender(None)
+            .map(Some)
+            .ok_or_else(|| anyhow!("{}", super::util::NO_IDENTITY_MESSAGE)),
+        None => Ok(None),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn(
     agent_name: &str,
@@ -394,6 +409,7 @@ pub(crate) fn spawn(
     // workspace must fail while the roster is still clean, not after the
     // member is registered and its engine minted.
     let task_workspace = ok_or_fail(task_dispatch_workspace(&t, task_artifact));
+    let task_sender = ok_or_fail(task_dispatch_sender(task_artifact));
     if t.tmux_window.is_empty() {
         // The display is gone (server restart, window closed by hand):
         // rebuild it before splitting.
@@ -462,7 +478,7 @@ pub(crate) fn spawn(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let sender = resolve_sender(None);
+    let sender = task_sender.expect("--task resolved its sender before spawning");
     let dispatch = crate::send::request_send_payload(
         &workspace,
         &t,
@@ -864,6 +880,29 @@ mod tests {
         assert_eq!(
             task_dispatch_workspace(&with_workspace, Some("/tmp/task.md")).unwrap(),
             Some("/tmp/ws-hn".to_string())
+        );
+    }
+
+    #[test]
+    fn test_task_dispatch_sender_fails_before_the_spawn_when_no_identity_resolves() {
+        let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
+        let tmp = tempfile::TempDir::new().unwrap();
+        env.set("HIVE_HOME", tmp.path().join(".hive"));
+        env.remove("TMUX");
+
+        // no --task: nothing is signed, nothing is resolved
+        assert_eq!(task_dispatch_sender(None).unwrap(), None);
+
+        // a bare shell outside tmux with no engine marker is nobody
+        let err = task_dispatch_sender(Some("/tmp/task.md"))
+            .expect_err("a task dispatch from no identity must refuse");
+        assert!(err.to_string().contains("cannot resolve own member identity"), "{err}");
+
+        // a human's plain tmux shell signs as orch
+        env.set("TMUX", "/tmp/tmux-0/default,1,0");
+        assert_eq!(
+            task_dispatch_sender(Some("/tmp/task.md")).unwrap(),
+            Some("orch".to_string())
         );
     }
 }
