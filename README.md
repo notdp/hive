@@ -38,12 +38,12 @@ After `cargo binstall` or `cargo install`, register the plugin separately. The p
 hive plugin setup
 ```
 
-Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin ships no hooks (hooks would sit behind codex's hook-review dialog) — hive's own codex launch path re-adds the plugin when the binary version changes, before the engine starts. The plugin payload is local; registration updates the agent CLIs' plugin settings.
+Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin ships no classic hooks (they would sit behind codex's hook-review dialog) — hive's own codex launch path re-adds the plugin when the binary version changes, before the engine starts. The claude manifest names a function-hooks module (`mod/register.ts`): every claude engine hive spawns starts with Claude Code's function hooks enabled and reports its own turn boundaries to the team's hived; a desktop Claude session that joins a team reports too once `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` is in its `~/.claude/settings.json` `env` (Claude Code still gates mods behind that switch). The plugin payload is local; registration updates the agent CLIs' plugin settings.
 
 Requires (hive is written against these exact versions — the versions on the machine it is developed on — and carries no compatibility code for older ones; upgrade the engine, then hive):
 
 - `tmux` 3.7c
-- `claude` 2.1.263 (Claude Code)
+- `claude` 2.1.274 (Claude Code; the function-hooks contract — `session.start`, `turn.start`, `turn.complete` — was verified on this build's CLI, `-p` and `--bg` alike, and on the 2.1.271 CLI the desktop app bundles)
 - `codex-cli` 0.153.4
 - `grok` 1.0.30
 

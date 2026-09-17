@@ -883,7 +883,9 @@ Every field comes from the CLI's own runtime, not from screen scraping or
 transcript-tail heuristics. Screen output cannot distinguish a state change
 from a redraw.
 
-**`busy`** — is the engine working. The tmux control-mode output monitor
+**`busy`** — is the engine working. For a claude member the engine's own
+hook report stands first while it is fresh (the previous section), then the
+session registry's status. The tmux control-mode output monitor
 survives only as the fallback for panes with no native state (terminal panes,
 unmanaged CLIs) and as the idle-notify target chooser. That fallback is gated
 on the transcript file's mtime advancing in the same window, which is what
@@ -971,6 +973,12 @@ Two spawn-time requirements, neither visible at the call site:
   `COLORTERM=truecolor`, and inherited `NO_COLOR` is removed.
 - Path-valued spawn flags must be absolute: they persist verbatim as the job's
   respawn flags.
+- Every spawn carries `--settings '{"env":{"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS":"1"}}'`
+  (`claude_bg::FUNCTION_HOOKS_SETTINGS`), inline so it survives as a respawn
+  flag: it switches on Claude Code's function hooks, which is what loads the
+  hive plugin's hooks module and gives the engine its report lane
+  (next section). A wake re-uses the recorded flags, so a job spawned
+  before this flag existed reports nothing until it is respawned.
 
 The pane sits in an attach watch loop because `claude attach` exits 0 both on
 user detach and when an engine respawn kicks the viewer; the loop cannot tell
@@ -990,6 +998,62 @@ pane-keyed probe alone would report the member dead; the roster sessionId is
 the engine identity, and while it names a live session that session's registry
 status is the member's `cliAlive`, `busy` and `inputState`. `alive` stays the
 pane's own fact.
+
+### The engine's own turn reports
+
+A claude engine can say where its turns begin and end: Claude Code's
+function hooks (the "Claude Mods" primitive, anthropics/claude-code#91870,
+gated by `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` on 2.1.274) run the hive
+plugin's hooks module, `plugins/hive/mod/register.ts`, inside the engine,
+and it posts `session.start`, `turn.start` and `turn.complete` over
+`$.http.fetch` to a loopback port the team's hived listens on
+(`hived/hooks.rs`). That is the same kind of signal as codex's
+`turn/completed` and grok's prompt response; before it, a claude member's
+busy was read off the session registry's observed `status` alone.
+
+How the module finds the hived: the roster row naming its own session
+(`$.session.id()`; a bg member's row carries the jobId, the id's first
+hex group) names the team and its workspace, and
+`<workspace>/run/hooks-endpoint.json` — mode 0600, written when the
+listener is up, removed when that hived generation leaves — names the
+port, a bearer token minted per generation, the team instance
+(`teamCreatedAt`) and the generation. The module decides no membership: a
+session no roster names posts nothing, and a refused post (wrong token,
+another instance, a session that is not a claude row of that team) drops
+the cached endpoint and looks it up again once. A hived that cannot bind
+the port records `hived.hooks_bind_failed` and serves without the lane.
+
+What the report decides, and what it does not:
+
+- `busy` for the member: while the last report is fresh
+  (`HOOK_FRESH_SECONDS`, ten minutes) the engine is busy exactly when a
+  `turn.start` has no matching `turn.complete`; `_busySource: "hook"` and
+  `_hookEvent` say so on the runtime row. A subagent's turn (`agentId`
+  set) is acknowledged and not counted. Past the freshness window the
+  registry status decides again, because Claude Code skips a hook that
+  throws, overruns or answers the wrong shape and carries on — a lost
+  `turn.complete` must not pin a member busy for good.
+- The report's own trail: `claude.hook` in `notify.jsonl` per accepted
+  event (`member`, `hook`, `turnId`, `reason`), `claude.hook_refused` per
+  refusal (`status`, `error`), `hived.hooks_listen` / `hived.hooks_bind_failed`
+  per generation.
+- Nothing else. `inputState` stays the registry's; identity stays the
+  roster's and the succession planner's; a workflow node result is still
+  read off codex and grok engines only. The report is an observation the
+  hived layers above the registry status, not a replacement for it.
+
+Two timing facts, both observed on 2.1.274. Claude Code boots a bg job's
+engine ahead of its claim (a `bg-spare`), so the plugin record in force at
+that boot is the one the member runs with — a hive upgrade reaches members
+spawned after the next session start refreshed the record, not the very
+next spawn. And the spare's `session.start` fires before the roster row
+exists; the module looks its team up again at every event, so the first
+report that lands is typically the task turn's `turn.complete`, and the
+member reads as before until then.
+
+The desktop's own session is not spawned by hive, so its switch is the
+human's: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in `~/.claude/settings.json`
+under `env`. A desktop member without it reads as before.
 
 ### What the viewer is showing
 

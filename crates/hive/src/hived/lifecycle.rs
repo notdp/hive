@@ -751,6 +751,27 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             return;
         }
     };
+    // The claude hooks endpoint beside the socket: the engine's own turn
+    // reports. Optional — a bind failure costs the hook observation, not
+    // the desk, and the registry status keeps deciding busy.
+    match open_endpoint(workspace, team, &instance.created, &hived_started_at) {
+        Ok(endpoint) => hooked_notify_debug_emit(
+            workspace,
+            "hived.hooks_listen",
+            &[
+                ("team", Value::from(team)),
+                ("port", Value::from(endpoint.port)),
+            ],
+        ),
+        Err(err) => hooked_notify_debug_emit(
+            workspace,
+            "hived.hooks_bind_failed",
+            &[
+                ("team", Value::from(team)),
+                ("error", Value::from(err.to_string())),
+            ],
+        ),
+    }
     hooked_write_hived_owner(workspace, getpid(), &hived_started_at, &owner_token);
     // Ready: the listener is bound, the accept worker is up and the owner
     // file names this generation. Only now does the retired desk's marker
@@ -983,6 +1004,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     };
     close_admission();
     server.close();
+    close_endpoint();
     if !SHUTDOWN.load(Ordering::SeqCst) && Path::new(workspace).is_dir() {
         interrupt_operations(workspace, retirement_reason);
     }

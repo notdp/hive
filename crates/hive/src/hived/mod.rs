@@ -19,6 +19,7 @@ use std::time::Instant;
 
 mod busy;
 mod client;
+mod hooks;
 mod idle_notify;
 mod lifecycle;
 mod operations;
@@ -42,6 +43,7 @@ mod tests;
 
 pub(crate) use busy::*;
 pub use client::*;
+pub(crate) use hooks::*;
 pub use idle_notify::*;
 pub use lifecycle::*;
 use operations::*;

@@ -361,7 +361,16 @@ fn test_spawn_job_parses_the_backgrounded_announcement() {
     let argv = fs::read_to_string(out.join("argv")).unwrap();
     assert_eq!(
         argv.lines().collect::<Vec<_>>(),
-        vec!["--bg", "--name", "t.w1", "--model", "opus", "/hive"]
+        vec![
+            "--bg",
+            "--name",
+            "t.w1",
+            "--settings",
+            FUNCTION_HOOKS_SETTINGS,
+            "--model",
+            "opus",
+            "/hive"
+        ]
     );
     let cwd = fs::read_to_string(out.join("cwd")).unwrap();
     assert_eq!(

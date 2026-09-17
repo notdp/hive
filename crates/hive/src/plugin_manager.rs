@@ -56,6 +56,16 @@ const PAYLOAD: &[(&str, &str, bool)] = &[
         include_str!("../../../plugins/hive/agents/hive-node.md"),
         false,
     ),
+    (
+        "mod/hooks.json",
+        include_str!("../../../plugins/hive/mod/hooks.json"),
+        false,
+    ),
+    (
+        "mod/register.ts",
+        include_str!("../../../plugins/hive/mod/register.ts"),
+        false,
+    ),
 ];
 
 /// Relative payload location inside the marketplace tree: the codex
@@ -172,11 +182,15 @@ mod tests {
         .unwrap();
         assert_eq!(manifest["version"], json!(env!("CARGO_PKG_VERSION")));
 
-        // the plugin ships no hooks at all: codex gates plugin hooks behind a
-        // review dialog, and the claude side needs none — sync is the command
-        // source, presence hints died with the last hook
+        // no classic hooks: codex discovers `hooks/hooks.json` and gates it
+        // behind a review dialog, and the claude side needs none — sync is
+        // the command source. The claude hooks module lives under `mod/`,
+        // named by the claude manifest alone, where codex never looks.
         assert!(!payload.join("hooks").exists());
         assert!(!payload.join("scripts").exists());
+        assert!(payload.join("mod/hooks.json").is_file());
+        assert!(payload.join("mod/register.ts").is_file());
+        assert_eq!(manifest["hooks"], json!("./mod/hooks.json"));
 
         // heal-on-drift: a tampered file is rewritten on the next call
         let skill = payload.join("skills/hive/SKILL.md");

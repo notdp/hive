@@ -132,13 +132,24 @@ pub(crate) fn transcript_progressed_recently_impl(
 /// A bg member pane answers from its job's engine entry; an interactive
 /// claude on the pane tty answers from its own registry entry (real TUI
 /// sessions report ``status``; headless/desktop ones do not and stay None).
+///
+/// The engine's own hook report (`hooks.rs`) stands above the registry
+/// status while it is fresh: the registry's `status` vocabulary is
+/// observed, the hook's turn boundary is declared.
 pub(crate) fn claude_registry_busy(pane_id: &str) -> Option<bool> {
     if let Some(job_id) = hooked_cb_job_id_for_pane(pane_id) {
         let engine = hooked_cb_engine_session_for_job(&job_id)?;
+        if let Some(busy) = hook_busy(&engine.session_id) {
+            return Some(busy);
+        }
         return Some(engine.status == "busy");
     }
-    let reported = hooked_cs_session_status(hooked_claude_pid_for_pane(pane_id))?;
-    Some(reported.0 == "busy")
+    let pid = hooked_claude_pid_for_pane(pane_id);
+    let reported = hooked_cs_session_status(pid)?;
+    let hooked = pid
+        .and_then(|pid| hooked_cs_list_sessions().into_iter().find(|s| s.pid == pid))
+        .and_then(|s| hook_busy(&s.session_id));
+    Some(hooked.unwrap_or(reported.0 == "busy"))
 }
 
 /// Busy flag from the pane's native runtime source (codex shared
