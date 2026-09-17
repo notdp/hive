@@ -970,8 +970,8 @@ fn test_bg_runtime_overlays_a_fresh_hook_report_and_names_its_source() {
 
     let rt = claude_bg_runtime("%1").unwrap();
     assert_eq!(rt["busy"], Value::Bool(true));
-    assert_eq!(rt["_busySource"], Value::from("hook"));
-    assert_eq!(rt["_hookEvent"], Value::from("turn.start"));
+    assert_eq!(rt["busySource"], Value::from("hook"));
+    assert_eq!(rt["hookEvent"], Value::from("turn.start"));
     assert_eq!(
         rt["inputState"],
         Value::from("ready"),
@@ -6319,6 +6319,32 @@ fn test_doctor_payload_exposes_cli_alive() {
     let diag = doctor_payload("/tmp/ws", "t", "v", false, None).unwrap();
     assert_eq!(diag["alive"], Value::Bool(true));
     assert_eq!(diag["cliAlive"], Value::Bool(false));
+}
+
+#[test]
+fn test_doctor_payload_carries_the_hook_busy_source() {
+    let hook = Hook {
+        team_load: Some(Arc::new(|_name| {
+            Ok(fake_team("t", vec![fake_agent("v", "%1", "claude")]))
+        })),
+        agent_is_alive: Some(Arc::new(|_a| true)),
+        member_runtime_payload: Some(Arc::new(|_p, _r| {
+            json_obj(&[
+                ("alive", Value::Bool(true)),
+                ("cliAlive", Value::Bool(true)),
+                ("busy", Value::Bool(true)),
+                ("inputState", Value::from("ready")),
+                ("busySource", Value::from("hook")),
+                ("hookEvent", Value::from("turn.start")),
+            ])
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+    let diag = doctor_payload("/tmp/ws", "t", "v", false, None).unwrap();
+    assert_eq!(diag["busy"], Value::Bool(true));
+    assert_eq!(diag["busySource"], Value::from("hook"));
+    assert_eq!(diag["hookEvent"], Value::from("turn.start"));
 }
 
 /// A live interactive Claude session as the sessions registry lists it.

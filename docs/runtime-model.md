@@ -1045,8 +1045,10 @@ What the report decides, and what it does not:
 
 - `busy` for the member: while the last report is fresh
   (`HOOK_FRESH_SECONDS`, ten minutes) the engine is busy exactly when a
-  `turn.start` has no matching `turn.complete`; `_busySource: "hook"` and
-  `_hookEvent` say so on the runtime row. A subagent's turn (`agentId`
+  `turn.start` has no matching `turn.complete`; `busySource: "hook"` and
+  `hookEvent` (the last event taken) say so on the runtime row, and
+  `hive team` and `hive doctor` carry both. Without a fresh report neither
+  key is present and `busy` is the registry's. A subagent's turn (`agentId`
   set) is acknowledged and not counted. Past the freshness window the
   registry status decides again, because Claude Code skips a hook that
   throws, overruns or answers the wrong shape and carries on — a lost

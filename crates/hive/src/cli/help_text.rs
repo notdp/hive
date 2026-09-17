@@ -817,7 +817,9 @@ Options:
   `tmuxSession` / `tmuxWindow`, `runtimeWorkspace`, and `cwd`.
 
   Each member row carries the runtime fields `busy` and `inputState` — see
-  docs/runtime-model.md for semantics. `self` is a string pointer: look
+  docs/runtime-model.md for semantics. A claude member whose engine has
+  reported its turn lately also carries `busySource: "hook"` and
+  `hookEvent`: that `busy` is the engine's own word, not the registry's. `self` is a string pointer: look
   yourself up in `members[]` for your own state.
 
   Those fields come from the team's hived, so this verb starts one where

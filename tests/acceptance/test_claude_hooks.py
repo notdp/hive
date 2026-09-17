@@ -111,12 +111,13 @@ def test_claude_member_reports_its_turn_to_the_hived(rig):
         assert complete.get("turnId"), complete
         assert complete.get("reason") == "answer", complete
         assert not any(r.get("event") == "claude.hook_refused" for r in rows)
-        # the member's runtime row carries the hook as its busy source
+        # the member's row says the busy verdict is the engine's own report
         team = json.loads(subprocess.run(
             ["hive", "team", "-t", rig.team], capture_output=True, text=True, timeout=30, env=_env(rig),
         ).stdout)
         row = next((m for m in team.get("members", []) if m.get("name") == members[-1]), {})
-        assert row.get("_busySource") == "hook", row
+        assert row.get("busySource") == "hook", row
+        assert row.get("hookEvent") == "turn.complete", row
         assert row.get("busy") is False, row
     finally:
         for member in members:
