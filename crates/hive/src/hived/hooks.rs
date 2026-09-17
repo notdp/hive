@@ -14,14 +14,22 @@
 //! written atomically once the listener is up and removed when this
 //! generation leaves: the port, a bearer token minted per generation, the
 //! team instance (`teamCreatedAt`) and the generation (`startedAt`). The
-//! plugin finds the workspace through the roster row carrying its session
-//! id and reads this file; it decides no membership.
+//! plugin finds the workspace through the roster row naming its session
+//! and reads this file; it decides no membership.
 //!
 //! A request is admitted when its bearer token is this generation's, its
 //! `teamCreatedAt` is this instance's and its `sessionId` is a claude row
-//! of this team's roster, read per request (the CLI owns membership; the
-//! endpoint only observes). Anything else is refused with a status and
-//! touches no observation.
+//! of this team's roster, read per request from an entry that names the
+//! same instance (the CLI owns membership; the endpoint only observes).
+//! Anything else is refused with a status and touches no observation.
+//!
+//! Events are ordered by the module, not by arrival: each carries the
+//! module instance's `epoch` and a per-instance `seq`. The store takes an
+//! event only when it is newer than the last it took for that session;
+//! a late `turn.start` whose `turn.complete` already landed is stale and
+//! changes nothing. A new epoch is a new engine process (a wake, a claim
+//! of a pre-booted spare) and always opens with `session.start`, which
+//! resets the sequence and, in the same epoch, never clears a turn.
 //!
 //! What the observations answer: [`hook_busy`], whether the engine is
 //! inside a turn, while the channel is fresh. Claude Code skips a hook
@@ -31,6 +39,9 @@
 //! status (`busy.rs::claude_registry_busy`) stands again. A subagent's
 //! turn (`agentId` set) is acknowledged and not counted: the main loop's
 //! busy is what the display shows.
+//!
+//! The endpoint is closed explicitly ([`close_endpoint`]); the accept
+//! worker holds it alive, so dropping the handle alone stops nothing.
 
 use std::collections::{HashMap, VecDeque};
 use std::fs;
@@ -39,7 +50,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -55,14 +66,18 @@ pub const HOOKS_ENDPOINT_NAME: &str = "hooks-endpoint.json";
 pub const HOOKS_PATH: &str = "/v1/hooks";
 /// How long the last hook event vouches for the engine's turn state.
 pub const HOOK_FRESH_SECONDS: f64 = 600.0;
-const READ_BUDGET: Duration = Duration::from_secs(2);
+/// One request's whole budget, first byte to last, read and written.
+const REQUEST_BUDGET: Duration = Duration::from_secs(2);
 const MAX_HEAD_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Requests served at once; the rest are refused at accept with a 503.
+const MAX_INFLIGHT: usize = 8;
 const RECENT_EVENT_IDS: usize = 512;
 const ACCEPT_POLL_SECONDS: f64 = 0.1;
 const EVENTS: [&str; 3] = ["session.start", "turn.start", "turn.complete"];
 
-/// Who may post: the roster's claude row for a session id, by name.
+/// Who may post: the roster's claude row for a session id, by name, read
+/// from an entry that names this endpoint's instance.
 pub(crate) type RosterLookup = dyn Fn(&str) -> Option<String> + Send + Sync;
 
 pub(crate) struct HookContext {
@@ -73,24 +88,30 @@ pub(crate) struct HookContext {
     pub created: String,
     pub workspace: String,
     pub roster: Box<RosterLookup>,
+    /// Set by `close`: a request still being served writes nothing after it.
+    pub closed: Arc<AtomicBool>,
 }
 
-/// One session's last report.
+/// One session's last accepted report.
 #[derive(Clone, Debug)]
 pub(crate) struct HookObservation {
     pub last_event: String,
     pub turn_id: Option<String>,
     pub seen: Instant,
+    /// The module instance that reported, and its counter.
+    pub epoch: String,
+    pub seq: u64,
 }
 
-fn observations() -> &'static Mutex<HashMap<String, HookObservation>> {
-    static CELL: OnceLock<Mutex<HashMap<String, HookObservation>>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Default)]
+struct Store {
+    by_session: HashMap<String, HookObservation>,
+    recent_event_ids: VecDeque<String>,
 }
 
-fn recent_event_ids() -> &'static Mutex<VecDeque<String>> {
-    static CELL: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
-    CELL.get_or_init(|| Mutex::new(VecDeque::new()))
+fn store() -> &'static Mutex<Store> {
+    static CELL: OnceLock<Mutex<Store>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(Store::default()))
 }
 
 fn current() -> &'static Mutex<Option<Arc<HooksEndpoint>>> {
@@ -118,8 +139,8 @@ fn fresh_observation_at(session_id: &str, now: Instant) -> Option<HookObservatio
     if session_id.is_empty() {
         return None;
     }
-    let store = observations().lock().unwrap_or_else(|e| e.into_inner());
-    let seen = store.get(session_id)?;
+    let store = store().lock().unwrap_or_else(|e| e.into_inner());
+    let seen = store.by_session.get(session_id)?;
     if now.duration_since(seen.seen).as_secs_f64() > HOOK_FRESH_SECONDS {
         return None;
     }
@@ -177,22 +198,14 @@ fn remove_endpoint_file_if(workspace: &str, token: &str) {
     }
 }
 
-fn mint_token() -> String {
+/// A bearer token from the system's random source; without one there is
+/// no endpoint, never a guessable substitute.
+fn mint_token() -> Result<String> {
     let mut bytes = [0u8; 16];
-    if fs::File::open("/dev/urandom")
+    fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
-        .is_err()
-    {
-        use sha2::Digest;
-        let seed = format!(
-            "{}:{:?}:{}",
-            getpid(),
-            Instant::now(),
-            crate::clock::utc_timestamp_ms()
-        );
-        bytes.copy_from_slice(&sha2::Sha256::digest(seed.as_bytes())[..16]);
-    }
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+        .map_err(|e| anyhow!("no random source for the hooks token: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 // --------------------------------------------------------------------------
@@ -201,8 +214,9 @@ fn mint_token() -> String {
 
 pub(crate) struct HooksEndpoint {
     listener: Mutex<Option<TcpListener>>,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    inflight: Arc<AtomicUsize>,
     ctx: Arc<HookContext>,
     pub port: u16,
 }
@@ -217,13 +231,16 @@ pub(crate) fn open_endpoint(
     started_at: &str,
 ) -> Result<Arc<HooksEndpoint>> {
     let team_name = team.to_string();
-    let roster: Box<RosterLookup> = Box::new(move |sid| roster_claude_member(&team_name, sid));
+    let instance = created.to_string();
+    let roster: Box<RosterLookup> =
+        Box::new(move |sid| roster_claude_member(&team_name, &instance, sid));
     let ctx = HookContext {
-        token: mint_token(),
+        token: mint_token()?,
         team: team.to_string(),
         created: created.to_string(),
         workspace: workspace.to_string(),
         roster,
+        closed: Arc::new(AtomicBool::new(false)),
     };
     let endpoint = open_endpoint_with(ctx, started_at)?;
     *current().lock().unwrap_or_else(|e| e.into_inner()) = Some(endpoint.clone());
@@ -251,8 +268,9 @@ pub(crate) fn open_endpoint_with(ctx: HookContext, started_at: &str) -> Result<A
     })?;
     let endpoint = Arc::new(HooksEndpoint {
         listener: Mutex::new(Some(listener)),
-        closed: AtomicBool::new(false),
+        closed: ctx.closed.clone(),
         worker: Mutex::new(None),
+        inflight: Arc::new(AtomicUsize::new(0)),
         ctx: Arc::new(ctx),
         port,
     });
@@ -274,11 +292,16 @@ pub(crate) fn close_endpoint() {
 }
 
 /// A roster row of *team* naming *session_id*'s claude engine, by member
-/// name. A joined session's row carries the session id itself; a bg
-/// member's row carries its jobId, and the engine registry says which
-/// session id that job minted.
-fn roster_claude_member(team: &str, session_id: &str) -> Option<String> {
+/// name — from an entry that names *instance* (a recycled team name is
+/// another instance, and its roster vouches for nobody here). A joined
+/// session's row carries the session id itself; a bg member's row carries
+/// its jobId, and the engine registry says which session id that job
+/// minted.
+fn roster_claude_member(team: &str, instance: &str, session_id: &str) -> Option<String> {
     let entry = crate::registry::load(team)?;
+    if !instance.is_empty() && TeamInstance::from_entry(&entry).created != instance {
+        return None;
+    }
     let members = entry.get("members")?.as_array()?;
     let job_session = |job_id: &str| hooked_cb_engine_session_for_job(job_id).map(|e| e.session_id);
     members
@@ -306,6 +329,30 @@ fn roster_row_member(
         || (recorded.len() < session_id.len()
             && job_session(&recorded).as_deref() == Some(session_id));
     same.then(|| map_str(row, "name"))
+}
+
+/// One served request's slot among [`MAX_INFLIGHT`]; released on drop.
+struct InflightSlot(Arc<AtomicUsize>);
+
+impl InflightSlot {
+    fn take(counter: &Arc<AtomicUsize>) -> Option<InflightSlot> {
+        let mut seen = counter.load(Ordering::SeqCst);
+        loop {
+            if seen >= MAX_INFLIGHT {
+                return None;
+            }
+            match counter.compare_exchange(seen, seen + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => return Some(InflightSlot(counter.clone())),
+                Err(now) => seen = now,
+            }
+        }
+    }
+}
+
+impl Drop for InflightSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl HooksEndpoint {
@@ -348,13 +395,22 @@ impl HooksEndpoint {
                     None => return,
                 }
             };
-            let Some((stream, _)) = accepted else {
+            let Some((mut stream, _)) = accepted else {
+                continue;
+            };
+            let Some(slot) = InflightSlot::take(&self.inflight) else {
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_write_timeout(Some(REQUEST_BUDGET));
+                write_response(&mut stream, 503, &refusal("too many requests in flight"));
                 continue;
             };
             let ctx = self.ctx.clone();
             let _ = thread::Builder::new()
                 .name("hived-hooks-request".to_string())
-                .spawn(move || serve_connection(stream, &ctx));
+                .spawn(move || {
+                    let _slot = slot;
+                    serve_connection(stream, &ctx)
+                });
         }
     }
 
@@ -369,12 +425,6 @@ impl HooksEndpoint {
     }
 }
 
-impl Drop for HooksEndpoint {
-    fn drop(&mut self) {
-        self.close();
-    }
-}
-
 // --------------------------------------------------------------------------
 // HTTP
 // --------------------------------------------------------------------------
@@ -386,21 +436,39 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
+/// One read within what is left of *deadline*; None at the deadline, on a
+/// closed peer, or on an error.
+fn read_some(stream: &mut TcpStream, buf: &mut Vec<u8>, deadline: Instant) -> Option<usize> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return None;
+    }
+    stream.set_read_timeout(Some(remaining)).ok()?;
+    let mut chunk = [0u8; 4096];
+    let n = stream.read(&mut chunk).ok()?;
+    if n == 0 {
+        return None;
+    }
+    buf.extend_from_slice(&chunk[..n]);
+    Some(n)
+}
+
+/// The request line, the two headers this route reads and the body, all
+/// within one budget from the first byte; a head over its cap in one read
+/// or across several, or a body over its cap, is refused.
+fn read_request(stream: &mut TcpStream, deadline: Instant) -> Option<HttpRequest> {
     let mut buf: Vec<u8> = Vec::new();
     let head_end = loop {
         if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            if at + 4 > MAX_HEAD_BYTES {
+                return None;
+            }
             break at + 4;
         }
         if buf.len() >= MAX_HEAD_BYTES {
             return None;
         }
-        let mut chunk = [0u8; 4096];
-        let n = stream.read(&mut chunk).ok()?;
-        if n == 0 {
-            return None;
-        }
-        buf.extend_from_slice(&chunk[..n]);
+        read_some(stream, &mut buf, deadline)?;
     };
     let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
     let mut lines = head.split("\r\n");
@@ -425,12 +493,7 @@ fn read_request(stream: &mut TcpStream) -> Option<HttpRequest> {
     }
     let mut body = buf.split_off(head_end);
     while body.len() < content_length {
-        let mut chunk = vec![0u8; content_length - body.len()];
-        let n = stream.read(&mut chunk).ok()?;
-        if n == 0 {
-            return None;
-        }
-        body.extend_from_slice(&chunk[..n]);
+        read_some(stream, &mut body, deadline)?;
     }
     body.truncate(content_length);
     Some(HttpRequest {
@@ -450,6 +513,7 @@ fn reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         409 => "Conflict",
         413 => "Payload Too Large",
+        503 => "Service Unavailable",
         _ => "Error",
     }
 }
@@ -467,11 +531,12 @@ fn write_response(stream: &mut TcpStream, status: u16, body: &Map<String, Value>
 }
 
 fn serve_connection(mut stream: TcpStream, ctx: &HookContext) {
+    let deadline = Instant::now() + REQUEST_BUDGET;
     let _ = stream.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(READ_BUDGET));
-    let _ = stream.set_write_timeout(Some(READ_BUDGET));
-    let Some(request) = read_request(&mut stream) else {
+    let _ = stream.set_write_timeout(Some(REQUEST_BUDGET));
+    let Some(request) = read_request(&mut stream, deadline) else {
         write_response(&mut stream, 400, &refusal("unreadable request"));
+        let _ = stream.shutdown(std::net::Shutdown::Both);
         return;
     };
     let (status, body) = handle_hook_request(
@@ -543,21 +608,38 @@ pub(crate) fn handle_hook_request(
     if !EVENTS.contains(&name.as_str()) {
         return (400, refusal("unknown event"));
     }
+    let turn_id = map_get_str(&event, "turnId");
+    if name != "session.start" && turn_id.is_empty() {
+        return (400, refusal("a turn event names its turnId"));
+    }
+    let epoch = map_get_str(&event, "epoch");
+    let seq = event.get("seq").and_then(Value::as_u64);
+    let (Some(seq), false) = (seq, epoch.is_empty()) else {
+        return (400, refusal("an event carries its epoch and seq"));
+    };
     let mut answer = Map::new();
     answer.insert("ok".to_string(), Value::Bool(true));
     answer.insert("member".to_string(), Value::from(member.clone()));
-    let event_id = map_get_str(&event, "eventId");
-    if !event_id.is_empty() && !remember_event_id(&event_id) {
-        answer.insert("duplicate".to_string(), Value::Bool(true));
-        return (200, answer);
-    }
-    let turn_id = map_get_str(&event, "turnId");
     let agent_id = map_get_str(&event, "agentId");
     if !agent_id.is_empty() {
         answer.insert("ignored".to_string(), Value::from("subagent"));
         return (200, answer);
     }
-    apply_event(&session_id, &name, &turn_id);
+    if ctx.closed.load(Ordering::SeqCst) {
+        return (503, refusal("endpoint closing"));
+    }
+    let event_id = map_get_str(&event, "eventId");
+    match apply_event(&session_id, &name, &turn_id, &epoch, seq, &event_id) {
+        Applied::Taken => {}
+        Applied::Duplicate => {
+            answer.insert("duplicate".to_string(), Value::Bool(true));
+            return (200, answer);
+        }
+        Applied::Stale => {
+            answer.insert("stale".to_string(), Value::Bool(true));
+            return (200, answer);
+        }
+    }
     let reason = map_get_str(&event, "reason");
     hooked_notify_debug_emit(
         &ctx.workspace,
@@ -589,41 +671,69 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// True the first time *event_id* is seen.
-fn remember_event_id(event_id: &str) -> bool {
-    let mut seen = recent_event_ids().lock().unwrap_or_else(|e| e.into_inner());
-    if seen.iter().any(|id| id == event_id) {
-        return false;
-    }
-    seen.push_back(event_id.to_string());
-    while seen.len() > RECENT_EVENT_IDS {
-        seen.pop_front();
-    }
-    true
+#[derive(Debug, PartialEq, Eq)]
+enum Applied {
+    Taken,
+    Duplicate,
+    Stale,
 }
 
-/// The turn state machine: a start opens the turn it names, a complete
-/// closes that turn (a late complete of an earlier turn leaves the open one
-/// alone), a session start opens nothing.
-fn apply_event(session_id: &str, event: &str, turn_id: &str) {
-    let mut store = observations().lock().unwrap_or_else(|e| e.into_inner());
-    let previous = store.get(session_id).and_then(|o| o.turn_id.clone());
-    let turn = match event {
-        "turn.start" => Some(turn_id.to_string()),
-        "turn.complete" => match previous {
-            Some(open) if !turn_id.is_empty() && open != turn_id => Some(open),
-            _ => None,
-        },
+/// The turn state machine, under one lock with the replay window.
+///
+/// Order is the module's (`epoch`, `seq`), not arrival: an event at or
+/// behind the last one taken for the session is stale. A new epoch is
+/// taken only through its `session.start`, which opens no turn; within an
+/// epoch a `session.start` leaves an open turn alone, a `turn.start` opens
+/// the turn it names, and a `turn.complete` closes that turn (one naming
+/// another turn leaves the open one alone).
+fn apply_event(
+    session_id: &str,
+    event: &str,
+    turn_id: &str,
+    epoch: &str,
+    seq: u64,
+    event_id: &str,
+) -> Applied {
+    let mut store = store().lock().unwrap_or_else(|e| e.into_inner());
+    if !event_id.is_empty() {
+        if store.recent_event_ids.iter().any(|id| id == event_id) {
+            return Applied::Duplicate;
+        }
+        store.recent_event_ids.push_back(event_id.to_string());
+        while store.recent_event_ids.len() > RECENT_EVENT_IDS {
+            store.recent_event_ids.pop_front();
+        }
+    }
+    let previous = store.by_session.get(session_id);
+    let open = match previous {
+        Some(seen) if seen.epoch == epoch => {
+            if seq <= seen.seq {
+                return Applied::Stale;
+            }
+            seen.turn_id.clone()
+        }
+        Some(_) if event != "session.start" => return Applied::Stale,
         _ => None,
     };
-    store.insert(
+    let turn = match event {
+        "turn.start" => Some(turn_id.to_string()),
+        "turn.complete" => match open {
+            Some(open) if open != turn_id => Some(open),
+            _ => None,
+        },
+        _ => open,
+    };
+    store.by_session.insert(
         session_id.to_string(),
         HookObservation {
             last_event: event.to_string(),
             turn_id: turn,
             seen: Instant::now(),
+            epoch: epoch.to_string(),
+            seq,
         },
     );
+    Applied::Taken
 }
 
 #[cfg(test)]
@@ -637,6 +747,7 @@ mod tests {
             created: "1700000000".to_string(),
             workspace: workspace.to_string(),
             roster,
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -644,10 +755,13 @@ mod tests {
         Box::new(|sid| (sid == "sid-a").then(|| "alpha".to_string()))
     }
 
-    fn body(fields: &[(&str, &str)]) -> Vec<u8> {
+    /// A body for `sid-a` in epoch `e1` at *seq*, plus *fields*.
+    fn body_at(seq: u64, fields: &[(&str, &str)]) -> Vec<u8> {
         let mut map = Map::new();
         map.insert("teamCreatedAt".to_string(), Value::from("1700000000"));
         map.insert("sessionId".to_string(), Value::from("sid-a"));
+        map.insert("epoch".to_string(), Value::from("e1"));
+        map.insert("seq".to_string(), Value::from(seq));
         for (k, v) in fields {
             map.insert(k.to_string(), Value::from(*v));
         }
@@ -661,7 +775,7 @@ mod tests {
     #[test]
     fn test_hook_request_refuses_route_method_token_instance_and_stranger() {
         let ctx = ctx_with(roster(), "");
-        let ok = body(&[("event", "turn.start"), ("turnId", "t1")]);
+        let ok = body_at(1, &[("event", "turn.start"), ("turnId", "t1")]);
         assert_eq!(
             handle_hook_request(&ctx, "GET", HOOKS_PATH, "Bearer tok-1", &ok).0,
             405
@@ -678,18 +792,37 @@ mod tests {
             handle_hook_request(&ctx, "POST", HOOKS_PATH, "", &ok).0,
             401
         );
-        let mut other = Map::new();
+        let mut other: Map<String, Value> = serde_json::from_slice(&ok).unwrap();
         other.insert("teamCreatedAt".to_string(), Value::from("1600000000"));
-        other.insert("sessionId".to_string(), Value::from("sid-a"));
-        other.insert("event".to_string(), Value::from("turn.start"));
         assert_eq!(post(&ctx, &serde_json::to_vec(&other).unwrap()).0, 409);
-        let mut stranger = Map::new();
-        stranger.insert("teamCreatedAt".to_string(), Value::from("1700000000"));
+        let mut stranger: Map<String, Value> = serde_json::from_slice(&ok).unwrap();
         stranger.insert("sessionId".to_string(), Value::from("sid-z"));
-        stranger.insert("event".to_string(), Value::from("turn.start"));
         assert_eq!(post(&ctx, &serde_json::to_vec(&stranger).unwrap()).0, 404);
-        assert_eq!(post(&ctx, &body(&[("event", "tool.call")])).0, 400);
+        assert_eq!(post(&ctx, &body_at(1, &[("event", "tool.call")])).0, 400);
+        assert_eq!(
+            post(&ctx, &body_at(1, &[("event", "turn.start")])).0,
+            400,
+            "no turnId"
+        );
+        assert_eq!(
+            post(&ctx, &body_at(1, &[("event", "turn.complete")])).0,
+            400
+        );
         assert_eq!(post(&ctx, b"not json").0, 400);
+        let mut unordered: Map<String, Value> = serde_json::from_slice(&ok).unwrap();
+        unordered.remove("seq");
+        assert_eq!(
+            post(&ctx, &serde_json::to_vec(&unordered).unwrap()).0,
+            400,
+            "no seq"
+        );
+        unordered.insert("seq".to_string(), Value::from(1));
+        unordered.remove("epoch");
+        assert_eq!(
+            post(&ctx, &serde_json::to_vec(&unordered).unwrap()).0,
+            400,
+            "no epoch"
+        );
         assert!(
             hook_busy("sid-a").is_none(),
             "a refused request records nothing"
@@ -731,23 +864,36 @@ mod tests {
         let ctx = ctx_with(roster(), "");
         let (status, answer) = post(
             &ctx,
-            &body(&[("event", "session.start"), ("surface", "terminal")]),
+            &body_at(1, &[("event", "session.start"), ("surface", "terminal")]),
         );
         assert_eq!(status, 200);
         assert_eq!(answer.get("member"), Some(&Value::from("alpha")));
         assert_eq!(hook_busy("sid-a"), Some(false));
-        post(&ctx, &body(&[("event", "turn.start"), ("turnId", "t1")]));
+        post(
+            &ctx,
+            &body_at(2, &[("event", "turn.start"), ("turnId", "t1")]),
+        );
         assert_eq!(hook_busy("sid-a"), Some(true));
-        // a late complete of another turn leaves the open one alone
-        post(&ctx, &body(&[("event", "turn.complete"), ("turnId", "t0")]));
+        // a session.start in the same epoch (the claim of a pre-booted
+        // spare) leaves the open turn alone
+        post(&ctx, &body_at(3, &[("event", "session.start")]));
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        // a complete naming another turn leaves the open one alone
+        post(
+            &ctx,
+            &body_at(4, &[("event", "turn.complete"), ("turnId", "t0")]),
+        );
         assert_eq!(hook_busy("sid-a"), Some(true));
         post(
             &ctx,
-            &body(&[
-                ("event", "turn.complete"),
-                ("turnId", "t1"),
-                ("reason", "answer"),
-            ]),
+            &body_at(
+                5,
+                &[
+                    ("event", "turn.complete"),
+                    ("turnId", "t1"),
+                    ("reason", "answer"),
+                ],
+            ),
         );
         assert_eq!(hook_busy("sid-a"), Some(false));
         assert_eq!(
@@ -757,36 +903,103 @@ mod tests {
     }
 
     #[test]
-    fn test_hook_subagent_turns_and_duplicates_are_acknowledged_not_counted() {
+    fn test_hook_events_are_ordered_by_the_modules_sequence_not_arrival() {
         let ctx = ctx_with(roster(), "");
-        post(&ctx, &body(&[("event", "session.start")]));
+        // the complete lands first (the start's POST ran past its budget
+        // and arrives late): the late start is stale, the turn stays closed
+        post(
+            &ctx,
+            &body_at(2, &[("event", "turn.complete"), ("turnId", "t1")]),
+        );
+        assert_eq!(hook_busy("sid-a"), Some(false));
         let (status, answer) = post(
             &ctx,
-            &body(&[
-                ("event", "turn.start"),
-                ("turnId", "sub-1"),
-                ("agentId", "agent-9"),
-            ]),
+            &body_at(1, &[("event", "turn.start"), ("turnId", "t1")]),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(answer.get("stale"), Some(&Value::Bool(true)));
+        assert_eq!(hook_busy("sid-a"), Some(false));
+        // a late session.start of the same epoch is stale too
+        post(
+            &ctx,
+            &body_at(3, &[("event", "turn.start"), ("turnId", "t2")]),
+        );
+        let (_, answer) = post(&ctx, &body_at(0, &[("event", "session.start")]));
+        assert_eq!(answer.get("stale"), Some(&Value::Bool(true)));
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        // a new epoch (a woken engine) enters through its session.start and
+        // opens nothing; its own turn events then count
+        let mut fresh: Map<String, Value> =
+            serde_json::from_slice(&body_at(1, &[("event", "turn.start"), ("turnId", "t9")]))
+                .unwrap();
+        fresh.insert("epoch".to_string(), Value::from("e2"));
+        let (_, answer) = post(&ctx, &serde_json::to_vec(&fresh).unwrap());
+        assert_eq!(
+            answer.get("stale"),
+            Some(&Value::Bool(true)),
+            "a new epoch opens with session.start"
+        );
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        fresh.insert("event".to_string(), Value::from("session.start"));
+        fresh.insert("seq".to_string(), Value::from(0));
+        post(&ctx, &serde_json::to_vec(&fresh).unwrap());
+        assert_eq!(
+            hook_busy("sid-a"),
+            Some(false),
+            "the old epoch's turn does not survive a new engine"
+        );
+        // the old epoch's late events are stale from now on
+        let (_, answer) = post(
+            &ctx,
+            &body_at(4, &[("event", "turn.start"), ("turnId", "t3")]),
+        );
+        assert_eq!(answer.get("stale"), Some(&Value::Bool(true)));
+        assert_eq!(hook_busy("sid-a"), Some(false));
+    }
+
+    #[test]
+    fn test_hook_subagent_turns_and_duplicates_are_acknowledged_not_counted() {
+        let ctx = ctx_with(roster(), "");
+        post(&ctx, &body_at(1, &[("event", "session.start")]));
+        let (status, answer) = post(
+            &ctx,
+            &body_at(
+                2,
+                &[
+                    ("event", "turn.start"),
+                    ("turnId", "sub-1"),
+                    ("agentId", "agent-9"),
+                ],
+            ),
         );
         assert_eq!(status, 200);
         assert_eq!(answer.get("ignored"), Some(&Value::from("subagent")));
         assert_eq!(hook_busy("sid-a"), Some(false));
         let first = post(
             &ctx,
-            &body(&[("event", "turn.start"), ("turnId", "t1"), ("eventId", "e1")]),
+            &body_at(
+                3,
+                &[("event", "turn.start"), ("turnId", "t1"), ("eventId", "e1")],
+            ),
         );
         assert!(first.1.get("duplicate").is_none());
         post(
             &ctx,
-            &body(&[
-                ("event", "turn.complete"),
-                ("turnId", "t1"),
-                ("eventId", "e2"),
-            ]),
+            &body_at(
+                4,
+                &[
+                    ("event", "turn.complete"),
+                    ("turnId", "t1"),
+                    ("eventId", "e2"),
+                ],
+            ),
         );
         let again = post(
             &ctx,
-            &body(&[("event", "turn.start"), ("turnId", "t1"), ("eventId", "e1")]),
+            &body_at(
+                3,
+                &[("event", "turn.start"), ("turnId", "t1"), ("eventId", "e1")],
+            ),
         );
         assert_eq!(again.1.get("duplicate"), Some(&Value::Bool(true)));
         assert_eq!(
@@ -794,17 +1007,90 @@ mod tests {
             Some(false),
             "a replayed start does not reopen the turn"
         );
+        // past the replay window the same replay is still stale by order
+        for n in 0..(RECENT_EVENT_IDS as u64 + 1) {
+            post(
+                &ctx,
+                &body_at(
+                    100 + n,
+                    &[
+                        ("event", "session.start"),
+                        ("eventId", &format!("fill-{n}")),
+                    ],
+                ),
+            );
+        }
+        let old = post(
+            &ctx,
+            &body_at(
+                3,
+                &[("event", "turn.start"), ("turnId", "t1"), ("eventId", "e1")],
+            ),
+        );
+        assert_eq!(old.1.get("stale"), Some(&Value::Bool(true)));
+        assert_eq!(hook_busy("sid-a"), Some(false));
     }
 
     #[test]
     fn test_hook_busy_expires_after_the_freshness_window() {
         let ctx = ctx_with(roster(), "");
-        post(&ctx, &body(&[("event", "turn.start"), ("turnId", "t1")]));
+        post(
+            &ctx,
+            &body_at(1, &[("event", "turn.start"), ("turnId", "t1")]),
+        );
         let now = Instant::now();
         assert_eq!(hook_busy_at("sid-a", now), Some(true));
         let later = now + Duration::from_secs_f64(HOOK_FRESH_SECONDS + 1.0);
         assert_eq!(hook_busy_at("sid-a", later), None);
         assert_eq!(hook_busy_at("", now), None);
+    }
+
+    #[test]
+    fn test_hook_request_after_close_writes_nothing() {
+        let ctx = ctx_with(roster(), "");
+        ctx.closed.store(true, Ordering::SeqCst);
+        let (status, _) = post(
+            &ctx,
+            &body_at(1, &[("event", "turn.start"), ("turnId", "t1")]),
+        );
+        assert_eq!(status, 503);
+        assert!(hook_busy("sid-a").is_none());
+    }
+
+    #[test]
+    fn test_inflight_slots_are_bounded_and_released() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let held: Vec<InflightSlot> = (0..MAX_INFLIGHT)
+            .map(|_| InflightSlot::take(&counter).expect("a free slot"))
+            .collect();
+        assert!(
+            InflightSlot::take(&counter).is_none(),
+            "the cap refuses the next"
+        );
+        drop(held);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert!(InflightSlot::take(&counter).is_some());
+    }
+
+    fn connect(port: u16) -> TcpStream {
+        let mut conn = TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).unwrap();
+        conn.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let _ = &mut conn;
+        conn
+    }
+
+    fn request_text(auth: &str, json: &str) -> String {
+        format!(
+            "POST {HOOKS_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {auth}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{json}",
+            json.len()
+        )
+    }
+
+    fn read_all(conn: &mut TcpStream) -> String {
+        let mut out = String::new();
+        let _ = conn.read_to_string(&mut out);
+        out
     }
 
     #[test]
@@ -826,29 +1112,25 @@ mod tests {
             Some("2026-09-17T00:00:00Z")
         );
 
-        let request = |auth: &str, json: &str| {
-            let mut conn =
-                TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, endpoint.port))).unwrap();
-            conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-            let head = format!(
-                "POST {HOOKS_PATH} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {auth}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-                json.len()
-            );
-            conn.write_all(head.as_bytes()).unwrap();
-            conn.write_all(json.as_bytes()).unwrap();
-            let mut out = String::new();
-            conn.read_to_string(&mut out).unwrap();
-            out
-        };
         let token = format!("Bearer {}", endpoint.token());
-        let ok = request(
-            &token,
-            r#"{"teamCreatedAt":"1700000000","sessionId":"sid-a","event":"turn.start","turnId":"t1"}"#,
-        );
+        let mut conn = connect(endpoint.port);
+        conn.write_all(
+            request_text(
+                &token,
+                &String::from_utf8(body_at(1, &[("event", "turn.start"), ("turnId", "t1")]))
+                    .unwrap(),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let ok = read_all(&mut conn);
         assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"), "{ok}");
         assert!(ok.contains(r#""member":"alpha""#), "{ok}");
         assert_eq!(hook_busy("sid-a"), Some(true));
-        let refused = request("Bearer wrong", r#"{"event":"turn.complete"}"#);
+        let mut conn = connect(endpoint.port);
+        conn.write_all(request_text("Bearer wrong", r#"{"event":"turn.complete"}"#).as_bytes())
+            .unwrap();
+        let refused = read_all(&mut conn);
         assert!(refused.starts_with("HTTP/1.1 401 "), "{refused}");
         assert_eq!(hook_busy("sid-a"), Some(true));
 
@@ -856,6 +1138,60 @@ mod tests {
         endpoint.close();
         assert!(!path.exists(), "the description goes with the endpoint");
         assert!(TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).is_err());
+    }
+
+    #[test]
+    fn test_hook_endpoint_refuses_a_slow_drip_and_an_oversized_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().to_str().unwrap().to_string();
+        let endpoint = open_endpoint_with(ctx_with(roster(), &workspace), "gen").unwrap();
+        let token = format!("Bearer {}", endpoint.token());
+
+        // a byte at a time, each inside the per-read timeout, past the
+        // request's whole budget: cut off, nothing recorded
+        let full = request_text(
+            &token,
+            &String::from_utf8(body_at(1, &[("event", "turn.start"), ("turnId", "drip")])).unwrap(),
+        );
+        let mut conn = connect(endpoint.port);
+        let started = Instant::now();
+        let mut cut = false;
+        for byte in full.as_bytes() {
+            if conn.write_all(&[*byte]).is_err() {
+                cut = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(60));
+            if started.elapsed() > REQUEST_BUDGET + Duration::from_millis(600) {
+                break;
+            }
+        }
+        let answer = read_all(&mut conn);
+        assert!(
+            cut || answer.starts_with("HTTP/1.1 400 ") || answer.is_empty(),
+            "{answer}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(6));
+        assert!(
+            hook_busy("sid-a").is_none(),
+            "a dripped request records nothing"
+        );
+
+        // a head over its cap, split across two writes
+        let mut conn = connect(endpoint.port);
+        let padding = "X".repeat(MAX_HEAD_BYTES);
+        let head = format!("POST {HOOKS_PATH} HTTP/1.1\r\nAuthorization: {token}\r\nX-Pad: {padding}\r\nContent-Length: 0\r\n\r\n");
+        let (first, second) = head.as_bytes().split_at(5000);
+        conn.write_all(first).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let _ = conn.write_all(second);
+        let answer = read_all(&mut conn);
+        assert!(
+            answer.starts_with("HTTP/1.1 400 ") || answer.is_empty(),
+            "{answer}"
+        );
+        assert!(hook_busy("sid-a").is_none());
+        endpoint.close();
     }
 
     #[test]

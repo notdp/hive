@@ -1020,8 +1020,17 @@ port, a bearer token minted per generation, the team instance
 (`teamCreatedAt`) and the generation. The module decides no membership: a
 session no roster names posts nothing, and a refused post (wrong token,
 another instance, a session that is not a claude row of that team) drops
-the cached endpoint and looks it up again once. A hived that cannot bind
-the port records `hived.hooks_bind_failed` and serves without the lane.
+the cached endpoint and looks it up again once; a session no roster names
+yet looks again at every event. Each report carries the module instance's
+`epoch` and a `seq` taken in the engine's event order, and the hived takes
+a report only when it is newer than the last it took for that session: a
+`turn.start` whose POST overran the module's budget and lands after its
+`turn.complete` is stale and reopens nothing; a new engine process is a new
+epoch and enters through its `session.start`. The endpoint serves at most
+eight requests at once, each within a two-second budget from its first
+byte, and refuses a head over 8 KiB or a body over 64 KiB. A hived that
+cannot bind the port, or has no random source for the token, records
+`hived.hooks_bind_failed` and serves without the lane.
 
 What the report decides, and what it does not:
 
@@ -1053,7 +1062,9 @@ member reads as before until then.
 
 The desktop's own session is not spawned by hive, so its switch is the
 human's: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in `~/.claude/settings.json`
-under `env`. A desktop member without it reads as before.
+under `env`. A desktop member without it reads as before. The desktop
+path itself (its hooks module finding the roster and posting) is not yet
+verified; the CLI path is, on `-p`, `--bg` and a hive-spawned member.
 
 ### What the viewer is showing
 

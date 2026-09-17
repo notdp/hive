@@ -144,12 +144,22 @@ pub(crate) fn claude_registry_busy(pane_id: &str) -> Option<bool> {
         }
         return Some(engine.status == "busy");
     }
+    // The hook report comes first: a desktop or headless session may carry
+    // no registry status at all and still report its turns. The session
+    // id is read off the registration record alone, no transcript title.
     let pid = hooked_claude_pid_for_pane(pane_id);
-    let reported = hooked_cs_session_status(pid)?;
     let hooked = pid
-        .and_then(|pid| hooked_cs_list_sessions().into_iter().find(|s| s.pid == pid))
+        .and_then(|pid| {
+            hooked_cs_session_registrations()
+                .into_iter()
+                .find(|s| s.pid == pid)
+        })
         .and_then(|s| hook_busy(&s.session_id));
-    Some(hooked.unwrap_or(reported.0 == "busy"))
+    if let Some(busy) = hooked {
+        return Some(busy);
+    }
+    let reported = hooked_cs_session_status(pid)?;
+    Some(reported.0 == "busy")
 }
 
 /// Busy flag from the pane's native runtime source (codex shared

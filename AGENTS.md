@@ -154,8 +154,9 @@ behavior is documented in the modules themselves.
   module, `mod/register.ts`, named by the claude manifest's `hooks` field
   alone: codex never reads that manifest or that path. The module is the
   engine's own report of its turn boundaries to the hived
-  (`hived/hooks.rs`); it decides no membership and replaces no
-  observation, and a Bash `tool.call` hook stays out of it while
+  (`hived/hooks.rs`); it decides no membership, sits above the registry
+  status for `busy` only while its last report is fresh, and a Bash
+  `tool.call` hook stays out of it while
   anthropics/claude-code#92533 (any such hook breaks `Agent` worktree
   isolation) is open.
 - The viewer's markdown engine is the pinned git dependency

@@ -96,6 +96,7 @@ pub struct Hook {
     // claude_sessions
     pub cs_session_status: Option<SessionStatus>,
     pub cs_list_sessions: Option<F0<Vec<ClaudeSession>>>,
+    pub cs_session_registrations: Option<F0<Vec<ClaudeSession>>>,
     // claude_desktop / registry succession
     pub desktop_record: Option<S1<Option<crate::adapters::claude_desktop::DesktopRecord>>>,
     #[allow(clippy::type_complexity)]

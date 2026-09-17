@@ -909,15 +909,19 @@ fn record(job: &str, sid: &str) -> Option<PaneJob> {
 /// Feed the hooks endpoint's decision path one event for *session_id*, as
 /// the plugin's POST would after the roster named it `w1`.
 fn report_hook(session_id: &str, event: &str, turn_id: &str) {
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(1);
     let ctx = HookContext {
         token: "t".to_string(),
         team: "probe".to_string(),
         created: String::new(),
         workspace: String::new(),
         roster: Box::new(|_sid| Some("w1".to_string())),
+        closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let body = serde_json::json!({
         "sessionId": session_id, "event": event, "turnId": turn_id,
+        "epoch": "test", "seq": SEQ.fetch_add(1, Ordering::SeqCst),
     });
     let (status, _) = handle_hook_request(
         &ctx,
@@ -931,10 +935,12 @@ fn report_hook(session_id: &str, event: &str, turn_id: &str) {
 
 #[test]
 fn test_claude_registry_busy_prefers_a_fresh_hook_report_over_the_status() {
-    let mut hook = Hook::default();
-    hook.cb_job_id_for_pane = Some(Arc::new(|_p| Some("cafe1234".to_string())));
     let idle = engine("idle", "", "sess-hooked");
-    hook.cb_engine_session_for_job = Some(Arc::new(move |_j| Some(idle.clone())));
+    let hook = Hook {
+        cb_job_id_for_pane: Some(Arc::new(|_p| Some("cafe1234".to_string()))),
+        cb_engine_session_for_job: Some(Arc::new(move |_j| Some(idle.clone()))),
+        ..Hook::default()
+    };
     let _guard = testhook::install(hook);
     // no report yet: the registry status decides
     assert_eq!(claude_registry_busy("%1"), Some(false));

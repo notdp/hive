@@ -5,6 +5,12 @@
 // the workspace, and <workspace>/run/hooks-endpoint.json names the hived's
 // loopback port and bearer token. Nothing here decides membership; a session
 // no roster names posts nothing. Every hook passes the event on unchanged.
+//
+// Every report carries this module instance's epoch and a sequence number
+// taken in event order, so the hived orders reports by the engine's order,
+// not by arrival: a report that ran past its budget and lands after a later
+// one is stale there, and a new engine process (a wake, a claimed spare) is
+// a new epoch that opens with session.start.
 import type { EngineInterface, Register } from 'claude-code'
 
 type Endpoint = { port: number; token: string; teamCreatedAt: string }
@@ -13,6 +19,8 @@ const POST_BUDGET_MS = 1500
 
 let endpoint: Endpoint | null = null
 let sessionId: string | null = null
+const epoch = `${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 10)}`
+let seq = 0
 
 const hiveHome = async ($: EngineInterface) =>
   (await $.env.get('HIVE_HOME')) ?? `${await $.env.get('HOME')}/.hive`
@@ -56,17 +64,19 @@ const send = async ($: EngineInterface, ep: Endpoint, body: Record<string, unkno
   return res.status
 }
 
-// One event to the hived. An unbound session looks its team up at every
-// event (the roster row may land after the engine's own start); a stale
-// endpoint (refused, or no listener) is dropped and looked up again once.
-// Never throws.
+// One event to the hived. The sequence number is taken before the first
+// await, in the engine's event order. An unbound session looks its team up
+// at every event (the roster row may land after the engine's own start);
+// a bound one keeps its endpoint until a post fails, then looks up once
+// more. Never throws.
 const report = async ($: EngineInterface, event: string, fields: Record<string, unknown>) => {
+  const mine = ++seq
   try {
     if (!sessionId) sessionId = await $.session.id()
     if (!endpoint) endpoint = await locate($, sessionId)
     if (!endpoint) return
     const eventId = `${sessionId}:${event}:${await $.clock.now()}:${Math.random().toString(16).slice(2, 10)}`
-    const body = { event, eventId, at: await $.clock.now(), ...fields }
+    const body = { event, eventId, epoch, seq: mine, at: await $.clock.now(), ...fields }
     let status = 0
     try { status = await send($, endpoint, body) } catch { status = 0 }
     if (status === 200) return

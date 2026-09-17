@@ -408,6 +408,15 @@ pub(super) fn hooked_cs_session_status(pid: Option<i32>) -> Option<(String, Stri
     crate::adapters::claude_sessions::session_status(pid)
 }
 
+pub(super) fn hooked_cs_session_registrations(
+) -> Vec<crate::adapters::claude_sessions::ClaudeSession> {
+    #[cfg(test)]
+    if let Some(f) = hookget(|h| h.cs_session_registrations.clone()).flatten() {
+        return f();
+    }
+    crate::adapters::claude_sessions::session_registrations()
+}
+
 pub(super) fn hooked_cs_list_sessions() -> Vec<crate::adapters::claude_sessions::ClaudeSession> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cs_list_sessions.clone()).flatten() {
