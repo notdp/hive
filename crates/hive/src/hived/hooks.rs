@@ -27,9 +27,14 @@
 //! module instance's `epoch` and a per-instance `seq`. The store takes an
 //! event only when it is newer than the last it took for that session;
 //! a late `turn.start` whose `turn.complete` already landed is stale and
-//! changes nothing. A new epoch is a new engine process (a wake, a claim
-//! of a pre-booted spare) and always opens with `session.start`, which
-//! resets the sequence and, in the same epoch, never clears a turn.
+//! changes nothing. An epoch is one engine process (a wake, a claim of a
+//! pre-booted spare starts another) and registers with `session.start`,
+//! which becomes the session's current epoch and retires the one before
+//! it; a retired epoch's late `session.start` is stale, so the current
+//! epoch cannot be rolled back. A turn event from an epoch the store
+//! does not know is answered `unregistered`, and the module registers
+//! and sends it again — which is also how the lane recovers after a
+//! lost `session.start` or a hived generation that started empty.
 //!
 //! What the observations answer: [`hook_busy`], whether the engine is
 //! inside a turn, while the channel is fresh. Claude Code skips a hook
@@ -66,7 +71,8 @@ pub const HOOKS_ENDPOINT_NAME: &str = "hooks-endpoint.json";
 pub const HOOKS_PATH: &str = "/v1/hooks";
 /// How long the last hook event vouches for the engine's turn state.
 pub const HOOK_FRESH_SECONDS: f64 = 600.0;
-/// One request's whole budget, first byte to last, read and written.
+/// One request's whole budget from its first byte: the read shares it
+/// with the reply, which keeps at least 200ms of it.
 const REQUEST_BUDGET: Duration = Duration::from_secs(2);
 const MAX_HEAD_BYTES: usize = 8 * 1024;
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -88,8 +94,6 @@ pub(crate) struct HookContext {
     pub created: String,
     pub workspace: String,
     pub roster: Box<RosterLookup>,
-    /// Set by `close`: a request still being served writes nothing after it.
-    pub closed: Arc<AtomicBool>,
 }
 
 /// One session's last accepted report.
@@ -101,12 +105,21 @@ pub(crate) struct HookObservation {
     /// The module instance that reported, and its counter.
     pub epoch: String,
     pub seq: u64,
+    /// Epochs this session had before, newest last; a late `session.start`
+    /// from one of them is stale.
+    pub retired: Vec<String>,
 }
+
+/// Retired epochs kept per session.
+const RETIRED_EPOCHS: usize = 8;
 
 #[derive(Default)]
 struct Store {
     by_session: HashMap<String, HookObservation>,
     recent_event_ids: VecDeque<String>,
+    /// Set under the store's lock by `close`, read under it by every
+    /// admission: no report is taken after the endpoint closed.
+    closed: bool,
 }
 
 fn store() -> &'static Mutex<Store> {
@@ -240,7 +253,6 @@ pub(crate) fn open_endpoint(
         created: created.to_string(),
         workspace: workspace.to_string(),
         roster,
-        closed: Arc::new(AtomicBool::new(false)),
     };
     let endpoint = open_endpoint_with(ctx, started_at)?;
     *current().lock().unwrap_or_else(|e| e.into_inner()) = Some(endpoint.clone());
@@ -266,9 +278,10 @@ pub(crate) fn open_endpoint_with(ctx: HookContext, started_at: &str) -> Result<A
             hooks_endpoint_path(&ctx.workspace).display()
         )
     })?;
+    mark_closed(false);
     let endpoint = Arc::new(HooksEndpoint {
         listener: Mutex::new(Some(listener)),
-        closed: ctx.closed.clone(),
+        closed: Arc::new(AtomicBool::new(false)),
         worker: Mutex::new(None),
         inflight: Arc::new(AtomicUsize::new(0)),
         ctx: Arc::new(ctx),
@@ -416,6 +429,7 @@ impl HooksEndpoint {
 
     pub(crate) fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        mark_closed(true);
         *self.listener.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let worker = self.worker.lock().unwrap_or_else(|e| e.into_inner()).take();
         if let Some(worker) = worker {
@@ -560,6 +574,10 @@ fn serve_connection(mut stream: TcpStream, ctx: &HookContext) {
             ],
         );
     }
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(200));
+    let _ = stream.set_write_timeout(Some(remaining));
     write_response(&mut stream, status, &body);
     let _ = stream.shutdown(std::net::Shutdown::Both);
 }
@@ -625,9 +643,6 @@ pub(crate) fn handle_hook_request(
         answer.insert("ignored".to_string(), Value::from("subagent"));
         return (200, answer);
     }
-    if ctx.closed.load(Ordering::SeqCst) {
-        return (503, refusal("endpoint closing"));
-    }
     let event_id = map_get_str(&event, "eventId");
     match apply_event(&session_id, &name, &turn_id, &epoch, seq, &event_id) {
         Applied::Taken => {}
@@ -639,6 +654,11 @@ pub(crate) fn handle_hook_request(
             answer.insert("stale".to_string(), Value::Bool(true));
             return (200, answer);
         }
+        Applied::Unregistered => {
+            answer.insert("unregistered".to_string(), Value::Bool(true));
+            return (200, answer);
+        }
+        Applied::Closed => return (503, refusal("endpoint closing")),
     }
     let reason = map_get_str(&event, "reason");
     hooked_notify_debug_emit(
@@ -676,16 +696,28 @@ enum Applied {
     Taken,
     Duplicate,
     Stale,
+    /// A turn event from an epoch the session has not registered: the
+    /// module registers with `session.start` and sends it again.
+    Unregistered,
+    Closed,
+}
+
+/// Set the store's closed flag under its lock: linearized with every
+/// admission, so no report is taken once `close` has passed this point.
+fn mark_closed(closed: bool) {
+    store().lock().unwrap_or_else(|e| e.into_inner()).closed = closed;
 }
 
 /// The turn state machine, under one lock with the replay window.
 ///
 /// Order is the module's (`epoch`, `seq`), not arrival: an event at or
-/// behind the last one taken for the session is stale. A new epoch is
-/// taken only through its `session.start`, which opens no turn; within an
-/// epoch a `session.start` leaves an open turn alone, a `turn.start` opens
-/// the turn it names, and a `turn.complete` closes that turn (one naming
-/// another turn leaves the open one alone).
+/// behind the last one taken for the session is stale. An epoch registers
+/// through its `session.start`, which opens no turn and retires the epoch
+/// before it; a retired epoch is stale for good, and a turn event from an
+/// epoch not yet registered is answered `Unregistered` so the module
+/// registers first. Within an epoch a `session.start` leaves an open turn
+/// alone, a `turn.start` opens the turn it names, and a `turn.complete`
+/// closes that turn (one naming another turn leaves the open one alone).
 fn apply_event(
     session_id: &str,
     event: &str,
@@ -695,6 +727,9 @@ fn apply_event(
     event_id: &str,
 ) -> Applied {
     let mut store = store().lock().unwrap_or_else(|e| e.into_inner());
+    if store.closed {
+        return Applied::Closed;
+    }
     if !event_id.is_empty() {
         if store.recent_event_ids.iter().any(|id| id == event_id) {
             return Applied::Duplicate;
@@ -705,15 +740,24 @@ fn apply_event(
         }
     }
     let previous = store.by_session.get(session_id);
-    let open = match previous {
+    let (open, retired) = match previous {
         Some(seen) if seen.epoch == epoch => {
             if seq <= seen.seq {
                 return Applied::Stale;
             }
-            seen.turn_id.clone()
+            (seen.turn_id.clone(), seen.retired.clone())
         }
-        Some(_) if event != "session.start" => return Applied::Stale,
-        _ => None,
+        Some(seen) if seen.retired.iter().any(|e| e == epoch) => return Applied::Stale,
+        Some(_) if event != "session.start" => return Applied::Unregistered,
+        Some(seen) => {
+            let mut retired = seen.retired.clone();
+            retired.push(seen.epoch.clone());
+            while retired.len() > RETIRED_EPOCHS {
+                retired.remove(0);
+            }
+            (None, retired)
+        }
+        None => (None, Vec::new()),
     };
     let turn = match event {
         "turn.start" => Some(turn_id.to_string()),
@@ -731,6 +775,7 @@ fn apply_event(
             seen: Instant::now(),
             epoch: epoch.to_string(),
             seq,
+            retired,
         },
     );
     Applied::Taken
@@ -747,7 +792,6 @@ mod tests {
             created: "1700000000".to_string(),
             workspace: workspace.to_string(),
             roster,
-            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -935,9 +979,9 @@ mod tests {
         fresh.insert("epoch".to_string(), Value::from("e2"));
         let (_, answer) = post(&ctx, &serde_json::to_vec(&fresh).unwrap());
         assert_eq!(
-            answer.get("stale"),
+            answer.get("unregistered"),
             Some(&Value::Bool(true)),
-            "a new epoch opens with session.start"
+            "a new epoch registers with session.start first"
         );
         assert_eq!(hook_busy("sid-a"), Some(true));
         fresh.insert("event".to_string(), Value::from("session.start"));
@@ -1048,13 +1092,86 @@ mod tests {
     #[test]
     fn test_hook_request_after_close_writes_nothing() {
         let ctx = ctx_with(roster(), "");
-        ctx.closed.store(true, Ordering::SeqCst);
+        mark_closed(true);
         let (status, _) = post(
             &ctx,
             &body_at(1, &[("event", "turn.start"), ("turnId", "t1")]),
         );
         assert_eq!(status, 503);
         assert!(hook_busy("sid-a").is_none());
+        // the flag lives under the store's lock: a request that reached
+        // the lock first is taken before close, one after it is refused,
+        // and nothing is written in between
+        let held = store().lock().unwrap();
+        let closer = thread::spawn(|| mark_closed(false));
+        thread::sleep(Duration::from_millis(50));
+        assert!(!closer.is_finished(), "close waits for the store's lock");
+        drop(held);
+        closer.join().unwrap();
+        let (status, _) = post(
+            &ctx,
+            &body_at(2, &[("event", "turn.start"), ("turnId", "t1")]),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(hook_busy("sid-a"), Some(true));
+    }
+
+    #[test]
+    fn test_hook_epochs_register_retire_and_recover() {
+        let ctx = ctx_with(roster(), "");
+        let at = |epoch: &str, seq: u64, fields: &[(&str, &str)]| {
+            let mut map: Map<String, Value> =
+                serde_json::from_slice(&body_at(seq, fields)).unwrap();
+            map.insert("epoch".to_string(), Value::from(epoch));
+            serde_json::to_vec(&map).unwrap()
+        };
+        // e1 registers and opens a turn
+        post(&ctx, &at("e1", 1, &[("event", "session.start")]));
+        post(
+            &ctx,
+            &at("e1", 2, &[("event", "turn.start"), ("turnId", "a")]),
+        );
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        // e2 (a woken engine) registers: e1 retires, the turn is gone
+        post(&ctx, &at("e2", 1, &[("event", "session.start")]));
+        assert_eq!(hook_busy("sid-a"), Some(false));
+        post(
+            &ctx,
+            &at("e2", 2, &[("event", "turn.start"), ("turnId", "b")]),
+        );
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        // e1's late first session.start is stale: no rollback
+        let (_, answer) = post(&ctx, &at("e1", 1, &[("event", "session.start")]));
+        assert_eq!(answer.get("stale"), Some(&Value::Bool(true)));
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        let (_, answer) = post(
+            &ctx,
+            &at("e2", 3, &[("event", "turn.complete"), ("turnId", "b")]),
+        );
+        assert!(
+            answer.get("stale").is_none(),
+            "the current epoch keeps reporting"
+        );
+        assert_eq!(hook_busy("sid-a"), Some(false));
+        // e3's session.start was lost: its turn event is unregistered, not
+        // stale, and its registration then admits the resend
+        let (_, answer) = post(
+            &ctx,
+            &at("e3", 2, &[("event", "turn.start"), ("turnId", "c")]),
+        );
+        assert_eq!(answer.get("unregistered"), Some(&Value::Bool(true)));
+        assert_eq!(hook_busy("sid-a"), Some(false));
+        post(&ctx, &at("e3", 3, &[("event", "session.start")]));
+        let (_, answer) = post(
+            &ctx,
+            &at("e3", 4, &[("event", "turn.start"), ("turnId", "c")]),
+        );
+        assert!(answer.get("unregistered").is_none());
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        // e2 is retired now too
+        let (_, answer) = post(&ctx, &at("e2", 9, &[("event", "session.start")]));
+        assert_eq!(answer.get("stale"), Some(&Value::Bool(true)));
+        assert_eq!(hook_busy("sid-a"), Some(true));
     }
 
     #[test]

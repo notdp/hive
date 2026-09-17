@@ -917,7 +917,6 @@ fn report_hook(session_id: &str, event: &str, turn_id: &str) {
         created: String::new(),
         workspace: String::new(),
         roster: Box::new(|_sid| Some("w1".to_string())),
-        closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let body = serde_json::json!({
         "sessionId": session_id, "event": event, "turnId": turn_id,

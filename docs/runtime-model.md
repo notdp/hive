@@ -1025,10 +1025,16 @@ yet looks again at every event. Each report carries the module instance's
 `epoch` and a `seq` taken in the engine's event order, and the hived takes
 a report only when it is newer than the last it took for that session: a
 `turn.start` whose POST overran the module's budget and lands after its
-`turn.complete` is stale and reopens nothing; a new engine process is a new
-epoch and enters through its `session.start`. The endpoint serves at most
-eight requests at once, each within a two-second budget from its first
-byte, and refuses a head over 8 KiB or a body over 64 KiB. A hived that
+`turn.complete` is stale and reopens nothing. An epoch is one engine
+process; it registers with `session.start`, which retires the epoch before
+it for good (a retired epoch's late `session.start` rolls nothing back),
+and a turn event from an epoch the hived does not know is answered
+`unregistered`, on which the module registers and sends the event again —
+so a lost `session.start`, or a hived generation that started with an
+empty store, recovers at the next turn boundary. The endpoint serves at
+most eight requests at once, each read within a two-second budget from its
+first byte (the reply keeps at least 200ms of it), and refuses a head over
+8 KiB or a body over 64 KiB. A hived that
 cannot bind the port, or has no random source for the token, records
 `hived.hooks_bind_failed` and serves without the lane.
 

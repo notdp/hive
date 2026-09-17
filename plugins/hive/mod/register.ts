@@ -55,34 +55,56 @@ const locate = async ($: EngineInterface, sid: string): Promise<Endpoint | null>
   return null
 }
 
-const send = async ($: EngineInterface, ep: Endpoint, body: Record<string, unknown>): Promise<number> => {
+type Sent = { status: number; unregistered: boolean }
+
+const send = async ($: EngineInterface, ep: Endpoint, body: Record<string, unknown>): Promise<Sent> => {
   const res = await $.http.fetch(`http://127.0.0.1:${ep.port}/v1/hooks`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: `Bearer ${ep.token}` },
     body: JSON.stringify({ ...body, sessionId, teamCreatedAt: ep.teamCreatedAt }),
   })
-  return res.status
+  let unregistered = false
+  try { unregistered = res.status === 200 && JSON.parse(res.text)?.unregistered === true } catch { unregistered = false }
+  return { status: res.status, unregistered }
 }
+
+const envelope = async ($: EngineInterface, event: string, fields: Record<string, unknown>, mine: number) => ({
+  event,
+  eventId: `${sessionId}:${event}:${mine}:${Math.random().toString(16).slice(2, 10)}`,
+  epoch,
+  seq: mine,
+  at: await $.clock.now(),
+  ...fields,
+})
 
 // One event to the hived. The sequence number is taken before the first
 // await, in the engine's event order. An unbound session looks its team up
 // at every event (the roster row may land after the engine's own start);
 // a bound one keeps its endpoint until a post fails, then looks up once
-// more. Never throws.
+// more. A hived that does not know this epoch (its session.start was lost,
+// or the hived is a new generation) answers `unregistered`: the module
+// registers with a session.start and sends the event again, once, under
+// fresh sequence numbers. Never throws.
 const report = async ($: EngineInterface, event: string, fields: Record<string, unknown>) => {
   const mine = ++seq
   try {
     if (!sessionId) sessionId = await $.session.id()
     if (!endpoint) endpoint = await locate($, sessionId)
     if (!endpoint) return
-    const eventId = `${sessionId}:${event}:${await $.clock.now()}:${Math.random().toString(16).slice(2, 10)}`
-    const body = { event, eventId, epoch, seq: mine, at: await $.clock.now(), ...fields }
-    let status = 0
-    try { status = await send($, endpoint, body) } catch { status = 0 }
-    if (status === 200) return
-    endpoint = await locate($, sessionId)
-    if (!endpoint) return
-    try { if (await send($, endpoint, body) !== 200) endpoint = null } catch { endpoint = null }
+    const body = await envelope($, event, fields, mine)
+    let sent: Sent = { status: 0, unregistered: false }
+    try { sent = await send($, endpoint, body) } catch { sent = { status: 0, unregistered: false } }
+    if (sent.status !== 200) {
+      endpoint = await locate($, sessionId)
+      if (!endpoint) return
+      try { sent = await send($, endpoint, body) } catch { endpoint = null; return }
+      if (sent.status !== 200) { endpoint = null; return }
+    }
+    if (!sent.unregistered) return
+    const register = await envelope($, 'session.start', {}, ++seq)
+    try { if ((await send($, endpoint, register)).status !== 200) return } catch { return }
+    const again = await envelope($, event, fields, ++seq)
+    try { await send($, endpoint, again) } catch { endpoint = null }
   } catch {
     // fail-open by design: the hived's other observations stand
   }
