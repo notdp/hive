@@ -409,7 +409,16 @@ fn create_detached_team(
         }
     }
     remember_context(name, &ws_str, LEAD_AGENT_NAME);
-    println!("Team '{name}' created (tmux window {window} — `hive attach {name}` opens it).");
+    if orch_member.is_some() {
+        // The desktop creator's window holds only the placeholder shell
+        // until the first spawn: pointing at `hive attach` now shows the
+        // human an empty prompt.
+        println!(
+            "Team '{name}' created (tmux window {window} — the first `hive spawn` fills it; `hive attach {name}` opens it after that)."
+        );
+    } else {
+        println!("Team '{name}' created (tmux window {window} — `hive attach {name}` opens it).");
+    }
     if let Some(warning) = tmux::stale_version_warning() {
         eprintln!("{warning}");
     }
