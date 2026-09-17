@@ -45,15 +45,22 @@ def _hook_rows(notify: Path, member: str) -> list[dict]:
     return rows
 
 
-def _spawn(rig, member: str, task: Path) -> dict:
+def _env(rig) -> dict[str, str]:
+    """The same parentage as the rig's nodes: no $TMUX, the rig pane's own
+    identity pinned, so every verb is issued by the team's orch."""
     env = dict(os.environ)
     env.pop("TMUX", None)
+    env["TMUX_PANE"] = rig.pane
     for key in list(env):
         if key.startswith("CLAUDE") or key.startswith("ANTHROPIC"):
             env.pop(key, None)
+    return env
+
+
+def _spawn(rig, member: str, task: Path) -> dict:
     out = subprocess.run(
         ["hive", "spawn", member, "-t", rig.team, "--cli", "claude", "--task", str(task)],
-        capture_output=True, text=True, timeout=180, env=env,
+        capture_output=True, text=True, timeout=180, env=_env(rig),
     )
     assert out.returncode == 0, out.stdout + out.stderr
     payload = json.loads(out.stdout)
@@ -62,7 +69,7 @@ def _spawn(rig, member: str, task: Path) -> dict:
 
 
 def _kill(rig, member: str) -> None:
-    subprocess.run(["hive", "kill", member, "-t", rig.team], capture_output=True, timeout=60)
+    subprocess.run(["hive", "kill", member, "-t", rig.team], capture_output=True, timeout=60, env=_env(rig))
 
 
 def _wait_for_complete(notify: Path, member: str, window: int) -> list[dict]:
@@ -106,7 +113,7 @@ def test_claude_member_reports_its_turn_to_the_hived(rig):
         assert not any(r.get("event") == "claude.hook_refused" for r in rows)
         # the member's runtime row carries the hook as its busy source
         team = json.loads(subprocess.run(
-            ["hive", "team", "-t", rig.team], capture_output=True, text=True, timeout=30,
+            ["hive", "team", "-t", rig.team], capture_output=True, text=True, timeout=30, env=_env(rig),
         ).stdout)
         row = next((m for m in team.get("members", []) if m.get("name") == members[-1]), {})
         assert row.get("_busySource") == "hook", row
