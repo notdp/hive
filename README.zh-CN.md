@@ -22,15 +22,7 @@ Hive 是单个 Rust 二进制。[GitHub Releases](https://github.com/notdp/hive/
 curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
 ```
 
-有 Rust 工具链的话还有两条路：[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) 拉取同一份预编译 release（不编译），`cargo install` 从源码编译：
-
-```bash
-cargo binstall --git https://github.com/notdp/hive hive
-# 或
-cargo install --git https://github.com/notdp/hive hive
-```
-
-插件——教 agent 协议的那份 skill——内嵌在二进制里，由 `hive` 在 `$HIVE_HOME` 下物化出一个本地 marketplace 来提供。一条命令就为 PATH 上的每个 agent CLI 注册并安装它（重跑可修复安装）：
+插件——教 agent 协议的那份 skill——内嵌在二进制里，由 `hive` 在 `$HIVE_HOME` 下物化出一个本地 marketplace 来提供。安装脚本的最后一步就是为 PATH 上的每个 agent CLI 注册并安装它；重跑这一步可修复安装：
 
 ```bash
 hive plugin setup

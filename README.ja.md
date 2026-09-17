@@ -22,15 +22,7 @@ Hive は単一の Rust バイナリです。[GitHub Releases](https://github.com
 curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
 ```
 
-Rust ツールチェインがあれば経路がもう 2 つあります。[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) は同じビルド済み release を取得し（コンパイルなし）、`cargo install` はソースからビルドします:
-
-```bash
-cargo binstall --git https://github.com/notdp/hive hive
-# または
-cargo install --git https://github.com/notdp/hive hive
-```
-
-プラグイン — エージェントにプロトコルを教えるスキル — はバイナリに同梱され、`hive` が `$HIVE_HOME` 配下に実体化するローカル marketplace から配られます。1 コマンドで PATH 上のすべてのエージェント CLI に登録とインストールを行います（再実行すればインストールを修復します）:
+プラグイン — エージェントにプロトコルを教えるスキル — はバイナリに同梱され、`hive` が `$HIVE_HOME` 配下に実体化するローカル marketplace から配られます。インストーラの最後のステップが PATH 上のすべてのエージェント CLI への登録とインストールです。再実行すればインストールを修復します:
 
 ```bash
 hive plugin setup
