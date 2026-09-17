@@ -1029,9 +1029,12 @@ a report only when it is newer than the last it took for that session: a
 process; it registers with `session.start`, which retires the epoch before
 it for good (a retired epoch's late `session.start` rolls nothing back),
 and a turn event from an epoch the hived does not know is answered
-`unregistered`, on which the module registers and sends the event again —
-so a lost `session.start`, or a hived generation that started with an
-empty store, recovers at the next turn boundary. The endpoint serves at
+`unregistered`, on which the module registers (a `session.start` at `seq`
+0, moving no watermark) and sends the event again as it was, same `seq`
+and `eventId`, so a resend never overtakes what landed meanwhile — a lost
+`session.start`, or a hived generation that started with an empty store,
+recovers at the next turn boundary. The hived keeps a session's last eight
+retired epochs; an older one is forgotten and could register again. The endpoint serves at
 most eight requests at once, each read within a two-second budget from its
 first byte (the reply keeps at least 200ms of it), and refuses a head over
 8 KiB or a body over 64 KiB. A hived that

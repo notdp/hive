@@ -83,8 +83,9 @@ const envelope = async ($: EngineInterface, event: string, fields: Record<string
 // a bound one keeps its endpoint until a post fails, then looks up once
 // more. A hived that does not know this epoch (its session.start was lost,
 // or the hived is a new generation) answers `unregistered`: the module
-// registers with a session.start and sends the event again, once, under
-// fresh sequence numbers. Never throws.
+// registers with a session.start at seq 0 (no watermark moves) and sends
+// the event again exactly as it was, same seq and eventId, so a resend
+// never overtakes an event that landed meanwhile. Never throws.
 const report = async ($: EngineInterface, event: string, fields: Record<string, unknown>) => {
   const mine = ++seq
   try {
@@ -101,10 +102,9 @@ const report = async ($: EngineInterface, event: string, fields: Record<string, 
       if (sent.status !== 200) { endpoint = null; return }
     }
     if (!sent.unregistered) return
-    const register = await envelope($, 'session.start', {}, ++seq)
+    const register = await envelope($, 'session.start', {}, 0)
     try { if ((await send($, endpoint, register)).status !== 200) return } catch { return }
-    const again = await envelope($, event, fields, ++seq)
-    try { await send($, endpoint, again) } catch { endpoint = null }
+    try { await send($, endpoint, body) } catch { endpoint = null }
   } catch {
     // fail-open by design: the hived's other observations stand
   }

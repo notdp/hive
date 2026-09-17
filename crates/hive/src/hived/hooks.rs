@@ -31,10 +31,14 @@
 //! pre-booted spare starts another) and registers with `session.start`,
 //! which becomes the session's current epoch and retires the one before
 //! it; a retired epoch's late `session.start` is stale, so the current
-//! epoch cannot be rolled back. A turn event from an epoch the store
-//! does not know is answered `unregistered`, and the module registers
-//! and sends it again — which is also how the lane recovers after a
-//! lost `session.start` or a hived generation that started empty.
+//! epoch cannot be rolled back (the store keeps the last eight retired
+//! epochs of a session; an older one is forgotten). A turn event from an
+//! epoch the store does not know is answered `unregistered`, and the
+//! module registers (a `session.start` at `seq` 0, which advances no
+//! watermark) and sends the event again as it was, same `seq`, same
+//! `eventId`: a resend can never outrun what landed meanwhile. That is
+//! also how the lane recovers after a lost `session.start` or a hived
+//! generation that started empty.
 //!
 //! What the observations answer: [`hook_busy`], whether the engine is
 //! inside a turn, while the channel is fresh. Claude Code skips a hook
@@ -730,14 +734,10 @@ fn apply_event(
     if store.closed {
         return Applied::Closed;
     }
-    if !event_id.is_empty() {
-        if store.recent_event_ids.iter().any(|id| id == event_id) {
-            return Applied::Duplicate;
-        }
-        store.recent_event_ids.push_back(event_id.to_string());
-        while store.recent_event_ids.len() > RECENT_EVENT_IDS {
-            store.recent_event_ids.pop_front();
-        }
+    // Only a taken event enters the replay window: one answered
+    // `Unregistered` comes back as it was once the epoch registered.
+    if !event_id.is_empty() && store.recent_event_ids.iter().any(|id| id == event_id) {
+        return Applied::Duplicate;
     }
     let previous = store.by_session.get(session_id);
     let (open, retired) = match previous {
@@ -778,6 +778,12 @@ fn apply_event(
             retired,
         },
     );
+    if !event_id.is_empty() {
+        store.recent_event_ids.push_back(event_id.to_string());
+        while store.recent_event_ids.len() > RECENT_EVENT_IDS {
+            store.recent_event_ids.pop_front();
+        }
+    }
     Applied::Taken
 }
 
@@ -1172,6 +1178,67 @@ mod tests {
         let (_, answer) = post(&ctx, &at("e2", 9, &[("event", "session.start")]));
         assert_eq!(answer.get("stale"), Some(&Value::Bool(true)));
         assert_eq!(hook_busy("sid-a"), Some(true));
+    }
+
+    /// The module's recovery, request by request, as it plays out when the
+    /// start's `unregistered` answer is held past the complete's recovery:
+    /// the registration is a `session.start` at seq 0 and each resend keeps
+    /// its own seq and eventId, so the late start ends up stale.
+    #[test]
+    fn test_hook_recovery_resends_keep_their_order_and_a_late_start_stays_stale() {
+        let ctx = ctx_with(roster(), "");
+        let at = |epoch: &str, seq: u64, fields: &[(&str, &str)]| {
+            let mut map: Map<String, Value> =
+                serde_json::from_slice(&body_at(seq, fields)).unwrap();
+            map.insert("epoch".to_string(), Value::from(epoch));
+            serde_json::to_vec(&map).unwrap()
+        };
+        post(&ctx, &at("e1", 1, &[("event", "session.start")]));
+        let start = at(
+            "e2",
+            1,
+            &[("event", "turn.start"), ("turnId", "t1"), ("eventId", "s1")],
+        );
+        let complete = at(
+            "e2",
+            2,
+            &[
+                ("event", "turn.complete"),
+                ("turnId", "t1"),
+                ("eventId", "c1"),
+            ],
+        );
+        let register = at("e2", 0, &[("event", "session.start")]);
+        // e2's session.start was lost: both turn events are unregistered
+        assert_eq!(
+            post(&ctx, &start).1.get("unregistered"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            post(&ctx, &complete).1.get("unregistered"),
+            Some(&Value::Bool(true))
+        );
+        // the complete's report recovers first: register, resend as it was
+        assert!(post(&ctx, &register).1.get("stale").is_none());
+        let again = post(&ctx, &complete).1;
+        assert!(
+            again.get("duplicate").is_none() && again.get("stale").is_none(),
+            "{again:?}"
+        );
+        assert_eq!(hook_busy("sid-a"), Some(false));
+        // the start's report recovers later: its registration and its
+        // resend are both behind the complete, the turn stays closed
+        assert_eq!(
+            post(&ctx, &register).1.get("stale"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(post(&ctx, &start).1.get("stale"), Some(&Value::Bool(true)));
+        assert_eq!(hook_busy("sid-a"), Some(false));
+        // a taken event is in the replay window; a replay is a duplicate
+        assert_eq!(
+            post(&ctx, &complete).1.get("duplicate"),
+            Some(&Value::Bool(true))
+        );
     }
 
     #[test]
