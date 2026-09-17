@@ -822,9 +822,11 @@ Options:
   none is up and the desk then stays for its own idle stretch. `hive ps`
   is the inventory that starts nothing.
 
-  If the current tmux window has no team bound, returns a bootstrap payload
-  instead: `team=null`, a pane list, and a `hint` telling you to run `hive
-  create`.
+  With no team in scope — a tmux window nothing is bound to, or a session
+  outside tmux that has no team yet — returns a bootstrap payload instead,
+  exit 0: `team=null`, a `tmux` object with the window's pane list (absent
+  outside tmux), and a `hint`: `hive create [name]` starts a team, `hive
+  join <team>` joins one; `-t <team>` only inspects another team.
 
   Examples:
     hive team                                # full payload when a team is bound
