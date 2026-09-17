@@ -575,3 +575,37 @@ fn test_join_outside_tmux_rebuilds_a_missing_team_window_first() {
 }
 
 mod orch;
+
+#[test]
+fn test_team_with_nothing_in_scope_outside_tmux_answers_team_null_and_returns() {
+    let _env = display_env_outside();
+    // returning at all is exit 0: `fail` would end the test process
+    team_cmd("");
+    let payload = unbound_team_payload(false);
+    assert_eq!(payload.get("team"), Some(&Value::Null));
+    assert!(!payload.contains_key("tmux"), "{payload:?}");
+    let hint = payload
+        .get("hint")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(hint.contains("hive create"), "{hint}");
+    assert!(hint.contains("hive join <team>"), "{hint}");
+    assert!(hint.contains("-t <team>"), "{hint}");
+    assert!(payload.get("cwd").and_then(Value::as_str).is_some());
+}
+
+#[test]
+fn test_team_with_nothing_in_scope_inside_tmux_keeps_the_tmux_object() {
+    let _env = display_env();
+    let _argv = fake_tmux("", &[]);
+    let payload = unbound_team_payload(true);
+    assert_eq!(payload.get("team"), Some(&Value::Null));
+    let tmux = payload
+        .get("tmux")
+        .and_then(Value::as_object)
+        .expect("tmux object inside tmux");
+    assert!(tmux.get("panes").and_then(Value::as_array).is_some());
+    assert_eq!(tmux.get("paneCount"), Some(&Value::from(0)));
+    assert!(tmux.contains_key("session") && tmux.contains_key("window"));
+    assert_eq!(payload.get("hint"), unbound_team_payload(false).get("hint"));
+}
