@@ -402,6 +402,8 @@ Options:
 
   With no argument, probes yourself. With an agent name, probes that peer —
   pane liveness, transcript readability, hived heartbeat, runtime input state.
+  `claudeFunctionHooks` says whether Claude Code's function hooks switch is
+  on in its user settings (`hive plugin setup` sets it).
 
   The heartbeat is asked of a running desk, so this starts one where none
   is up: it is a diagnosis, not a read-only look (`hive ps` is that).
@@ -815,16 +817,20 @@ Options:
   `tmuxSession` / `tmuxWindow`, `runtimeWorkspace`, and `cwd`.
 
   Each member row carries the runtime fields `busy` and `inputState` — see
-  docs/runtime-model.md for semantics. `self` is a string pointer: look
+  docs/runtime-model.md for semantics. A claude member whose engine has
+  reported its turn lately also carries `busySource: "hook"` and
+  `hookEvent`: that `busy` is the engine's own word, not the registry's. `self` is a string pointer: look
   yourself up in `members[]` for your own state.
 
   Those fields come from the team's hived, so this verb starts one where
   none is up and the desk then stays for its own idle stretch. `hive ps`
   is the inventory that starts nothing.
 
-  If the current tmux window has no team bound, returns a bootstrap payload
-  instead: `team=null`, a pane list, and a `hint` telling you to run `hive
-  create`.
+  With no team in scope — a tmux window nothing is bound to, or a session
+  outside tmux that has no team yet — returns a bootstrap payload instead,
+  exit 0: `team=null`, a `tmux` object with the window's pane list (absent
+  outside tmux), and a `hint`: `hive create [name]` starts a team, `hive
+  join <team>` joins one; `-t <team>` only inspects another team.
 
   Examples:
     hive team                                # full payload when a team is bound
@@ -1071,8 +1077,11 @@ Options:
             r#"Usage: hive plugin setup [OPTIONS]
 
   One-time install: sync the marketplace, then register and install the hive
-  plugin for claude and codex on PATH. Run every step; exit 1 if any
-  registration step fails. A CLI missing from PATH is skipped.
+  plugin for claude and codex on PATH, and switch Claude Code's function
+  hooks on in its user settings (~/.claude/settings.json, env
+  CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1) so a desktop session reports its
+  turns to the team's hived. Run every step; exit 1 if any registration
+  step fails. A CLI missing from PATH is skipped.
 
 Options:
   -h, --help  Show this message and exit.

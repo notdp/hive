@@ -145,11 +145,20 @@ behavior is documented in the modules themselves.
   `cargo nextest run` fails when the claude manifest drifts from
   `CARGO_PKG_VERSION` (`plugin_manager.rs`), the codex manifest is not
   checked, and a missed codex bump only costs an idempotent re-add at the
-  next codex launch. The plugin ships no hooks at all: codex gates plugin
-  hooks behind a hook-review dialog that would block unattended members, so
-  the codex re-add lives in hive's launch path
+  next codex launch. The plugin ships no classic hooks (`hooks/hooks.json`,
+  the `PreToolUse`-style command hooks): codex discovers that file and
+  gates it behind a hook-review dialog that would block unattended
+  members, so the codex re-add lives in hive's launch path
   (`ensure_codex_plugin_current`), and the claude side needs none — the
-  command source is the sync.
+  command source is the sync. The claude side does ship a function-hooks
+  module, `mod/register.ts`, named by the claude manifest's `hooks` field
+  alone: codex never reads that manifest or that path. The module is the
+  engine's own report of its turn boundaries to the hived
+  (`hived/hooks.rs`); it decides no membership, sits above the registry
+  status for `busy` only while its last report is fresh, and a Bash
+  `tool.call` hook stays out of it while
+  anthropics/claude-code#92533 (any such hook breaks `Agent` worktree
+  isolation) is open.
 - The viewer's markdown engine is the pinned git dependency
   `xai-grok-markdown` (`crates/hive/Cargo.toml`), and its chrome mirrors
   grok's own pager: doc comments cite grok files by bare name (`grok

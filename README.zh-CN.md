@@ -22,21 +22,13 @@ Hive 是单个 Rust 二进制。[GitHub Releases](https://github.com/notdp/hive/
 curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
 ```
 
-有 Rust 工具链的话还有两条路：[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) 拉取同一份预编译 release（不编译），`cargo install` 从源码编译：
-
-```bash
-cargo binstall --git https://github.com/notdp/hive hive
-# 或
-cargo install --git https://github.com/notdp/hive hive
-```
-
-插件——教 agent 协议的那份 skill——内嵌在二进制里，由 `hive` 在 `$HIVE_HOME` 下物化出一个本地 marketplace 来提供。一条命令就为 PATH 上的每个 agent CLI 注册并安装它（重跑可修复安装）：
+插件——教 agent 协议的那份 skill——内嵌在二进制里，由 `hive` 在 `$HIVE_HOME` 下物化出一个本地 marketplace 来提供。安装脚本的最后一步就是为 PATH 上的每个 agent CLI 注册并安装它；重跑这一步可修复安装：
 
 ```bash
 hive plugin setup
 ```
 
-它在底下物化 marketplace，再对 claude（2.1.229+）和 codex 各执行 `plugin marketplace add` + install。claude 侧的 marketplace 条目是 command source——Claude 每个 session 重跑一次 `hive plugin sync`，所以 skill 更新随二进制走；codex 侧插件不带任何 hook（hook 会卡在 codex 的 hook 审阅对话框后面）——hive 自己的 codex 启动路径在二进制版本变化时、引擎启动前重新 add 插件。不从远端拉取任何东西，也不改任何 settings。
+它在底下物化 marketplace，再对 claude（2.1.229+）和 codex 各执行 `plugin marketplace add` + install。claude 侧的 marketplace 条目是 command source——Claude 每个 session 重跑一次 `hive plugin sync`，所以 skill 更新随二进制走；codex 侧插件不带任何 hook（hook 会卡在 codex 的 hook 审阅对话框后面）——hive 自己的 codex 启动路径在二进制版本变化时、引擎启动前重新 add 插件。不从远端拉取任何东西；对 claude 的 settings 只写一个键：`~/.claude/settings.json` 的 `env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`（Claude Code 的 function hooks 开关，桌面 session 靠它向团队的 hived 报 turn；`hive doctor` 能看到开没开）。
 
 依赖：
 

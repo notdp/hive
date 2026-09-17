@@ -210,6 +210,8 @@ fn augment_team_payload_with_runtime(
                 "sessionId",
                 "inputState",
                 "inputReason",
+                "busySource",
+                "hookEvent",
             ] {
                 match runtime_fields.get(key) {
                     None | Some(Value::Null) => continue,

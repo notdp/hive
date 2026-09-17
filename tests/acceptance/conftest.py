@@ -74,6 +74,7 @@ class Rig:
     session: str
     team: str
     workspace: Path
+    pane: str = ""  # the rig's own pane: the orch identity a spawn is issued under
     flow_stdout: str = ""  # every node's stderr tail + one RESULT line per member
     flow_rc: int = 0  # the first non-zero node exit code, 0 when every node exited 0
     node_rcs: dict[str, int] = field(default_factory=dict)  # member -> raw exit code
@@ -152,6 +153,7 @@ def rig():
 
     _tmux("new-session", "-d", "-s", r.session, "-x", "220", "-y", "50", "-c", str(r.root))
     pane = _tmux("display", "-t", f"{r.session}:", "-p", "#{pane_id}").strip()
+    r.pane = pane
     try:
         _tmux("send-keys", "-t", pane, "-l",
               f"hive create {r.team} --workspace {r.workspace} && touch {r.root}/created")

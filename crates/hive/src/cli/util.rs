@@ -91,14 +91,13 @@ pub(crate) fn stdin_isatty() -> bool {
     unsafe { libc::isatty(0) == 1 }
 }
 
+pub(crate) const NO_IDENTITY_MESSAGE: &str =
+    "cannot resolve own member identity: this engine is on no roster \
+     (a codex thread, grok session or Claude session not recorded by \
+     any team) — join a team first, or run from a bound pane";
+
 pub(crate) fn resolve_sender(agent_name: Option<&str>) -> String {
-    identity::resolve_sender(agent_name).unwrap_or_else(|| {
-        fail(
-            "cannot resolve own member identity: this engine is on no roster \
-             (a codex thread, grok session or Claude session not recorded by \
-             any team) — join a team first, or run from a bound pane",
-        )
-    })
+    identity::resolve_sender(agent_name).unwrap_or_else(|| fail(NO_IDENTITY_MESSAGE))
 }
 
 // ---------------------------------------------------------------------------

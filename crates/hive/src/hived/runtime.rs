@@ -97,6 +97,7 @@ fn claude_job_runtime(job_id: &str, record_session: &str) -> Map<String, Value> 
         } else {
             "unresolved".to_string()
         };
+        overlay_hook_busy(&mut fields, &sid);
         fields.insert("sessionId".to_string(), Value::from(sid));
         return fields;
     }
@@ -468,7 +469,19 @@ fn claude_session_runtime(session_id: &str) -> Option<Map<String, Value>> {
             fields.insert("inputReason".to_string(), Value::from(""));
         }
     }
+    overlay_hook_busy(&mut fields, session_id);
     Some(fields)
+}
+
+/// The engine's own hook report of its turn, while fresh, over the
+/// registry-derived `busy`; `inputState` stays the registry's. `busySource`
+/// and `hookEvent` say so, and `hive team` / `hive doctor` carry them.
+fn overlay_hook_busy(fields: &mut Map<String, Value>, session_id: &str) {
+    if let Some(seen) = fresh_observation(session_id) {
+        fields.insert("busy".to_string(), Value::Bool(seen.turn_id.is_some()));
+        fields.insert("busySource".to_string(), Value::from("hook"));
+        fields.insert("hookEvent".to_string(), Value::from(seen.last_event));
+    }
 }
 
 /// Runtime of a member with no pane (its window is gone): the engine's own

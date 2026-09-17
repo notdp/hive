@@ -24,26 +24,18 @@ curl -fsSL https://raw.githubusercontent.com/notdp/hive/main/install.sh | sh
 
 This installs the binary and registers the bundled plugin for claude and codex on PATH. Plugin registration failures return a nonzero exit code; a CLI missing from PATH is skipped. If Claude's plugin registration fails inside a Claude Code session, run `hive plugin setup` from your own terminal, outside Claude Code.
 
-With a Rust toolchain there are two more routes: [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the same prebuilt release (no compile), `cargo install` builds from source:
-
-```bash
-cargo binstall --git https://github.com/notdp/hive hive
-# or
-cargo install --git https://github.com/notdp/hive hive
-```
-
-After `cargo binstall` or `cargo install`, register the plugin separately. The plugin ships inside the binary and is served from a local marketplace under `$HIVE_HOME`. You can also rerun this command to repair registration:
+The plugin ships inside the binary and is served from a local marketplace under `$HIVE_HOME`; the installer registers it as its last step. Rerun that step to repair registration:
 
 ```bash
 hive plugin setup
 ```
 
-Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin ships no hooks (hooks would sit behind codex's hook-review dialog) — hive's own codex launch path re-adds the plugin when the binary version changes, before the engine starts. The plugin payload is local; registration updates the agent CLIs' plugin settings.
+Under the hood that materializes the marketplace and runs `plugin marketplace add` + install for claude (2.1.229+) and codex. On claude the marketplace entry is a command source — Claude re-runs `hive plugin sync` once per session, so skill updates ride the binary; on codex the plugin ships no classic hooks (they would sit behind codex's hook-review dialog) — hive's own codex launch path re-adds the plugin when the binary version changes, before the engine starts. The claude manifest names a function-hooks module (`mod/register.ts`): every claude engine hive spawns starts with Claude Code's function hooks enabled and reports its own turn boundaries to the team's hived; a desktop Claude session that joins a team is expected to report too through the same switch, which `hive plugin setup` writes into `~/.claude/settings.json` under `env` (Claude Code still gates mods behind `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`; `hive doctor` shows whether it is on); that desktop path is not verified yet, the CLI path is. The plugin payload is local; registration updates the agent CLIs' plugin settings.
 
 Requires (hive is written against these exact versions — the versions on the machine it is developed on — and carries no compatibility code for older ones; upgrade the engine, then hive):
 
 - `tmux` 3.7c
-- `claude` 2.1.263 (Claude Code)
+- `claude` 2.1.274 (Claude Code; the function-hooks contract — `session.start`, `turn.start`, `turn.complete` — was verified on this build's CLI, `-p` and `--bg` alike, and on the 2.1.271 CLI the desktop app bundles)
 - `codex-cli` 0.153.4
 - `grok` 1.0.30
 

@@ -219,6 +219,13 @@ fn spawn_announced(plain: &str) -> String {
     String::new()
 }
 
+/// The settings every hive-spawned claude engine starts with: Claude
+/// Code's function hooks switched on, so the hive plugin's hooks module
+/// loads and the engine reports its own turn boundaries to the hived
+/// (`hived/hooks.rs`). Inline JSON, not a path: it persists verbatim as a
+/// respawn flag. Observed to gate the loader on 2.1.274.
+pub const FUNCTION_HOOKS_SETTINGS: &str = r#"{"env":{"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS":"1"}}"#;
+
 /// Start a `claude --bg` job; return its jobId, or None on failure.
 ///
 /// *extra_args* are forwarded verbatim (`--model`, `-r <sid> --fork-session`,
@@ -239,6 +246,8 @@ pub fn spawn_job(
         argv.push("--name".to_string());
         argv.push(name.to_string());
     }
+    argv.push("--settings".to_string());
+    argv.push(FUNCTION_HOOKS_SETTINGS.to_string());
     argv.extend(extra_args.iter().cloned());
     if !prompt.is_empty() {
         argv.push(prompt.to_string());

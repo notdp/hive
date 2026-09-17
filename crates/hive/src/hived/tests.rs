@@ -906,6 +906,79 @@ fn record(job: &str, sid: &str) -> Option<PaneJob> {
     })
 }
 
+/// Feed the hooks endpoint's decision path one event for *session_id*, as
+/// the plugin's POST would after the roster named it `w1`.
+fn report_hook(session_id: &str, event: &str, turn_id: &str) {
+    use std::sync::atomic::AtomicU64;
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let ctx = HookContext {
+        token: "t".to_string(),
+        team: "probe".to_string(),
+        created: String::new(),
+        workspace: String::new(),
+        roster: Box::new(|_sid| Some("w1".to_string())),
+    };
+    let body = serde_json::json!({
+        "sessionId": session_id, "event": event, "turnId": turn_id,
+        "epoch": "test", "seq": SEQ.fetch_add(1, Ordering::SeqCst),
+    });
+    let (status, _) = handle_hook_request(
+        &ctx,
+        "POST",
+        HOOKS_PATH,
+        "Bearer t",
+        &serde_json::to_vec(&body).unwrap(),
+    );
+    assert_eq!(status, 200);
+}
+
+#[test]
+fn test_claude_registry_busy_prefers_a_fresh_hook_report_over_the_status() {
+    let idle = engine("idle", "", "sess-hooked");
+    let hook = Hook {
+        cb_job_id_for_pane: Some(Arc::new(|_p| Some("cafe1234".to_string()))),
+        cb_engine_session_for_job: Some(Arc::new(move |_j| Some(idle.clone()))),
+        ..Hook::default()
+    };
+    let _guard = testhook::install(hook);
+    // no report yet: the registry status decides
+    assert_eq!(claude_registry_busy("%1"), Some(false));
+    report_hook("sess-hooked", "turn.start", "turn-1");
+    assert_eq!(
+        claude_registry_busy("%1"),
+        Some(true),
+        "the engine's own turn beats an idle status"
+    );
+    report_hook("sess-hooked", "turn.complete", "turn-1");
+    assert_eq!(claude_registry_busy("%1"), Some(false));
+    // another job's report changes nothing for this pane
+    report_hook("sess-other", "turn.start", "turn-9");
+    assert_eq!(claude_registry_busy("%1"), Some(false));
+}
+
+#[test]
+fn test_bg_runtime_overlays_a_fresh_hook_report_and_names_its_source() {
+    let mut hook = Hook::default();
+    pin(
+        &mut hook,
+        record("cafe1234", ""),
+        Some(engine("idle", "", "sess-overlaid")),
+        Some(vec![]),
+    );
+    let _guard = testhook::install(hook);
+    report_hook("sess-overlaid", "turn.start", "turn-1");
+
+    let rt = claude_bg_runtime("%1").unwrap();
+    assert_eq!(rt["busy"], Value::Bool(true));
+    assert_eq!(rt["busySource"], Value::from("hook"));
+    assert_eq!(rt["hookEvent"], Value::from("turn.start"));
+    assert_eq!(
+        rt["inputState"],
+        Value::from("ready"),
+        "inputState stays the registry's"
+    );
+}
+
 #[test]
 fn test_bg_runtime_live_engine_reports_status_and_session() {
     let mut hook = Hook::default();
@@ -6246,6 +6319,32 @@ fn test_doctor_payload_exposes_cli_alive() {
     let diag = doctor_payload("/tmp/ws", "t", "v", false, None).unwrap();
     assert_eq!(diag["alive"], Value::Bool(true));
     assert_eq!(diag["cliAlive"], Value::Bool(false));
+}
+
+#[test]
+fn test_doctor_payload_carries_the_hook_busy_source() {
+    let hook = Hook {
+        team_load: Some(Arc::new(|_name| {
+            Ok(fake_team("t", vec![fake_agent("v", "%1", "claude")]))
+        })),
+        agent_is_alive: Some(Arc::new(|_a| true)),
+        member_runtime_payload: Some(Arc::new(|_p, _r| {
+            json_obj(&[
+                ("alive", Value::Bool(true)),
+                ("cliAlive", Value::Bool(true)),
+                ("busy", Value::Bool(true)),
+                ("inputState", Value::from("ready")),
+                ("busySource", Value::from("hook")),
+                ("hookEvent", Value::from("turn.start")),
+            ])
+        })),
+        ..Default::default()
+    };
+    let _guard = testhook::install(hook);
+    let diag = doctor_payload("/tmp/ws", "t", "v", false, None).unwrap();
+    assert_eq!(diag["busy"], Value::Bool(true));
+    assert_eq!(diag["busySource"], Value::from("hook"));
+    assert_eq!(diag["hookEvent"], Value::from("turn.start"));
 }
 
 /// A live interactive Claude session as the sessions registry lists it.

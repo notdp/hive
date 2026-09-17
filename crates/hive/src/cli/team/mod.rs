@@ -409,7 +409,16 @@ fn create_detached_team(
         }
     }
     remember_context(name, &ws_str, LEAD_AGENT_NAME);
-    println!("Team '{name}' created (tmux window {window} — `hive attach {name}` opens it).");
+    if orch_member.is_some() {
+        // The desktop creator's window holds only the placeholder shell
+        // until the first spawn: pointing at `hive attach` now shows the
+        // human an empty prompt.
+        println!(
+            "Team '{name}' created (tmux window {window} — the first `hive spawn` fills it; `hive attach {name}` opens it after that)."
+        );
+    } else {
+        println!("Team '{name}' created (tmux window {window} — `hive attach {name}` opens it).");
+    }
     if let Some(warning) = tmux::stale_version_warning() {
         eprintln!("{warning}");
     }
@@ -874,11 +883,41 @@ pub(crate) fn team_cmd(team_arg: &str) {
             return;
         }
     }
-    if !identity::is_inside_tmux() {
-        fail("no team in scope — pass -t <team> (see `hive ls`)");
-    }
+    println!(
+        "{}",
+        json_pretty(&Value::Object(unbound_team_payload(
+            identity::is_inside_tmux()
+        )))
+    );
+}
+
+/// The bootstrap answer of `hive team` when nothing is in scope: `team`
+/// null, the `tmux` object (absent outside tmux: readers take the key with
+/// a `{}` default, and a null would break them) and the `hint` naming the
+/// two real next steps. Exit 0 either side of tmux: a session that has no
+/// team yet is a normal state, not a failure, and the skill entry rule
+/// keys on `team=null`.
+fn unbound_team_payload(inside_tmux: bool) -> Map<String, Value> {
     let mut result = Map::new();
     result.insert("team".to_string(), Value::Null);
+    if inside_tmux {
+        result.insert("tmux".to_string(), Value::Object(unbound_tmux_payload()));
+    }
+    result.insert(
+        "hint".to_string(),
+        Value::String(UNBOUND_TEAM_HINT.to_string()),
+    );
+    add_runtime_location_fields(&mut result);
+    result
+}
+
+const UNBOUND_TEAM_HINT: &str = "No team bound. `hive create [name]` starts a team with this \
+     session as orch (then `hive spawn <name> --task <artifact>` adds members); \
+     `hive join <team>` joins an existing team; `-t <team>` only inspects \
+     another team (see `hive ls`).";
+
+/// The current tmux window as `hive team` shows it when no team is bound.
+fn unbound_tmux_payload() -> Map<String, Value> {
     let session_name = identity::current_session_name();
     let window_target = identity::current_window_target();
     let current_pane = identity::current_pane_id();
@@ -924,17 +963,7 @@ pub(crate) fn team_cmd(team_arg: &str) {
     if let Some(warning) = tmux::stale_version_warning() {
         tmux_payload.insert("warning".to_string(), Value::from(warning));
     }
-    result.insert("tmux".to_string(), Value::Object(tmux_payload));
-    result.insert(
-        "hint".to_string(),
-        Value::String(
-            "No team bound. Run `hive create` to make this pane the orch of a fresh team, \
-             then spawn members with `hive spawn <name> --task <artifact>`."
-                .to_string(),
-        ),
-    );
-    add_runtime_location_fields(&mut result);
-    println!("{}", json_pretty(&Value::Object(result)));
+    tmux_payload
 }
 
 /// Diagnose agent connectivity and session state.
@@ -951,7 +980,23 @@ pub(crate) fn doctor(agent_name: &str) {
     } else {
         agent_name.to_string()
     };
-    let (payload, healthy) = doctor_report(&mut t, &ws, &target_name);
+    let (mut payload, healthy) = doctor_report(&mut t, &ws, &target_name);
+    // Claude's own switch for the hooks lane: a desktop member without
+    // it reports no turns, whatever the hived says.
+    let mut hooks = Map::new();
+    hooks.insert(
+        "settings".to_string(),
+        Value::from(
+            crate::claude_settings::settings_path()
+                .display()
+                .to_string(),
+        ),
+    );
+    hooks.insert(
+        "enabled".to_string(),
+        Value::Bool(crate::claude_settings::function_hooks_enabled()),
+    );
+    payload.insert("claudeFunctionHooks".to_string(), Value::Object(hooks));
     println!("{}", json_pretty(&Value::Object(payload)));
     if !healthy {
         std::process::exit(1);

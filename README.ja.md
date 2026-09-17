@@ -22,21 +22,13 @@ Hive は単一の Rust バイナリです。[GitHub Releases](https://github.com
 curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer.sh | sh
 ```
 
-Rust ツールチェインがあれば経路がもう 2 つあります。[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) は同じビルド済み release を取得し（コンパイルなし）、`cargo install` はソースからビルドします:
-
-```bash
-cargo binstall --git https://github.com/notdp/hive hive
-# または
-cargo install --git https://github.com/notdp/hive hive
-```
-
-プラグイン — エージェントにプロトコルを教えるスキル — はバイナリに同梱され、`hive` が `$HIVE_HOME` 配下に実体化するローカル marketplace から配られます。1 コマンドで PATH 上のすべてのエージェント CLI に登録とインストールを行います（再実行すればインストールを修復します）:
+プラグイン — エージェントにプロトコルを教えるスキル — はバイナリに同梱され、`hive` が `$HIVE_HOME` 配下に実体化するローカル marketplace から配られます。インストーラの最後のステップが PATH 上のすべてのエージェント CLI への登録とインストールです。再実行すればインストールを修復します:
 
 ```bash
 hive plugin setup
 ```
 
-内部では marketplace を実体化し、claude（2.1.229 以上）と codex それぞれに `plugin marketplace add` + install を実行します。claude 側の marketplace エントリは command source で、Claude はセッションごとに `hive plugin sync` を再実行するため、スキルの更新はバイナリに乗って届きます。codex 側のプラグインはフックを一切持ちません（フックは codex のフック審査ダイアログの後ろに置かれてしまいます）。バイナリのバージョンが変わると、hive 自身の codex 起動パスがエンジン起動前にプラグインを再 add します。リモートからは何も取得せず、settings にも触れません。
+内部では marketplace を実体化し、claude（2.1.229 以上）と codex それぞれに `plugin marketplace add` + install を実行します。claude 側の marketplace エントリは command source で、Claude はセッションごとに `hive plugin sync` を再実行するため、スキルの更新はバイナリに乗って届きます。codex 側のプラグインはフックを一切持ちません（フックは codex のフック審査ダイアログの後ろに置かれてしまいます）。バイナリのバージョンが変わると、hive 自身の codex 起動パスがエンジン起動前にプラグインを再 add します。リモートからは何も取得しません。claude の settings に書くのは 1 キーだけです: `~/.claude/settings.json` の `env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`（Claude Code の function hooks スイッチ。デスクトップのセッションはこれでチームの hived に turn を報告します。`hive doctor` で有無を確認できます）。
 
 必要な環境:
 
