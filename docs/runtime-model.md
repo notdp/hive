@@ -1069,9 +1069,12 @@ exists; the module looks its team up again at every event, so the first
 report that lands is typically the task turn's `turn.complete`, and the
 member reads as before until then.
 
-The desktop's own session is not spawned by hive, so its switch is the
-human's: `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` in `~/.claude/settings.json`
-under `env`. A desktop member without it reads as before. The desktop
+The desktop's own session is not spawned by hive, so its switch lives in
+Claude's own user settings: `hive plugin setup` writes
+`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` into `~/.claude/settings.json` under
+`env` (`claude_settings.rs`, every other key kept), and `hive doctor`
+reports it as `claudeFunctionHooks`. A desktop member without it reads as
+before. The desktop
 path itself (its hooks module finding the roster and posting) is not yet
 verified; the CLI path is, on `-p`, `--bg` and a hive-spawned member.
 

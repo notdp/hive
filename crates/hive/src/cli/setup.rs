@@ -168,6 +168,23 @@ fn setup_plugins() -> bool {
             "claude plugin refresh",
             &["claude", "plugin", "update", "hive@hive", "--yes"],
         );
+        // The desktop's sessions are not spawned by hive, so the function
+        // hooks switch reaches them only through Claude's own settings.
+        let settings = crate::claude_settings::settings_path();
+        match crate::claude_settings::enable_function_hooks() {
+            Ok(true) => println!(
+                "setup: claude function hooks: switched on in {}",
+                settings.display()
+            ),
+            Ok(false) => println!(
+                "setup: claude function hooks: already on in {}",
+                settings.display()
+            ),
+            Err(e) => {
+                println!("setup: claude function hooks: {e}");
+                success = false;
+            }
+        }
     } else {
         println!("setup: claude: not on PATH, skipped");
     }
@@ -365,6 +382,8 @@ mod tests {
         let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("HIVE_HOME", tmp.path().join(".hive"));
+        env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
+        env.remove("CLAUDE_HOME");
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let log = tmp.path().join("calls.log");
@@ -404,12 +423,22 @@ mod tests {
                 "codex plugin add hive@hive".to_string(),
             ]
         );
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.path().join("claude/settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings["env"][crate::claude_settings::FUNCTION_HOOKS_ENV],
+            Value::from("1")
+        );
     }
 
     #[test]
     fn test_plugin_setup_reports_failure_and_runs_later_steps() {
         let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
+        env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
+        env.remove("CLAUDE_HOME");
         env.set("HIVE_HOME", tmp.path().join("hive"));
         env.set("CLAUDE_HOME", tmp.path().join("claude"));
         env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
@@ -447,6 +476,8 @@ mod tests {
     fn test_plugin_setup_without_agent_clis_succeeds() {
         let mut env = EnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
+        env.set("CLAUDE_CONFIG_DIR", tmp.path().join("claude"));
+        env.remove("CLAUDE_HOME");
         env.set("HIVE_HOME", tmp.path().join("hive"));
         env.set("CLAUDE_HOME", tmp.path().join("claude"));
         env.set("CODEX_HOME", tmp.path().join("codex"));

@@ -951,7 +951,23 @@ pub(crate) fn doctor(agent_name: &str) {
     } else {
         agent_name.to_string()
     };
-    let (payload, healthy) = doctor_report(&mut t, &ws, &target_name);
+    let (mut payload, healthy) = doctor_report(&mut t, &ws, &target_name);
+    // Claude's own switch for the hooks lane: a desktop member without
+    // it reports no turns, whatever the hived says.
+    let mut hooks = Map::new();
+    hooks.insert(
+        "settings".to_string(),
+        Value::from(
+            crate::claude_settings::settings_path()
+                .display()
+                .to_string(),
+        ),
+    );
+    hooks.insert(
+        "enabled".to_string(),
+        Value::Bool(crate::claude_settings::function_hooks_enabled()),
+    );
+    payload.insert("claudeFunctionHooks".to_string(), Value::Object(hooks));
     println!("{}", json_pretty(&Value::Object(payload)));
     if !healthy {
         std::process::exit(1);

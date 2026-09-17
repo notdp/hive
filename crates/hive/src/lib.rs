@@ -3,6 +3,7 @@ pub mod agent;
 pub mod agent_cli;
 pub mod assets;
 pub mod bus;
+pub mod claude_settings;
 pub mod cli;
 pub mod clock;
 pub mod context;
