@@ -24,15 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/notdp/hive/main/install.sh | sh
 
 This installs the binary and registers the bundled plugin for claude and codex on PATH. Plugin registration failures return a nonzero exit code; a CLI missing from PATH is skipped. If Claude's plugin registration fails inside a Claude Code session, run `hive plugin setup` from your own terminal, outside Claude Code.
 
-With a Rust toolchain there are two more routes: [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) fetches the same prebuilt release (no compile), `cargo install` builds from source:
-
-```bash
-cargo binstall --git https://github.com/notdp/hive hive
-# or
-cargo install --git https://github.com/notdp/hive hive
-```
-
-After `cargo binstall` or `cargo install`, register the plugin separately. The plugin ships inside the binary and is served from a local marketplace under `$HIVE_HOME`. You can also rerun this command to repair registration:
+The plugin ships inside the binary and is served from a local marketplace under `$HIVE_HOME`; the installer registers it as its last step. Rerun that step to repair registration:
 
 ```bash
 hive plugin setup
