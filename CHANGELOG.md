@@ -4,6 +4,23 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.22.0
+
+### Features
+
+- Claude engines report their own turn boundaries to the team's hived over Claude Code function hooks: the plugin ships a hooks module (`mod/register.ts`), every hived listens on a loopback endpoint (`run/hooks-endpoint.json`, token + instance + roster admission), and a claude member's `busy` is the engine's own word while its last report is fresh — `hive team` and `hive doctor` carry `busySource: "hook"` / `hookEvent` (#242)
+- `hive plugin setup` switches Claude Code's function hooks on for desktop sessions (`env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` in the user settings, every other key kept); `hive doctor` reports it; hive-spawned engines get the switch as a `--settings` flag; Claude Code 2.1.274 is the pinned requirement (#242)
+
+### Fixes
+
+- A `--task` spawn resolves its sender before any spawn side effect, so a caller with no member identity is refused while the roster is still clean instead of leaving an orphan member (#242)
+- With no team in scope, `hive team` answers `team: null` with a hint outside tmux too, exit 0 (#242)
+
+### Internal
+
+- The one-line installer is the only documented install route; the cargo routes are gone from the three READMEs (#242)
+- Skill: a desktop orch attaches the team window after the first spawn, when the window has a member pane, not at create (#242)
+
 ## 0.21.5
 
 ### Internal
