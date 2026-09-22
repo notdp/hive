@@ -57,7 +57,7 @@ def prepare(name, run, skill, engine='claude'):
             if rule.get('argv', [])[:1] == ['create']:
                 for response in rule['responses']:
                     response['stdout'] = '\n'.join(line for line in response['stdout'].splitlines()
-                        if not line.startswith(('You are ', 'Rename this session now:'))) + '\n'
+                        if not line.startswith(('You are ', 'This session'))) + '\n'
     control = fixture_path(run)
     control.parent.mkdir(parents=True, exist_ok=False)
     control.write_text(json.dumps(fixture, ensure_ascii=False, indent=2) + '\n')

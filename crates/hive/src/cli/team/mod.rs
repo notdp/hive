@@ -215,14 +215,16 @@ fn map_entry_str(value: &Value) -> String {
     }
 }
 
-/// The protocol asks a tmux-less Claude session to badge its own title so
-/// the human and `hive ccd ls` can tell it apart; there is no API hive can
-/// call for that, so the command output carries the reminder — an orch that
-/// skipped it was the first thing a human noticed.
+/// A tmux-less Claude session's title carries a badge so the human and
+/// `hive ccd ls` can tell it apart. The hive plugin's hooks module puts it
+/// there through the desktop's own session tools at the end of the turn
+/// that enrolled the session, and takes it off after the session leaves;
+/// the command output says so, so the session does not rename itself on
+/// top of it.
 fn title_badge_hint(badge: &str) -> String {
     format!(
-        "Rename this session now: prefix its title with `{badge}` (set_session_title \
-         or your host's rename), and drop the prefix when you leave the team."
+        "This session's title gets the `{badge}` prefix from the hive plugin when this \
+         turn ends, and loses it after the session leaves the team; do not rename it yourself."
     )
 }
 
