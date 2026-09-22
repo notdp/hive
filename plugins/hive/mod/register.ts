@@ -72,11 +72,13 @@ const locate = async ($: EngineInterface, sid: string): Promise<Endpoint | null>
 // title while a roster names it, gone once none does: kept by the module
 // through the desktop's own session tools (`$.mcp.call` needs no
 // permission), at session.start and at every turn's end, and only when
-// the membership changed since it last looked. A terminal session has no
-// title to badge; a desktop whose session tools are absent is left alone.
+// the membership changed since it last looked. Whether the session has
+// those tools is learned from the first call (a desktop session's
+// `session.start` names no surface): a session without them — a terminal,
+// a bg job — is left alone from then on.
 const BADGE_RE = /^\[[A-Za-z0-9_.-]+\] /
 const DESKTOP_MCP = 'ccd_session_mgmt'
-let desktop = false
+let desktopTools: boolean | null = null
 let badgeKey: string | null = null
 
 const mcpText = (r: any): string => {
@@ -85,13 +87,15 @@ const mcpText = (r: any): string => {
 }
 
 const syncBadge = async ($: EngineInterface) => {
-  if (!desktop) return
+  if (desktopTools === false) return
   if (!sessionId) sessionId = await $.session.id()
   const m = await membership($, sessionId)
   const key = m && m.member ? `${m.team}.${m.member}` : ''
   if (key === badgeKey) return
-  const got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' })
-  if (got.isError) return
+  let got
+  try { got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' }) } catch { desktopTools = false; return }
+  if (got.isError) { desktopTools = false; return }
+  desktopTools = true
   let title = ''
   try { title = String(JSON.parse(mcpText(got))?.title ?? '') } catch { return }
   const base = title.replace(BADGE_RE, '')
@@ -173,7 +177,6 @@ const bounded = ($: EngineInterface, work: Promise<void>, ms = POST_BUDGET_MS) =
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
-    desktop = e.surface === 'desktop'
     await bounded($, report($, 'session.start', { cwd: e.cwd, surface: e.surface, isInteractive: e.isInteractive }))
     await bounded($, syncBadge($).catch(() => undefined))
     return next(e)
