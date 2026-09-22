@@ -112,6 +112,15 @@ const report = async ($: EngineInterface, event: string, fields: Record<string, 
   }
 }
 
+// A hive frame as the inbox lane delivers it to a session: the receiver's
+// own peer-card tag around one <HIVE> envelope (claude_sessions::
+// peer_card_envelope), or the bare envelope. Anything else is not hive's.
+const hiveEnvelopeOf = (text: string): string | null => {
+  const m = /^<cross-session-message\b[^>]*>\n([\s\S]*)\n<\/cross-session-message>$/.exec(text.trim())
+  const inner = (m ? m[1] : text).trim()
+  return inner.startsWith('<HIVE') && inner.endsWith('</HIVE>') ? inner : null
+}
+
 // Bounded: a slow hived must not hold the turn.
 const bounded = ($: EngineInterface, work: Promise<void>, ms = POST_BUDGET_MS) =>
   Promise.race([work, $.clock.sleep(ms)])
@@ -138,5 +147,30 @@ export const register: Register = (on) => {
   on('session.end', async ($, e, next) => {
     await bounded($, report($, 'session.end', { reason: e.reason, resumeId: e.resume?.id ?? null }), END_BUDGET_MS)
     return next(e)
+  })
+  // The relay lane: a hive frame arriving on this session's inbox is taken
+  // here and submitted again as the plugin's own prompt, so the model reads
+  // it under the plugin's short wrapper instead of the peer banner and its
+  // safety paragraph (about 180 characters of wrapper instead of 580,
+  // measured on 2.1.278). Only for a session some roster names: an outside
+  // session keeps the peer frame, whose `from` is what its own reply goes
+  // to. The frame is consumed only once the submission is in — a refused
+  // or dropped submission, or a throw, passes the frame on unchanged, so a
+  // message is never lost to the relay. A plugin's prompt runs once the
+  // session is idle, as its own turn; nothing folds into a running turn.
+  on('session.receive', async ($, e, next) => {
+    if (e.origin?.kind !== 'peer') return next(e)
+    const inner = hiveEnvelopeOf(e.text)
+    if (!inner) return next(e)
+    try {
+      if (!sessionId) sessionId = await $.session.id()
+      if (!endpoint) endpoint = await locate($, sessionId)
+      if (!endpoint) return next(e)
+      const r = await $.prompt.submit({ text: inner })
+      if ('drop' in r && r.drop) return next(e)
+      return { consumed: 'hive: relayed as the plugin\'s own prompt' }
+    } catch {
+      return next(e)
+    }
   })
 }

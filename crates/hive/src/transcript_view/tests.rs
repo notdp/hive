@@ -232,6 +232,15 @@ fn test_parse_hive_message_reads_every_arrival_shape() {
     assert_eq!(carded.from.as_deref(), Some("hornet.sage"));
     assert_eq!(carded.body, "done");
     assert!(carded.injected && !carded.mid_turn);
+    // the relay lane: the hive plugin's own prompt around the bare envelope
+    let relayed = parse_hive_message(
+        "The hive plugin sent a message:\n<HIVE from=hornet.sage to=hornet.orch>\ndone\n</HIVE>\n\n\
+         This is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.",
+    )
+    .unwrap();
+    assert_eq!(relayed.from.as_deref(), Some("hornet.sage"));
+    assert_eq!(relayed.body, "done");
+    assert!(relayed.injected && !relayed.mid_turn);
     let carded_bare = parse_hive_message(
         "<cross-session-message from=\"hornet.sage\" from-name=\"hornet.sage\">\n<HIVE from=hornet.sage to=hornet.orch>\ndone\n</HIVE>\n</cross-session-message>",
     )
