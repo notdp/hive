@@ -1057,7 +1057,11 @@ What the report decides, and what it does not:
   (the engine leaving: exit, `/clear`, a resume, logout, a signal; a
   `kill -9` raises nothing, and the module gives the report one second
   under the engine's own end step) closes whatever turn is open at once,
-  so `busy` drops with the engine instead of waiting the report out;
+  so `busy` drops with the engine instead of waiting the report out; it is
+  admitted from a session the hived took reports from even once the roster
+  no longer names it, because `hive kill` takes the row before the engine
+  it stops gets to say it is leaving (any other event from such a session
+  stays refused);
   `hookEvent: "session.end"` names it on the row while fresh, and nothing
   else follows from it — liveness stays the registry's and the ledger's,
   and a `/clear` or resume comes back as a new session id whose own
