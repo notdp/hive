@@ -487,6 +487,17 @@ fn unresolved_sender_fallback() -> Option<String> {
     Some(LEAD_AGENT_NAME.to_string())
 }
 
+/// The engine marker this process carries, `KEY=value` of the first set
+/// one, or None for a plain shell: what a pane-less context file is
+/// stamped with and answers to (`context::load_current_context`).
+pub(crate) fn engine_marker() -> Option<String> {
+    ENGINE_MARKER_ENV.iter().find_map(|key| {
+        let value = env_string(key);
+        let value = value.trim();
+        (!value.is_empty()).then(|| format!("{key}={value}"))
+    })
+}
+
 /// True when this process carries an engine's own identity marker.
 pub(crate) fn engine_marker_env() -> bool {
     ENGINE_MARKER_ENV

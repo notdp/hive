@@ -74,7 +74,8 @@ behavior is documented in the modules themselves.
   racing a kill cannot resurrect the member that was killed.
 - `identity.rs` is the who-am-I ladder: which member this process is and
   which pane it sits on, from the pane's own tags, then the roster row keyed
-  by the engine's own session id, then the saved context file. It is the
+  by the engine's own session id, then the saved context file (the pane-less one answers only the engine
+  that wrote it, by its marker). It is the
   only module that reads an engine marker (`CODEX_THREAD_ID`,
   `GROK_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`); `tmux/` is display,
   takes explicit targets, and reads neither markers nor the registry. The
