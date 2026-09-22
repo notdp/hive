@@ -16,6 +16,8 @@ import type { EngineInterface, Register } from 'claude-code'
 type Endpoint = { port: number; token: string; teamCreatedAt: string }
 
 const POST_BUDGET_MS = 1500
+// session.end runs under the engine's own end step, 1.5 s by default.
+const END_BUDGET_MS = 1000
 
 let endpoint: Endpoint | null = null
 let sessionId: string | null = null
@@ -111,8 +113,8 @@ const report = async ($: EngineInterface, event: string, fields: Record<string, 
 }
 
 // Bounded: a slow hived must not hold the turn.
-const bounded = ($: EngineInterface, work: Promise<void>) =>
-  Promise.race([work, $.clock.sleep(POST_BUDGET_MS)])
+const bounded = ($: EngineInterface, work: Promise<void>, ms = POST_BUDGET_MS) =>
+  Promise.race([work, $.clock.sleep(ms)])
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
@@ -128,6 +130,13 @@ export const register: Register = (on) => {
       turnId: e.turnId, reason: e.reason, isAborted: e.isAborted, durationMs: e.durationMs,
       agentId: e.agentId ?? null, usage: e.usage ?? null,
     }))
+    return next(e)
+  })
+  // The engine leaving (exit, /clear, resume, logout, a signal; a kill -9
+  // raises nothing): the hived closes any open turn at once instead of
+  // waiting the report out.
+  on('session.end', async ($, e, next) => {
+    await bounded($, report($, 'session.end', { reason: e.reason, resumeId: e.resume?.id ?? null }), END_BUDGET_MS)
     return next(e)
   })
 }

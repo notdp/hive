@@ -119,6 +119,15 @@ def test_claude_member_reports_its_turn_to_the_hived(rig):
         assert row.get("busySource") == "hook", row
         assert row.get("hookEvent") == "turn.complete", row
         assert row.get("busy") is False, row
+        # the engine reports its own end when hive retires it
+        _kill(rig, members[-1])
+        deadline = time.time() + 30
+        end = None
+        while time.time() < deadline and end is None:
+            end = next((r for r in _hook_rows(notify, members[-1]) if r.get("hook") == "session.end"), None)
+            time.sleep(1)
+        assert end is not None, f"no session.end from {members[-1]} within 30s of hive kill"
+        assert end.get("reason"), end
     finally:
         for member in members:
             _kill(rig, member)

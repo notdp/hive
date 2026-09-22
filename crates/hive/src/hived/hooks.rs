@@ -84,7 +84,7 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_INFLIGHT: usize = 8;
 const RECENT_EVENT_IDS: usize = 512;
 const ACCEPT_POLL_SECONDS: f64 = 0.1;
-const EVENTS: [&str; 3] = ["session.start", "turn.start", "turn.complete"];
+const EVENTS: [&str; 4] = ["session.start", "turn.start", "turn.complete", "session.end"];
 
 /// Who may post: the roster's claude row for a session id, by name, read
 /// from an entry that names this endpoint's instance.
@@ -631,7 +631,7 @@ pub(crate) fn handle_hook_request(
         return (400, refusal("unknown event"));
     }
     let turn_id = map_get_str(&event, "turnId");
-    if name != "session.start" && turn_id.is_empty() {
+    if name.starts_with("turn.") && turn_id.is_empty() {
         return (400, refusal("a turn event names its turnId"));
     }
     let epoch = map_get_str(&event, "epoch");
@@ -720,8 +720,9 @@ fn mark_closed(closed: bool) {
 /// before it; a retired epoch is stale for good, and a turn event from an
 /// epoch not yet registered is answered `Unregistered` so the module
 /// registers first. Within an epoch a `session.start` leaves an open turn
-/// alone, a `turn.start` opens the turn it names, and a `turn.complete`
-/// closes that turn (one naming another turn leaves the open one alone).
+/// alone, a `turn.start` opens the turn it names, a `turn.complete`
+/// closes that turn (one naming another turn leaves the open one alone),
+/// and a `session.end` closes whatever is open: the engine is leaving.
 fn apply_event(
     session_id: &str,
     event: &str,
@@ -765,6 +766,7 @@ fn apply_event(
             Some(open) if open != turn_id => Some(open),
             _ => None,
         },
+        "session.end" => None,
         _ => open,
     };
     store.by_session.insert(
@@ -907,6 +909,21 @@ mod tests {
         assert_eq!(roster_row_member(&row("codex", full), full, &jobs), None);
         assert_eq!(roster_row_member(&row("claude", ""), full, &jobs), None);
         assert_eq!(roster_row_member(&row("claude", full), "", &jobs), None);
+    }
+
+    #[test]
+    fn test_hook_session_end_closes_the_open_turn_and_names_no_turn() {
+        let ctx = ctx_with(roster(), "");
+        post(&ctx, &body_at(1, &[("event", "session.start")]));
+        post(&ctx, &body_at(2, &[("event", "turn.start"), ("turnId", "t1")]));
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        // a session.end names no turn and is not refused for it
+        let (status, answer) = post(&ctx, &body_at(3, &[("event", "session.end"), ("reason", "exit")]));
+        assert_eq!(status, 200, "{answer:?}");
+        assert_eq!(hook_busy("sid-a"), Some(false));
+        assert_eq!(fresh_observation("sid-a").unwrap().last_event, "session.end");
+        // a turn event still names its turn
+        assert_eq!(post(&ctx, &body_at(4, &[("event", "turn.start")])).0, 400);
     }
 
     #[test]

@@ -223,7 +223,7 @@ fn spawn_announced(plain: &str) -> String {
 /// Code's function hooks switched on, so the hive plugin's hooks module
 /// loads and the engine reports its own turn boundaries to the hived
 /// (`hived/hooks.rs`). Inline JSON, not a path: it persists verbatim as a
-/// respawn flag. Observed to gate the loader on 2.1.274.
+/// respawn flag. Observed to gate the loader on 2.1.274 and 2.1.278.
 pub const FUNCTION_HOOKS_SETTINGS: &str = r#"{"env":{"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS":"1"}}"#;
 
 /// Start a `claude --bg` job; return its jobId, or None on failure.

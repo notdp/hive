@@ -35,7 +35,7 @@ Under the hood that materializes the marketplace and runs `plugin marketplace ad
 Requires (hive is written against these exact versions — the versions on the machine it is developed on — and carries no compatibility code for older ones; upgrade the engine, then hive):
 
 - `tmux` 3.7c
-- `claude` 2.1.274 (Claude Code; the function-hooks contract — `session.start`, `turn.start`, `turn.complete` — was verified on this build's CLI, `-p` and `--bg` alike, and on the 2.1.271 CLI the desktop app bundles)
+- `claude` 2.1.278 (Claude Code; the function-hooks contract — `session.start`, `turn.start`, `turn.complete`, `session.end` — was verified on this build's CLI, `-p` and `--bg` alike, and on the 2.1.275 CLI the desktop app bundles; `session.end` first appears on 2.1.275)
 - `codex-cli` 0.153.4
 - `grok` 1.0.30
 
