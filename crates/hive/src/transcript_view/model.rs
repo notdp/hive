@@ -56,6 +56,10 @@ pub const AGENT_ICONS: [char; 7] = [
 const INJECT_LEAD_MID: &str = "Another Claude session sent a message while you were working:";
 const INJECT_LEAD: &str = "Another Claude session sent a message:";
 const INJECT_TAIL: &str = "This came from another Claude session";
+/// The relay lane's wrapper: the hive plugin's own prompt
+/// (`plugins/hive/mod/register.ts`, `session.receive`).
+const RELAY_LEAD: &str = "The hive plugin sent a message:";
+const RELAY_TAIL: &str = "This is how Claude Code surfaces a prompt a plugin submits";
 
 /// Peel the retired `<channel source=… msg_id=…>` wrapper.
 fn strip_channel_wrapper(text: &str) -> &str {
@@ -97,10 +101,14 @@ fn strip_peer_card_tag(text: &str) -> &str {
 /// Returns the core plus (injected, mid_turn).
 fn strip_injection_wrapper(text: &str) -> (&str, bool, bool) {
     let trimmed = strip_channel_wrapper(text.trim());
-    for (lead, mid) in [(INJECT_LEAD_MID, true), (INJECT_LEAD, false)] {
+    for (lead, tail, mid) in [
+        (INJECT_LEAD_MID, INJECT_TAIL, true),
+        (INJECT_LEAD, INJECT_TAIL, false),
+        (RELAY_LEAD, RELAY_TAIL, false),
+    ] {
         if let Some(rest) = trimmed.strip_prefix(lead) {
             let rest = rest.trim_start();
-            let core = match rest.find(INJECT_TAIL) {
+            let core = match rest.find(tail) {
                 Some(i) => &rest[..i],
                 None => rest,
             };

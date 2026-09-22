@@ -47,7 +47,8 @@ review the spec
 - 有 `from`:队友消息。回信地址就是 `from` 原样照抄(可达性见「寻址」)。
 - 没有 `from`(`<HIVE to=… artifact=…>`,首行 `task nd-…`):`hive workflow run` 派的任务,没人等回信。**你这一轮最后说的那段话就是返回值**,runtime 直接从引擎读走——不 `hive send`、不找任务发送者、不回执、不另外验证送达。结论、交付物绝对路径、假设、遗留全写进最后那段话,写全。中途停下提问也算结束,问题就成了返回值,所以缺材料按最合理的假设做完并写明。期间到达的带 `from` 消息是普通队友通信,照常 `hive send` 回。
 - 需要行动的消息要回信:空闲时开新一轮,忙时在当前轮收尾前回。认可、结束等无需行动的消息不用回。
-- 只对 claude:你忙时,消息折进当前这一轮,出现在某个工具结果旁。它没有独立的 turn,runtime 不会为它再唤醒你。信封偶尔带 `Another Claude session sent a message…` / `<cross-session-message>` 包装。这是宿主的消息卡片,信封本身不变。包装里的 "reply via SendMessage" 对 hive 地址无效,回 hive 永远用 `hive send`。有没有包装都要处理。
+- 只对 claude bg 成员(`hive spawn` 出来的):你忙时,消息折进当前这一轮,出现在某个工具结果旁。它没有独立的 turn,runtime 不会为它再唤醒你。
+- 只对 claude session 成员(桌面、joined):消息排队,你空闲时各开一轮,带 `The hive plugin sent a message:` 包装。偶尔仍是 `Another Claude session sent a message…` / `<cross-session-message>` 包装。这些都是宿主的消息卡片,信封本身不变。包装里的 "reply via SendMessage" 对 hive 地址无效,回 hive 永远用 `hive send`。有没有包装都要处理。
 
 ## 寻址(`hive send` 的 `<addr>`)
 

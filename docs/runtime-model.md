@@ -1152,6 +1152,27 @@ same name the tag carries (the desktop card checks the two agree for a
 `local_…` origin). The transcript viewer peels the tag the same way it
 peels the wrapper.
 
+A session member (the desktop orch, a joined session) has no daemon lane;
+its frames arrive on the inbox lane and the plugin's hooks module relays
+them (`session.receive`, `plugins/hive/mod/register.ts`): a peer delivery
+that is one hive frame is taken before it is queued and submitted again
+as the plugin's own prompt (`$.prompt.submit`), so the model reads the
+envelope under Claude Code's plugin wrapper — the lead line "The hive
+plugin sent a message:" and one closing sentence, about 180 characters
+on 2.1.278 — instead of the peer banner and its safety paragraph (about
+580). The relay is transactional on the receiver's side: the frame is
+consumed only once the submission is accepted, and a refused or dropped
+submission (2.1.274 still budgets a plugin's prompts) or a throw passes
+the frame on unchanged, so nothing is lost to it. A plugin's prompt runs
+once the session is idle, as its own turn: on this lane nothing folds into
+a running turn, which is codex's and grok's queueing too. Only a session
+some roster names is relayed; a session outside any team (`ccd.<name>`)
+keeps the peer frame, whose `from` is where its own native reply goes.
+The desktop draws a plugin's prompt as an ordinary user row, wrapper
+included — the "Received message from" row is the peer frame's alone —
+which is the price of the shorter model-side wrapper; the transcript
+viewer peels this wrapper too.
+
 When the daemon lane is unavailable the delivery falls back to the inbox
 socket with an explicit `priority: next`: a mid-turn arrival folds into the
 running turn at the next tool boundary, everything else lands as its own turn
