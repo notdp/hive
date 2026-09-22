@@ -717,7 +717,9 @@ Options:
   of some team is `<team>.<member>` (how a Claude session outside tmux, e.g.
   the desktop app, reaches in; bare names work there too while unique across
   live teams — its message arrives as `from=ccd.<its name>`). A Claude session
-  outside any team is `ccd.<name or title or pid>` (how a member reaches out).
+  outside any team is `ccd.<name or title or pid>` (how a member reaches out;
+  a session without hive answers with its own SendMessage, which lands here
+  as a native peer message).
   An envelope with no `from=` is a `hive workflow run` task: its result is
   the last thing you say in that turn, read off your engine — nothing to
   send back.

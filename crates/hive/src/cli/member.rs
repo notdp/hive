@@ -154,15 +154,21 @@ fn send_to_ccd_session(label: &str, message: &str, artifact: &str) {
         ));
     }
     let sender = format!("{team}.{agent}");
-    // The frame's `from` reaches only the human's message card; the receiving
-    // model sees just the text. Wrap the body in the ordinary <HIVE> envelope
-    // so the sender travels in band and the receiver answers by copying it
-    // verbatim: `hive send <team>.<agent>`. Not a bus thread.
+    // The frame's `from` reaches only the human's message card and the
+    // receiver's own reply path; the receiving model sees just the text.
+    // Wrap the body in the ordinary <HIVE> envelope so the sender travels
+    // in band and a receiver with hive answers by copying it verbatim:
+    // `hive send <team>.<agent>`. The frame's origin is this session's own
+    // inbox when it has one, so a receiver without hive answers natively
+    // (its SendMessage to the `from` it sees) and the reply lands here as a
+    // peer message. Not a bus thread.
     let envelope =
         crate::message::format_hive_envelope(&sender, &format!("ccd.{}", target.name), message, "");
-    let outcome = crate::adapters::claude_sessions::send(
+    let origin = crate::adapters::claude_sessions::own_peer_origin().unwrap_or_else(|| sender.clone());
+    let outcome = crate::adapters::claude_sessions::send_as(
         &target.socket_path,
         &envelope,
+        &origin,
         &sender,
         &target.session_id,
     );

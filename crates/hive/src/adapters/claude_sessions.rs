@@ -368,13 +368,37 @@ pub fn rename(sock_path: &str, name: &str, session_id: &str) -> bool {
 /// target's own id or the frame is silently dropped — the guard against a
 /// recycled `<pid>.sock` taking a dead session's mail.
 pub fn send(sock_path: &str, text: &str, sender: &str, session_id: &str) -> Option<&'static str> {
-    send_with_write_timeout(sock_path, text, sender, session_id, write_timeout())
+    send_as(sock_path, text, sender, sender, session_id)
+}
+
+/// `send` with the frame's origin and its display name apart: *origin* is
+/// what the receiver answers to (its own `SendMessage` copies it as `to`),
+/// *name* what its sender row shows. The `ccd.<name>` lane passes the
+/// sending session's own inbox address as the origin (`own_peer_origin`),
+/// so a session with no hive of its own can still answer natively.
+pub fn send_as(
+    sock_path: &str,
+    text: &str,
+    origin: &str,
+    name: &str,
+    session_id: &str,
+) -> Option<&'static str> {
+    send_with_write_timeout(sock_path, text, origin, name, session_id, write_timeout())
+}
+
+/// This process's own inbox as a peer origin, `uds:<socket path>` — the
+/// address Claude Code's `SendMessage` reaches it by — or None outside a
+/// Claude session (a codex or grok member's tool process).
+pub fn own_peer_origin() -> Option<String> {
+    let sock = own_socket();
+    (!sock.is_empty()).then(|| format!("uds:{sock}"))
 }
 
 fn send_with_write_timeout(
     sock_path: &str,
     text: &str,
-    sender: &str,
+    origin: &str,
+    name: &str,
     session_id: &str,
     timeout: Duration,
 ) -> Option<&'static str> {
@@ -384,8 +408,8 @@ fn send_with_write_timeout(
     let mut frame = json!({
         "type": "user",
         "priority": "next",
-        "from": sender,
-        "message": {"role": "user", "content": peer_card_envelope(sender, text)},
+        "from": origin,
+        "message": {"role": "user", "content": peer_card_envelope(origin, name, text)},
     });
     if !session_id.is_empty() {
         frame["session_id"] = json!(session_id);
@@ -421,14 +445,17 @@ const PEER_TAG: &str = "cross-session-message";
 /// included. Only the display changes: the model still reads the
 /// receiver's wrapper, and the frame's `from` field (the origin) still
 /// names the sender, which the receiver requires to equal the tag's
-/// `from`. So the shape follows the receiver's own builder: `from`
+/// `from`; *origin* and *name* are the same hive address on the member
+/// lane, and on the `ccd.` lane the origin is the sending session's own
+/// `uds:` inbox (`own_peer_origin`) so the receiver's native reply lands
+/// there. So the shape follows the receiver's own builder: `from`
 /// restricted to `[A-Za-z0-9%:_/.\-]` with everything else
 /// percent-encoded; `from-name` the sender with `"<>` dropped, whitespace
 /// runs collapsed, at most 120 characters, omitted when nothing is left;
 /// and a `<` opening the closing tag inside the body spelled `<\` so the
 /// body cannot end the wrapper early.
-pub fn peer_card_envelope(sender: &str, text: &str) -> String {
-    let name = peer_from_name_attr(sender);
+pub fn peer_card_envelope(origin: &str, name: &str, text: &str) -> String {
+    let name = peer_from_name_attr(name);
     let name_attr = if name.is_empty() {
         String::new()
     } else {
@@ -436,7 +463,7 @@ pub fn peer_card_envelope(sender: &str, text: &str) -> String {
     };
     format!(
         "<{PEER_TAG} from=\"{}\"{name_attr}>\n{}\n</{PEER_TAG}>",
-        peer_from_attr(sender),
+        peer_from_attr(origin),
         escape_peer_body(text)
     )
 }
@@ -990,9 +1017,42 @@ mod tests {
         // body: this is what the receiver's card parses, and a byte off falls
         // back to drawing the whole wrapped row
         assert_eq!(
-            peer_card_envelope("hornet.sage", "<HIVE from=hornet.sage to=hornet.orch>\nhi\n</HIVE>"),
+            peer_card_envelope("hornet.sage", "hornet.sage", "<HIVE from=hornet.sage to=hornet.orch>\nhi\n</HIVE>"),
             "<cross-session-message from=\"hornet.sage\" from-name=\"hornet.sage\">\n<HIVE from=hornet.sage to=hornet.orch>\nhi\n</HIVE>\n</cross-session-message>"
         );
+    }
+
+    #[test]
+    fn test_send_as_puts_the_origin_in_the_frame_and_the_name_in_the_tag() {
+        let dir = tempfile::Builder::new().prefix("hsa").tempdir_in("/tmp").unwrap();
+        let sock = dir.path().join("i.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut conn, &mut buf).unwrap();
+            buf
+        });
+        assert_eq!(
+            send_as(sock.to_str().unwrap(), "hi", "uds:/tmp/cc-socks/7.sock", "t.orch", "sid"),
+            Some(ACCEPTED_UDS_WRITE)
+        );
+        let frame: Value = serde_json::from_slice(&handle.join().unwrap()).unwrap();
+        assert_eq!(frame["from"], "uds:/tmp/cc-socks/7.sock");
+        assert_eq!(
+            frame["message"]["content"],
+            "<cross-session-message from=\"uds:/tmp/cc-socks/7.sock\" from-name=\"t.orch\">\nhi\n</cross-session-message>"
+        );
+        assert_eq!(frame["session_id"], "sid");
+    }
+
+    #[test]
+    fn test_own_peer_origin_is_the_process_inbox_or_none() {
+        let mut env = crate::testenv::EnvGuard::new();
+        env.remove("CLAUDE_CODE_MESSAGING_SOCKET");
+        assert_eq!(own_peer_origin(), None);
+        env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/42.sock");
+        assert_eq!(own_peer_origin().as_deref(), Some("uds:/tmp/cc-socks/42.sock"));
     }
 
     #[test]
@@ -1005,11 +1065,11 @@ mod tests {
         assert_eq!(peer_from_name_attr("\"<>").len(), 0);
         assert_eq!(peer_from_name_attr(&"n".repeat(130)).len(), 120);
         assert_eq!(
-            peer_card_envelope("\"<>", "hi"),
+            peer_card_envelope("\"<>", "\"<>", "hi"),
             "<cross-session-message from=\"%22%3C%3E\">\nhi\n</cross-session-message>"
         );
         assert_eq!(
-            peer_card_envelope("ccd.my session#1", "hi"),
+            peer_card_envelope("ccd.my session#1", "ccd.my session#1", "hi"),
             "<cross-session-message from=\"ccd.my%20session%231\" from-name=\"ccd.my session#1\">\nhi\n</cross-session-message>"
         );
     }
@@ -1089,6 +1149,7 @@ mod tests {
             send_with_write_timeout(
                 path.to_str().unwrap(),
                 &"x".repeat(4_000_000),
+                "hive",
                 "hive",
                 "",
                 Duration::from_secs_f64(0.3),
