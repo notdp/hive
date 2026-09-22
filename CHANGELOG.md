@@ -4,6 +4,19 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.22.1
+
+### Features
+
+- The hooks module keeps a desktop session's title badge (`[<team>.<member>] `) itself, through the desktop's own session tools over `$.mcp.call`: added within seconds of enrolling, taken off within seconds of `hive kill` / `hive delete` on a five-second roster poll, with no turn of the session's own needed; the skill no longer asks the model to rename anything (#251, #252, #253)
+- Relay lane for claude session members: a hive frame arriving on the session inbox is taken off `session.receive` and submitted again as the plugin's own prompt, so the model reads the short plugin wrapper instead of the peer banner (#249)
+- Claude engines report `session.end` to the hived, which closes the open turn at once; the report is admitted after `hive kill` already removed the roster row (#247, #248)
+- The `ccd.` lane gets a native return path: hive sends as its own messaging socket origin with a `from-name`, so the receiver's peer card names the sender and a native reply reaches hive (#245, #246)
+
+### Fixes
+
+- The pane-less saved context file answers only the engine that wrote it (`engine` marker), so a fresh desktop session no longer inherits another session's `self` (#250)
+
 ## 0.22.0
 
 ### Features
