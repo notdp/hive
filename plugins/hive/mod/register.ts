@@ -80,6 +80,9 @@ const BADGE_RE = /^\[[A-Za-z0-9_.-]+\] /
 const DESKTOP_MCP = 'ccd_session_mgmt'
 let desktopTools: boolean | null = null
 let badgeKey: string | null = null
+let syncing = false
+let badgePoll: (() => void) | null = null
+const BADGE_POLL_MS = 5000
 
 const mcpText = (r: any): string => {
   const block = Array.isArray(r?.content) ? r.content.find((b: any) => b?.type === 'text') : null
@@ -87,24 +90,38 @@ const mcpText = (r: any): string => {
 }
 
 const syncBadge = async ($: EngineInterface) => {
-  if (desktopTools === false) return
-  if (!sessionId) sessionId = await $.session.id()
-  const m = await membership($, sessionId)
-  const key = m && m.member ? `${m.team}.${m.member}` : ''
-  if (key === badgeKey) return
-  let got
-  try { got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' }) } catch { desktopTools = false; return }
-  if (got.isError) { desktopTools = false; return }
-  desktopTools = true
-  let title = ''
-  try { title = String(JSON.parse(mcpText(got))?.title ?? '') } catch { return }
-  const base = title.replace(BADGE_RE, '')
-  const want = key ? (base ? `[${key}] ${base}` : `[${key}]`) : base
-  if (want !== title) {
-    const set = await $.mcp.call(DESKTOP_MCP, 'set_session_title', { session_id: 'self', title: want })
-    if (set.isError) return
+  if (desktopTools === false || syncing) return
+  syncing = true
+  try {
+    if (!sessionId) sessionId = await $.session.id()
+    const m = await membership($, sessionId)
+    const key = m && m.member ? `${m.team}.${m.member}` : ''
+    if (key === badgeKey) return
+    let got
+    try { got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' }) } catch { desktopTools = false; return }
+    if (got.isError) { desktopTools = false; return }
+    desktopTools = true
+    let title = ''
+    try { title = String(JSON.parse(mcpText(got))?.title ?? '') } catch { return }
+    const base = title.replace(BADGE_RE, '')
+    const want = key ? (base ? `[${key}] ${base}` : `[${key}]`) : base
+    if (want !== title) {
+      const set = await $.mcp.call(DESKTOP_MCP, 'set_session_title', { session_id: 'self', title: want })
+      if (set.isError) return
+    }
+    badgeKey = key
+  } finally {
+    syncing = false
   }
-  badgeKey = key
+}
+
+// A desktop session's badge follows the roster within seconds, not at its
+// next turn: once the desktop tools are known to answer, the roster is
+// read every few seconds (one directory listing and a few small files) and
+// the title touched only when the membership changed.
+const pollBadge = ($: EngineInterface) => {
+  if (badgePoll || desktopTools !== true) return
+  badgePoll = $.clock.every(BADGE_POLL_MS, () => { void syncBadge($).catch(() => undefined) })
 }
 
 type Sent = { status: number; unregistered: boolean }
@@ -179,6 +196,7 @@ export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await bounded($, report($, 'session.start', { cwd: e.cwd, surface: e.surface, isInteractive: e.isInteractive }))
     await bounded($, syncBadge($).catch(() => undefined))
+    pollBadge($)
     return next(e)
   })
   on('turn.start', async ($, e, next) => {
@@ -191,6 +209,7 @@ export const register: Register = (on) => {
       agentId: e.agentId ?? null, usage: e.usage ?? null,
     }))
     await bounded($, syncBadge($).catch(() => undefined))
+    pollBadge($)
     return next(e)
   })
   // The engine leaving (exit, /clear, resume, logout, a signal; a kill -9

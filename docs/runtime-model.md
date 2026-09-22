@@ -1173,15 +1173,16 @@ included — the "Received message from" row is the peer frame's alone —
 which is the price of the shorter model-side wrapper; the transcript
 viewer peels this wrapper too.
 
-The same module keeps a desktop session's title badge: at `session.start`
-and at every `turn.complete` it reads the roster for the row naming its
-session and, when that changed since it last looked, reads the session's
-title through the desktop's own session tools (`$.mcp.call` to
+The same module keeps a desktop session's title badge: at `session.start`,
+at every `turn.complete` and, once the desktop's session tools are known
+to answer, every five seconds on `$.clock.every`, it reads the roster for
+the row naming its session and, when that changed since it last looked,
+reads the session's title through those tools (`$.mcp.call` to
 `ccd_session_mgmt`, which asks no permission) and writes it back with
 `[<team>.<member>] ` in front, or with the prefix taken off once no roster
-names the session. So a badge appears at the end of the turn that
-enrolled the session and disappears at the end of the session's next turn
-after it left; nothing else renames a session. Whether the session has
+names the session. So a badge appears within seconds of the session
+enrolling and disappears within seconds of `hive kill` or `hive delete`,
+with no turn of the session's own needed; nothing else renames a session. Whether the session has
 those tools is learned from the first call (a desktop session's
 `session.start` names no surface, so the surface is no gate); a terminal
 session or a bg job, whose call fails, is left alone from then on.
