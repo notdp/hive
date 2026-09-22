@@ -3,7 +3,13 @@
 //! Context is stored **per tmux pane** so that multiple agents in the same
 //! window don't overwrite each other's identity. Pane identity resolves
 //! through `crate::identity` (see `context_file`); with no pane the file is
-//! `default.json`.
+//! `default.json`, shared by every pane-less process under this hive home —
+//! a desktop session that created a team, the next desktop session, a bare
+//! shell — so it is stamped with the engine marker of the process that
+//! wrote it (`identity::engine_marker`) and answers only that engine: a
+//! session the file was not written by reads it as empty, instead of
+//! taking the writer's identity (a second desktop session once called
+//! itself the orch this way).
 
 use std::collections::HashMap;
 use std::fs;
@@ -89,30 +95,57 @@ fn read_context_map(path: &Path) -> Option<HashMap<String, String>> {
 }
 
 pub fn load_current_context() -> HashMap<String, String> {
-    let path = context_file();
+    let pane = crate::identity::current_pane_id().unwrap_or_default();
+    let path = context_dir().join(format!("{}.json", pane_slug(&pane)));
     if !path.exists() {
         return HashMap::new();
     }
-    read_context_map(&path).unwrap_or_default()
+    let ctx = read_context_map(&path).unwrap_or_default();
+    // the pane-less file answers the engine that wrote it alone
+    if pane.is_empty() && ctx.get("engine") != crate::identity::engine_marker().as_ref() {
+        return HashMap::new();
+    }
+    ctx
 }
 
-fn write_context(path: PathBuf, team: &str, workspace: &str, agent: &str) -> Result<PathBuf> {
+fn write_context(
+    path: PathBuf,
+    team: &str,
+    workspace: &str,
+    agent: &str,
+    engine: Option<String>,
+) -> Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let payload = json!({
+    let mut payload = json!({
         "team": team,
         "workspace": workspace,
         "agent": agent,
     });
+    if let Some(engine) = engine {
+        payload["engine"] = Value::from(engine);
+    }
     let mut text = serde_json::to_string_pretty(&payload)?;
     text.push('\n');
     fs::write(&path, text)?;
     Ok(path)
 }
 
+/// The stamp a context file at *pane* carries: the writer's engine marker
+/// for the pane-less file, nothing for a pane's (the pane is its scope,
+/// and a pane's file is pre-bound by the spawner for an engine to come).
+fn engine_stamp(pane_id: &str) -> Option<String> {
+    if pane_id.is_empty() {
+        crate::identity::engine_marker()
+    } else {
+        None
+    }
+}
+
 pub fn save_current_context(team: &str, workspace: &str, agent: &str) -> Result<PathBuf> {
-    write_context(context_file(), team, workspace, agent)
+    let pane = crate::identity::current_pane_id().unwrap_or_default();
+    write_context(context_file(), team, workspace, agent, engine_stamp(&pane))
 }
 
 /// Write context for an arbitrary pane (used by hive create to pre-bind agents).
@@ -123,7 +156,7 @@ pub fn save_context_for_pane(
     agent: &str,
 ) -> Result<PathBuf> {
     let path = context_dir().join(format!("{}.json", pane_slug(pane_id)));
-    let written = write_context(path, team, workspace, agent)?;
+    let written = write_context(path, team, workspace, agent, engine_stamp(pane_id))?;
     prune_dead_pane_contexts(&written, live_pane_ids());
     Ok(written)
 }
@@ -270,6 +303,30 @@ mod tests {
                 ("agent", "claude")
             ])
         );
+    }
+
+    #[test]
+    fn test_pane_less_context_answers_only_the_engine_that_wrote_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut env = EnvGuard::cleared(&crate::testenv::IDENTITY_VARS);
+        env.set("HIVE_HOME", tmp.path());
+        env.remove("TMUX");
+        env.remove("TMUX_PANE");
+        // written by a desktop session's tool
+        env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/1.sock");
+        save_current_context("team-a", "/tmp/ws", "orch").unwrap();
+        assert_eq!(load_current_context().get("agent").map(String::as_str), Some("orch"));
+        // another desktop session reads nothing of it
+        env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/2.sock");
+        assert!(load_current_context().is_empty());
+        // nor does a bare shell
+        env.remove("CLAUDE_CODE_MESSAGING_SOCKET");
+        assert!(load_current_context().is_empty());
+        // a bare shell's own file answers a bare shell, and no engine
+        save_current_context("team-b", "/tmp/ws", "orch").unwrap();
+        assert_eq!(load_current_context().get("team").map(String::as_str), Some("team-b"));
+        env.set("CODEX_THREAD_ID", "t-1");
+        assert!(load_current_context().is_empty());
     }
 
     #[test]
