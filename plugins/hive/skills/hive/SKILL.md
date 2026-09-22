@@ -54,7 +54,7 @@ review the spec
 - 回信一律照抄 `from`,可达范围按下面两种处境区分。
 - tmux 外成员:照抄的地址可达,包括别队前缀和 `ccd.`。自己起地址用 `<team>.<member>`;这适用于 joined session、guest 和引擎的工具进程。裸名全局唯一时也能用;重名会被拒并列出候选,直接带队名可少一次重发。
 - tmux pane 成员:照抄本队地址和 `ccd.` 可达,回别团前缀目前会被拒,这是已知限制。被拒就把结论写成文件,最后一段话给出路径、说明没送到,然后结束 turn。自己起地址发队友用裸名 `checker`,本队前缀等价;自己拼的别队前缀也会被拒。
-- team 外的 Claude session(human 说「给 xxx 那个 session 发一条」):先 `hive ccd ls` 拿 name / 桌面 title / pid,再 `hive send "ccd.<title 或 name>" "<消息>"`——human 说的通常是桌面标题,直接用 title,重名再用 name 或 pid。这条道不收 `--artifact`,文件路径直接写进 body。对方回你是 `from=ccd.<name>`,照抄即可。
+- team 外的 Claude session(human 说「给 xxx 那个 session 发一条」):先 `hive ccd ls` 拿 name / 桌面 title / pid,再 `hive send "ccd.<title 或 name>" "<消息>"`——human 说的通常是桌面标题,直接用 title,重名再用 name 或 pid。这条道不收 `--artifact`,文件路径直接写进 body。对方装了 hive 时回你是 `from=ccd.<name>`,照抄即可;没装 hive 时它用自己的 SendMessage 回,到你这里是一条原生 peer 消息(`from` 是 `uds:` 地址),再回它仍用 `hive send ccd.<name>`。
 - 对方忙不忙、在不在等 human,都不用你判断,直接发,runtime 替你把关:空闲就开新一轮,忙就排进它的队列;对方在等 human 作答(`inputState=waiting_user`)时会拒发(非零 + 原因),按「被拒发」办。
 
 ## 干活

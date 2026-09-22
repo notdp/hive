@@ -1176,13 +1176,19 @@ nothing downstream (a reader, a viewer, an oracle) can count it as a turn or
 read a response obligation out of the file. The receipt duty covers that
 obligation; the queue does not.
 
-On the member lane and the `ccd.<name>` lane alike, the frame's `from` is
-the message author, never the recipient: `<team>.<sender>` for a member
-(`hived/payloads.rs`), a guest's or `ccd.` sender's already-qualified
-address verbatim, and the bare team name when hive itself speaks
-(`agent/control.rs::origin_label`). That label reaches only the human's
-message card; the receiving model sees the text, so the sender also travels
-in band, in the `<HIVE from=…>` envelope.
+On the member lane the frame's `from` is the message author, never the
+recipient: `<team>.<sender>` for a member (`hived/payloads.rs`), a guest's
+already-qualified address verbatim, and the bare team name when hive itself
+speaks (`agent/control.rs::origin_label`). On the `ccd.<name>` lane the
+frame's `from` is the sending session's own inbox, `uds:<socket>`
+(`claude_sessions::own_peer_origin`), and the hive address rides as the
+tag's `from-name`: the outside session's row still names `<team>.<sender>`,
+and its own `SendMessage` reply — Claude Code copies `from` as `to` —
+lands in the sender's inbox as a native peer message; a sender with no
+inbox of its own (a codex or grok member) keeps the hive address as the
+origin. That label reaches only the human's message card and the
+receiver's reply path; the receiving model sees the text, so the sender
+also travels in band, in the `<HIVE from=…>` envelope.
 
 ### The member keyboard
 
