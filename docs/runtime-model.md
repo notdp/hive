@@ -1181,8 +1181,10 @@ title through the desktop's own session tools (`$.mcp.call` to
 `[<team>.<member>] ` in front, or with the prefix taken off once no roster
 names the session. So a badge appears at the end of the turn that
 enrolled the session and disappears at the end of the session's next turn
-after it left; nothing else renames a session, and a terminal session
-(no title, no desktop tools) is left alone.
+after it left; nothing else renames a session. Whether the session has
+those tools is learned from the first call (a desktop session's
+`session.start` names no surface, so the surface is no gate); a terminal
+session or a bg job, whose call fails, is left alone from then on.
 
 When the daemon lane is unavailable the delivery falls back to the inbox
 socket with an explicit `priority: next`: a mid-turn arrival folds into the
