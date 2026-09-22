@@ -233,7 +233,7 @@ fn test_parse_hive_message_reads_every_arrival_shape() {
     assert_eq!(carded.body, "done");
     assert!(carded.injected && !carded.mid_turn);
     let carded_bare = parse_hive_message(
-        "<cross-session-message from=\"hornet.sage\">\n<HIVE from=hornet.sage to=hornet.orch>\ndone\n</HIVE>\n</cross-session-message>",
+        "<cross-session-message from=\"hornet.sage\" from-name=\"hornet.sage\">\n<HIVE from=hornet.sage to=hornet.orch>\ndone\n</HIVE>\n</cross-session-message>",
     )
     .unwrap();
     assert_eq!(carded_bare.body, "done");

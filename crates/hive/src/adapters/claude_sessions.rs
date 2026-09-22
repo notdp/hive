@@ -408,27 +408,61 @@ fn send_with_write_timeout(
 const PEER_TAG: &str = "cross-session-message";
 
 /// *text* as the receiving Claude Code draws it like one of its own peer
-/// messages: `<cross-session-message from="…">\n<body>\n</cross-session-message>`.
+/// messages: `<cross-session-message from="…" from-name="…">\n<body>\n</cross-session-message>`.
 ///
-/// The receiver's message card (terminal `UserCrossSessionMessage`, the
-/// desktop's peer card; observed on 2.1.263) parses the row's text for this
-/// exact shape and, when it parses, draws `@ <from>` over the inner body
-/// alone — the "Another Claude session sent a message" lead line and the
-/// safety paragraph the receiver appends stay out of view. A body it cannot
-/// parse (a bare `<HIVE>` envelope) is drawn whole, wrapper included. Only
-/// the display changes: the model still reads the receiver's wrapper, and
-/// the frame's `from` field (the origin) still names the sender, which the
-/// desktop card requires to equal the tag's `from`. The parse is strict, so
-/// the shape follows the receiver's own builder: `from` restricted to
-/// `[A-Za-z0-9%:_/.\-]` with everything else percent-encoded, one `\n`
-/// either side of the body, and a `<` opening the closing tag inside the
-/// body spelled `<\` so the body cannot end the wrapper early.
+/// The receiver (terminal `UserCrossSessionMessage`, the desktop's
+/// "Received message from <name>" row; observed on 2.1.278) re-parses the
+/// row's text for this exact shape — the attributes in its own order
+/// (`from`, `from-session`, `hop-chain`, `from-name`, `from-mode`), one
+/// `\n` either side of the body — and rebuilds the tag from what it parsed;
+/// only a byte-identical rebuild draws the inner body alone, under the
+/// name from `from-name` (else derived from `from`, else "peer"). A body it
+/// cannot parse (a bare `<HIVE>` envelope) is drawn whole, wrapper
+/// included. Only the display changes: the model still reads the
+/// receiver's wrapper, and the frame's `from` field (the origin) still
+/// names the sender, which the receiver requires to equal the tag's
+/// `from`. So the shape follows the receiver's own builder: `from`
+/// restricted to `[A-Za-z0-9%:_/.\-]` with everything else
+/// percent-encoded; `from-name` the sender with `"<>` dropped, whitespace
+/// runs collapsed, at most 120 characters, omitted when nothing is left;
+/// and a `<` opening the closing tag inside the body spelled `<\` so the
+/// body cannot end the wrapper early.
 pub fn peer_card_envelope(sender: &str, text: &str) -> String {
+    let name = peer_from_name_attr(sender);
+    let name_attr = if name.is_empty() {
+        String::new()
+    } else {
+        format!(" from-name=\"{name}\"")
+    };
     format!(
-        "<{PEER_TAG} from=\"{}\">\n{}\n</{PEER_TAG}>",
+        "<{PEER_TAG} from=\"{}\"{name_attr}>\n{}\n</{PEER_TAG}>",
         peer_from_attr(sender),
         escape_peer_body(text)
     )
+}
+
+/// The display name as the receiver's builder canonicalizes it: `"<>`
+/// dropped, control characters and whitespace runs one space, trimmed, at
+/// most 120 characters. Anything else and the receiver's rebuild differs
+/// from the row, which draws the whole wrapper.
+fn peer_from_name_attr(sender: &str) -> String {
+    let mut out = String::with_capacity(sender.len());
+    let mut pending_space = false;
+    for c in sender.chars() {
+        if matches!(c, '"' | '<' | '>') {
+            continue;
+        }
+        if c.is_whitespace() || c.is_control() {
+            pending_space = !out.is_empty();
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        out.push(c);
+    }
+    out.chars().take(120).collect()
 }
 
 fn peer_from_attr(sender: &str) -> String {
@@ -944,7 +978,7 @@ mod tests {
                 "from": "t.w",
                 "message": {
                     "role": "user",
-                    "content": "<cross-session-message from=\"t.w\">\nhello there\n</cross-session-message>",
+                    "content": "<cross-session-message from=\"t.w\" from-name=\"t.w\">\nhello there\n</cross-session-message>",
                 },
             })
         );
@@ -957,7 +991,26 @@ mod tests {
         // back to drawing the whole wrapped row
         assert_eq!(
             peer_card_envelope("hornet.sage", "<HIVE from=hornet.sage to=hornet.orch>\nhi\n</HIVE>"),
-            "<cross-session-message from=\"hornet.sage\">\n<HIVE from=hornet.sage to=hornet.orch>\nhi\n</HIVE>\n</cross-session-message>"
+            "<cross-session-message from=\"hornet.sage\" from-name=\"hornet.sage\">\n<HIVE from=hornet.sage to=hornet.orch>\nhi\n</HIVE>\n</cross-session-message>"
+        );
+    }
+
+    #[test]
+    fn test_peer_card_envelope_from_name_is_the_receivers_canonical_display_name() {
+        // `"<>` dropped, whitespace runs one space, no percent-encoding: the
+        // receiver rebuilds the tag from the parsed name and compares bytes
+        assert_eq!(peer_from_name_attr("ccd.my  session#1"), "ccd.my session#1");
+        assert_eq!(peer_from_name_attr("a\"b<c>d\te"), "abcd e");
+        assert_eq!(peer_from_name_attr("  x  "), "x");
+        assert_eq!(peer_from_name_attr("\"<>").len(), 0);
+        assert_eq!(peer_from_name_attr(&"n".repeat(130)).len(), 120);
+        assert_eq!(
+            peer_card_envelope("\"<>", "hi"),
+            "<cross-session-message from=\"%22%3C%3E\">\nhi\n</cross-session-message>"
+        );
+        assert_eq!(
+            peer_card_envelope("ccd.my session#1", "hi"),
+            "<cross-session-message from=\"ccd.my%20session%231\" from-name=\"ccd.my session#1\">\nhi\n</cross-session-message>"
         );
     }
 
