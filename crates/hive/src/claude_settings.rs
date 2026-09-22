@@ -1,6 +1,6 @@
 //! The one key hive sets in Claude Code's own user settings.
 //!
-//! Claude Code gates function hooks (the Claude Mods primitive, 2.1.274)
+//! Claude Code gates function hooks (the Claude Mods primitive, 2.1.278)
 //! behind `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`. An engine hive spawns
 //! gets it as a `--settings` flag (`claude_bg::FUNCTION_HOOKS_SETTINGS`);
 //! a desktop session is not spawned by hive, and reads the switch from

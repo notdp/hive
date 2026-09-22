@@ -1003,9 +1003,10 @@ pane's own fact.
 
 A claude engine can say where its turns begin and end: Claude Code's
 function hooks (the "Claude Mods" primitive, anthropics/claude-code#91870,
-gated by `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` on 2.1.274) run the hive
+gated by `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` on 2.1.278) run the hive
 plugin's hooks module, `plugins/hive/mod/register.ts`, inside the engine,
-and it posts `session.start`, `turn.start` and `turn.complete` over
+and it posts `session.start`, `turn.start`, `turn.complete` and
+`session.end` over
 `$.http.fetch` to a loopback port the team's hived listens on
 (`hived/hooks.rs`). That is the same kind of signal as codex's
 `turn/completed` and grok's prompt response; before it, a claude member's
@@ -1052,7 +1053,15 @@ What the report decides, and what it does not:
   set) is acknowledged and not counted. Past the freshness window the
   registry status decides again, because Claude Code skips a hook that
   throws, overruns or answers the wrong shape and carries on — a lost
-  `turn.complete` must not pin a member busy for good.
+  `turn.complete` must not pin a member busy for good. A `session.end`
+  (the engine leaving: exit, `/clear`, a resume, logout, a signal; a
+  `kill -9` raises nothing, and the module gives the report one second
+  under the engine's own end step) closes whatever turn is open at once,
+  so `busy` drops with the engine instead of waiting the report out;
+  `hookEvent: "session.end"` names it on the row while fresh, and nothing
+  else follows from it — liveness stays the registry's and the ledger's,
+  and a `/clear` or resume comes back as a new session id whose own
+  `session.start` registers a new epoch.
 - The report's own trail: `claude.hook` in `notify.jsonl` per accepted
   event (`member`, `hook`, `turnId`, `reason`), `claude.hook_refused` per
   refusal (`status`, `error`), `hived.hooks_listen` / `hived.hooks_bind_failed`
@@ -1062,7 +1071,7 @@ What the report decides, and what it does not:
   read off codex and grok engines only. The report is an observation the
   hived layers above the registry status, not a replacement for it.
 
-Two timing facts, both observed on 2.1.274. Claude Code boots a bg job's
+Two timing facts, both observed on 2.1.274 and unchanged on 2.1.278. Claude Code boots a bg job's
 engine ahead of its claim (a `bg-spare`), so the plugin record in force at
 that boot is the one the member runs with — a hive upgrade reaches members
 spawned after the next session start refreshed the record, not the very

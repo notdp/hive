@@ -153,7 +153,7 @@ behavior is documented in the modules themselves.
   command source is the sync. The claude side does ship a function-hooks
   module, `mod/register.ts`, named by the claude manifest's `hooks` field
   alone: codex never reads that manifest or that path. The module is the
-  engine's own report of its turn boundaries to the hived
+  engine's own report of its turn boundaries and its end to the hived
   (`hived/hooks.rs`); it decides no membership, sits above the registry
   status for `busy` only while its last report is fresh, and a Bash
   `tool.call` hook stays out of it while
