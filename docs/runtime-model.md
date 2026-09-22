@@ -1173,6 +1173,17 @@ included — the "Received message from" row is the peer frame's alone —
 which is the price of the shorter model-side wrapper; the transcript
 viewer peels this wrapper too.
 
+The same module keeps a desktop session's title badge: at `session.start`
+and at every `turn.complete` it reads the roster for the row naming its
+session and, when that changed since it last looked, reads the session's
+title through the desktop's own session tools (`$.mcp.call` to
+`ccd_session_mgmt`, which asks no permission) and writes it back with
+`[<team>.<member>] ` in front, or with the prefix taken off once no roster
+names the session. So a badge appears at the end of the turn that
+enrolled the session and disappears at the end of the session's next turn
+after it left; nothing else renames a session, and a terminal session
+(no title, no desktop tools) is left alone.
+
 When the daemon lane is unavailable the delivery falls back to the inbox
 socket with an explicit `priority: next`: a mid-turn arrival folds into the
 running turn at the next tool boundary, everything else lands as its own turn

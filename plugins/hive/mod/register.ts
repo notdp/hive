@@ -39,8 +39,11 @@ const namesSession = (row: any, sid: string) =>
   row?.cli === 'claude' && typeof row.sessionId === 'string' && row.sessionId !== '' &&
   (row.sessionId === sid || sid.startsWith(`${row.sessionId}-`))
 
-// The workspace whose team.json roster names this session, else null.
-const locate = async ($: EngineInterface, sid: string): Promise<Endpoint | null> => {
+type Membership = { team: string; member: string; workspace: string }
+
+// The roster row naming this session, with its team and workspace, else
+// null: what the reports, the relay and the title badge all key on.
+const membership = async ($: EngineInterface, sid: string): Promise<Membership | null> => {
   const teams = `${await hiveHome($)}/teams`
   let entries: readonly { name: string; kind: string }[] = []
   try { entries = await $.fs.list(teams) } catch { return null }
@@ -48,13 +51,56 @@ const locate = async ($: EngineInterface, sid: string): Promise<Endpoint | null>
     if (entry.kind !== 'dir') continue
     const team = await readJson($, `${teams}/${entry.name}/team.json`)
     const members: any[] = Array.isArray(team?.members) ? team.members : []
-    if (!members.some((m) => namesSession(m, sid))) continue
+    const row = members.find((m) => namesSession(m, sid))
+    if (!row) continue
     const workspace: string = typeof team.workspace === 'string' && team.workspace ? team.workspace : `${teams}/${entry.name}`
-    const ep = await readJson($, `${workspace}/run/hooks-endpoint.json`)
-    if (!ep || typeof ep.port !== 'number' || typeof ep.token !== 'string') return null
-    return { port: ep.port, token: ep.token, teamCreatedAt: String(ep.teamCreatedAt ?? '') }
+    return { team: entry.name, member: String(row.name ?? ''), workspace }
   }
   return null
+}
+
+// The hived endpoint of the team whose roster names this session, else null.
+const locate = async ($: EngineInterface, sid: string): Promise<Endpoint | null> => {
+  const m = await membership($, sid)
+  if (!m) return null
+  const ep = await readJson($, `${m.workspace}/run/hooks-endpoint.json`)
+  if (!ep || typeof ep.port !== 'number' || typeof ep.token !== 'string') return null
+  return { port: ep.port, token: ep.token, teamCreatedAt: String(ep.teamCreatedAt ?? '') }
+}
+
+// The desktop title badge, `[<team>.<member>] ` before the session's own
+// title while a roster names it, gone once none does: kept by the module
+// through the desktop's own session tools (`$.mcp.call` needs no
+// permission), at session.start and at every turn's end, and only when
+// the membership changed since it last looked. A terminal session has no
+// title to badge; a desktop whose session tools are absent is left alone.
+const BADGE_RE = /^\[[A-Za-z0-9_.-]+\] /
+const DESKTOP_MCP = 'ccd_session_mgmt'
+let desktop = false
+let badgeKey: string | null = null
+
+const mcpText = (r: any): string => {
+  const block = Array.isArray(r?.content) ? r.content.find((b: any) => b?.type === 'text') : null
+  return typeof block?.text === 'string' ? block.text : ''
+}
+
+const syncBadge = async ($: EngineInterface) => {
+  if (!desktop) return
+  if (!sessionId) sessionId = await $.session.id()
+  const m = await membership($, sessionId)
+  const key = m && m.member ? `${m.team}.${m.member}` : ''
+  if (key === badgeKey) return
+  const got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' })
+  if (got.isError) return
+  let title = ''
+  try { title = String(JSON.parse(mcpText(got))?.title ?? '') } catch { return }
+  const base = title.replace(BADGE_RE, '')
+  const want = key ? (base ? `[${key}] ${base}` : `[${key}]`) : base
+  if (want !== title) {
+    const set = await $.mcp.call(DESKTOP_MCP, 'set_session_title', { session_id: 'self', title: want })
+    if (set.isError) return
+  }
+  badgeKey = key
 }
 
 type Sent = { status: number; unregistered: boolean }
@@ -127,7 +173,9 @@ const bounded = ($: EngineInterface, work: Promise<void>, ms = POST_BUDGET_MS) =
 
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
+    desktop = e.surface === 'desktop'
     await bounded($, report($, 'session.start', { cwd: e.cwd, surface: e.surface, isInteractive: e.isInteractive }))
+    await bounded($, syncBadge($).catch(() => undefined))
     return next(e)
   })
   on('turn.start', async ($, e, next) => {
@@ -139,6 +187,7 @@ export const register: Register = (on) => {
       turnId: e.turnId, reason: e.reason, isAborted: e.isAborted, durationMs: e.durationMs,
       agentId: e.agentId ?? null, usage: e.usage ?? null,
     }))
+    await bounded($, syncBadge($).catch(() => undefined))
     return next(e)
   })
   // The engine leaving (exit, /clear, resume, logout, a signal; a kill -9

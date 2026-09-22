@@ -155,8 +155,10 @@ behavior is documented in the modules themselves.
   module, `mod/register.ts`, named by the claude manifest's `hooks` field
   alone: codex never reads that manifest or that path. The module is the
   engine's own report of its turn boundaries and its end to the hived,
-  and the relay that takes a hive frame off the session's inbox and
-  submits it again as the plugin's own prompt (the short wrapper)
+  the relay that takes a hive frame off the session's inbox and
+  submits it again as the plugin's own prompt (the short wrapper), and
+  the desktop session's title badge (`[<team>.<member>] `), kept through
+  the desktop's own session tools over `$.mcp.call`
   (`hived/hooks.rs`); it decides no membership, sits above the registry
   status for `busy` only while its last report is fresh, and a Bash
   `tool.call` hook stays out of it while
