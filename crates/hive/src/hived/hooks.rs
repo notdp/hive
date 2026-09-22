@@ -103,6 +103,9 @@ pub(crate) struct HookContext {
 /// One session's last accepted report.
 #[derive(Clone, Debug)]
 pub(crate) struct HookObservation {
+    /// The roster name the report was admitted under: what a `session.end`
+    /// posted after `hive kill` took the row is admitted as.
+    pub member: String,
     pub last_event: String,
     pub turn_id: Option<String>,
     pub seen: Instant,
@@ -144,6 +147,12 @@ pub(crate) fn hook_busy(session_id: &str) -> Option<bool> {
 
 fn hook_busy_at(session_id: &str, now: Instant) -> Option<bool> {
     fresh_observation_at(session_id, now).map(|seen| seen.turn_id.is_some())
+}
+
+/// The member name *session_id* last reported under, fresh or not.
+fn remembered_member(session_id: &str) -> Option<String> {
+    let store = store().lock().unwrap_or_else(|e| e.into_inner());
+    store.by_session.get(session_id).map(|seen| seen.member.clone())
 }
 
 /// *session_id*'s last report while it is fresh: `hook_busy` with the
@@ -623,13 +632,17 @@ pub(crate) fn handle_hook_request(
         return (409, refusal("another team instance"));
     }
     let session_id = map_get_str(&event, "sessionId");
-    let Some(member) = (ctx.roster)(&session_id) else {
-        return (404, refusal("session not on this team's claude roster"));
-    };
     let name = map_get_str(&event, "event");
     if !EVENTS.contains(&name.as_str()) {
         return (400, refusal("unknown event"));
     }
+    // A session the roster names, or — for its `session.end` alone — one
+    // this hived took reports from: `hive kill` takes the row before the
+    // engine it stops gets to say it is leaving.
+    let remembered = || (name == "session.end").then(|| remembered_member(&session_id)).flatten();
+    let Some(member) = (ctx.roster)(&session_id).or_else(remembered) else {
+        return (404, refusal("session not on this team's claude roster"));
+    };
     let turn_id = map_get_str(&event, "turnId");
     if name.starts_with("turn.") && turn_id.is_empty() {
         return (400, refusal("a turn event names its turnId"));
@@ -648,7 +661,7 @@ pub(crate) fn handle_hook_request(
         return (200, answer);
     }
     let event_id = map_get_str(&event, "eventId");
-    match apply_event(&session_id, &name, &turn_id, &epoch, seq, &event_id) {
+    match apply_event(&session_id, &member, &name, &turn_id, &epoch, seq, &event_id) {
         Applied::Taken => {}
         Applied::Duplicate => {
             answer.insert("duplicate".to_string(), Value::Bool(true));
@@ -725,6 +738,7 @@ fn mark_closed(closed: bool) {
 /// and a `session.end` closes whatever is open: the engine is leaving.
 fn apply_event(
     session_id: &str,
+    member: &str,
     event: &str,
     turn_id: &str,
     epoch: &str,
@@ -772,6 +786,7 @@ fn apply_event(
     store.by_session.insert(
         session_id.to_string(),
         HookObservation {
+            member: member.to_string(),
             last_event: event.to_string(),
             turn_id: turn,
             seen: Instant::now(),
@@ -909,6 +924,36 @@ mod tests {
         assert_eq!(roster_row_member(&row("codex", full), full, &jobs), None);
         assert_eq!(roster_row_member(&row("claude", ""), full, &jobs), None);
         assert_eq!(roster_row_member(&row("claude", full), "", &jobs), None);
+    }
+
+    #[test]
+    fn test_hook_session_end_is_admitted_after_the_roster_row_is_gone() {
+        // the engine's own session.end lands after `hive kill` took its row
+        let on_roster = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flag = on_roster.clone();
+        let ctx = ctx_with(
+            Box::new(move |sid| {
+                (sid == "sid-a" && flag.load(std::sync::atomic::Ordering::SeqCst))
+                    .then(|| "alpha".to_string())
+            }),
+            "",
+        );
+        post(&ctx, &body_at(1, &[("event", "session.start")]));
+        post(&ctx, &body_at(2, &[("event", "turn.start"), ("turnId", "t1")]));
+        on_roster.store(false, std::sync::atomic::Ordering::SeqCst);
+        // a turn event from a session the roster no longer names is refused
+        assert_eq!(post(&ctx, &body_at(3, &[("event", "turn.complete"), ("turnId", "t1")])).0, 404);
+        assert_eq!(hook_busy("sid-a"), Some(true));
+        let (status, answer) = post(&ctx, &body_at(4, &[("event", "session.end"), ("reason", "other")]));
+        assert_eq!(status, 200, "{answer:?}");
+        assert_eq!(answer.get("member"), Some(&Value::from("alpha")));
+        assert_eq!(hook_busy("sid-a"), Some(false));
+        // a session this hived never took a report from stays a stranger
+        let mut stranger = body_at(1, &[("event", "session.end")]);
+        let mut map: Map<String, Value> = serde_json::from_slice(&stranger).unwrap();
+        map.insert("sessionId".to_string(), Value::from("sid-z"));
+        stranger = serde_json::to_vec(&map).unwrap();
+        assert_eq!(post(&ctx, &stranger).0, 404);
     }
 
     #[test]
