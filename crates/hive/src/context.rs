@@ -315,7 +315,10 @@ mod tests {
         // written by a desktop session's tool
         env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/1.sock");
         save_current_context("team-a", "/tmp/ws", "orch").unwrap();
-        assert_eq!(load_current_context().get("agent").map(String::as_str), Some("orch"));
+        assert_eq!(
+            load_current_context().get("agent").map(String::as_str),
+            Some("orch")
+        );
         // another desktop session reads nothing of it
         env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/2.sock");
         assert!(load_current_context().is_empty());
@@ -324,7 +327,10 @@ mod tests {
         assert!(load_current_context().is_empty());
         // a bare shell's own file answers a bare shell, and no engine
         save_current_context("team-b", "/tmp/ws", "orch").unwrap();
-        assert_eq!(load_current_context().get("team").map(String::as_str), Some("team-b"));
+        assert_eq!(
+            load_current_context().get("team").map(String::as_str),
+            Some("team-b")
+        );
         env.set("CODEX_THREAD_ID", "t-1");
         assert!(load_current_context().is_empty());
     }

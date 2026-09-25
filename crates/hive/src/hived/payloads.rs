@@ -382,7 +382,13 @@ pub(crate) fn doctor_payload(
             Value::Bool(retained.as_bool().unwrap_or(false)),
         );
     }
-    for key in ["model", "sessionId", "inputState", "busySource", "hookEvent"] {
+    for key in [
+        "model",
+        "sessionId",
+        "inputState",
+        "busySource",
+        "hookEvent",
+    ] {
         let value = map_get_str(&runtime, key);
         if !value.is_empty() {
             diag.insert(key.to_string(), Value::from(value));

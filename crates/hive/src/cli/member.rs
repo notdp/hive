@@ -164,7 +164,8 @@ fn send_to_ccd_session(label: &str, message: &str, artifact: &str) {
     // peer message. Not a bus thread.
     let envelope =
         crate::message::format_hive_envelope(&sender, &format!("ccd.{}", target.name), message, "");
-    let origin = crate::adapters::claude_sessions::own_peer_origin().unwrap_or_else(|| sender.clone());
+    let origin =
+        crate::adapters::claude_sessions::own_peer_origin().unwrap_or_else(|| sender.clone());
     let outcome = crate::adapters::claude_sessions::send_as(
         &target.socket_path,
         &envelope,
@@ -902,7 +903,11 @@ mod tests {
         // a bare shell outside tmux with no engine marker is nobody
         let err = task_dispatch_sender(Some("/tmp/task.md"))
             .expect_err("a task dispatch from no identity must refuse");
-        assert!(err.to_string().contains("cannot resolve own member identity"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("cannot resolve own member identity"),
+            "{err}"
+        );
 
         // a human's plain tmux shell signs as orch
         env.set("TMUX", "/tmp/tmux-0/default,1,0");

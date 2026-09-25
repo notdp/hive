@@ -84,7 +84,12 @@ const MAX_BODY_BYTES: usize = 64 * 1024;
 const MAX_INFLIGHT: usize = 8;
 const RECENT_EVENT_IDS: usize = 512;
 const ACCEPT_POLL_SECONDS: f64 = 0.1;
-const EVENTS: [&str; 4] = ["session.start", "turn.start", "turn.complete", "session.end"];
+const EVENTS: [&str; 4] = [
+    "session.start",
+    "turn.start",
+    "turn.complete",
+    "session.end",
+];
 
 /// Who may post: the roster's claude row for a session id, by name, read
 /// from an entry that names this endpoint's instance.
@@ -152,7 +157,10 @@ fn hook_busy_at(session_id: &str, now: Instant) -> Option<bool> {
 /// The member name *session_id* last reported under, fresh or not.
 fn remembered_member(session_id: &str) -> Option<String> {
     let store = store().lock().unwrap_or_else(|e| e.into_inner());
-    store.by_session.get(session_id).map(|seen| seen.member.clone())
+    store
+        .by_session
+        .get(session_id)
+        .map(|seen| seen.member.clone())
 }
 
 /// *session_id*'s last report while it is fresh: `hook_busy` with the
@@ -639,7 +647,11 @@ pub(crate) fn handle_hook_request(
     // A session the roster names, or — for its `session.end` alone — one
     // this hived took reports from: `hive kill` takes the row before the
     // engine it stops gets to say it is leaving.
-    let remembered = || (name == "session.end").then(|| remembered_member(&session_id)).flatten();
+    let remembered = || {
+        (name == "session.end")
+            .then(|| remembered_member(&session_id))
+            .flatten()
+    };
     let Some(member) = (ctx.roster)(&session_id).or_else(remembered) else {
         return (404, refusal("session not on this team's claude roster"));
     };
@@ -661,7 +673,15 @@ pub(crate) fn handle_hook_request(
         return (200, answer);
     }
     let event_id = map_get_str(&event, "eventId");
-    match apply_event(&session_id, &member, &name, &turn_id, &epoch, seq, &event_id) {
+    match apply_event(
+        &session_id,
+        &member,
+        &name,
+        &turn_id,
+        &epoch,
+        seq,
+        &event_id,
+    ) {
         Applied::Taken => {}
         Applied::Duplicate => {
             answer.insert("duplicate".to_string(), Value::Bool(true));
@@ -939,12 +959,25 @@ mod tests {
             "",
         );
         post(&ctx, &body_at(1, &[("event", "session.start")]));
-        post(&ctx, &body_at(2, &[("event", "turn.start"), ("turnId", "t1")]));
+        post(
+            &ctx,
+            &body_at(2, &[("event", "turn.start"), ("turnId", "t1")]),
+        );
         on_roster.store(false, std::sync::atomic::Ordering::SeqCst);
         // a turn event from a session the roster no longer names is refused
-        assert_eq!(post(&ctx, &body_at(3, &[("event", "turn.complete"), ("turnId", "t1")])).0, 404);
+        assert_eq!(
+            post(
+                &ctx,
+                &body_at(3, &[("event", "turn.complete"), ("turnId", "t1")])
+            )
+            .0,
+            404
+        );
         assert_eq!(hook_busy("sid-a"), Some(true));
-        let (status, answer) = post(&ctx, &body_at(4, &[("event", "session.end"), ("reason", "other")]));
+        let (status, answer) = post(
+            &ctx,
+            &body_at(4, &[("event", "session.end"), ("reason", "other")]),
+        );
         assert_eq!(status, 200, "{answer:?}");
         assert_eq!(answer.get("member"), Some(&Value::from("alpha")));
         assert_eq!(hook_busy("sid-a"), Some(false));
@@ -960,13 +993,22 @@ mod tests {
     fn test_hook_session_end_closes_the_open_turn_and_names_no_turn() {
         let ctx = ctx_with(roster(), "");
         post(&ctx, &body_at(1, &[("event", "session.start")]));
-        post(&ctx, &body_at(2, &[("event", "turn.start"), ("turnId", "t1")]));
+        post(
+            &ctx,
+            &body_at(2, &[("event", "turn.start"), ("turnId", "t1")]),
+        );
         assert_eq!(hook_busy("sid-a"), Some(true));
         // a session.end names no turn and is not refused for it
-        let (status, answer) = post(&ctx, &body_at(3, &[("event", "session.end"), ("reason", "exit")]));
+        let (status, answer) = post(
+            &ctx,
+            &body_at(3, &[("event", "session.end"), ("reason", "exit")]),
+        );
         assert_eq!(status, 200, "{answer:?}");
         assert_eq!(hook_busy("sid-a"), Some(false));
-        assert_eq!(fresh_observation("sid-a").unwrap().last_event, "session.end");
+        assert_eq!(
+            fresh_observation("sid-a").unwrap().last_event,
+            "session.end"
+        );
         // a turn event still names its turn
         assert_eq!(post(&ctx, &body_at(4, &[("event", "turn.start")])).0, 400);
     }
