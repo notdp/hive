@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.22.2
+
+### Fixes
+
+- The shared codex app-server daemon runs from `CODEX_HOME` instead of inheriting the directory of whatever command first spawned it; a daemon born in a directory that was later removed failed every `thread/start` with "failed to load configuration", so no codex member could be spawned. A failed mint now says which step failed and what the daemon answered (#254)
+
 ## 0.22.1
 
 ### Features
