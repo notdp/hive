@@ -709,6 +709,7 @@ fn test_spawn_codex_mint_failure_kills_pane_and_fails() {
         }),
     ));
     assert!(err.contains("thread identity"), "{err}");
+    assert!(err.contains("thread/start refused"), "{err}");
     assert_eq!(hook(|h| h.killed.clone()), vec!["%0"]);
     assert!(calls().is_empty()); // no startup command was ever sent
 }

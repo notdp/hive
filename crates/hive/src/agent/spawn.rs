@@ -305,10 +305,15 @@ pub fn ensure_codex_daemon(cwd: &str) -> anyhow::Result<()> {
 pub fn mint_codex_thread(cwd: &str, label: &str, model: &str) -> anyhow::Result<String> {
     ensure_codex_daemon(cwd)?;
     match hooked_start_member_thread(cwd, label, model) {
-        Some(tid) if !tid.is_empty() => Ok(tid),
-        _ => bail!(
+        Ok(tid) if !tid.is_empty() => Ok(tid),
+        Ok(_) => bail!(
+            "codex app-server minted an empty thread id for '{label}' \
+             (cwd {cwd}); refusing to spawn a codex member without a \
+             thread identity"
+        ),
+        Err(reason) => bail!(
             "codex app-server refused to mint a thread for \
-             '{label}' (cwd {cwd}); refusing to spawn a codex \
+             '{label}' (cwd {cwd}): {reason}; refusing to spawn a codex \
              member without a thread identity"
         ),
     }

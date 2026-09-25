@@ -567,14 +567,18 @@ pub(super) fn hooked_ensure_dir_trusted(cwd: &str) -> anyhow::Result<()> {
     crate::adapters::codex_app_server::ensure_dir_trusted(cwd)
 }
 
-pub(super) fn hooked_start_member_thread(cwd: &str, name: &str, model: &str) -> Option<String> {
+pub(super) fn hooked_start_member_thread(
+    cwd: &str,
+    name: &str,
+    model: &str,
+) -> Result<String, String> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
         h.codex_minted
             .push((cwd.to_string(), name.to_string(), model.to_string()));
         h.start_member_thread.clone()
     }) {
-        return v;
+        return v.ok_or_else(|| "thread/start refused".to_string());
     }
     crate::adapters::codex_app_server::start_member_thread(cwd, name, model)
 }

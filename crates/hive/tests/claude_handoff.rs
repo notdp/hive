@@ -648,6 +648,12 @@ fn test_codex_create_and_resume_keep_daemon_and_thread() {
     r.launch(false);
     r.ready();
     let before = fs::read(r.file("engine.json")).unwrap();
+    let engine: Value = serde_json::from_slice(&before).unwrap();
+    assert_eq!(
+        engine["cwd"].as_str().map(PathBuf::from),
+        Some(fs::canonicalize(r.file("x")).unwrap()),
+        "the shared daemon runs from CODEX_HOME, not the launcher's directory"
+    );
     let result = r.create();
     let entry: Value = serde_json::from_slice(&fs::read(r.team_entry()).unwrap()).unwrap();
     assert_eq!(entry["members"][0]["sessionId"], CODEX_THREAD);

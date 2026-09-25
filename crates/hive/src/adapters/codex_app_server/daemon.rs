@@ -164,8 +164,12 @@ pub fn ensure_daemon() -> DaemonOutcome {
         Ok(file) => file,
         Err(_) => return DaemonOutcome::Failed,
     };
+    // The daemon outlives its caller, and a codex whose working directory is
+    // gone fails every thread/start ("failed to load configuration"), so it
+    // runs from CODEX_HOME, never from wherever the first spawn was typed.
     let mut cmd = Command::new("codex");
-    cmd.arg("app-server")
+    cmd.current_dir(codex_home())
+        .arg("app-server")
         .arg("--listen")
         .arg(format!("unix://{}", sock.display()))
         .env_clear()
@@ -711,18 +715,23 @@ pub fn freshen_models_cache() -> bool {
     freshen().is_some()
 }
 
-/// Mint a resumable thread for a new member; None on any failure.
-pub fn start_member_thread(cwd: &str, name: &str, model: &str) -> Option<String> {
-    let client = shared_client()?;
+/// Mint a resumable thread for a new member; the error says which step
+/// failed and what the daemon answered.
+pub fn start_member_thread(cwd: &str, name: &str, model: &str) -> Result<String, String> {
+    let client = shared_client().ok_or_else(no_daemon)?;
     freshen_models_cache();
     client.start_thread(cwd, name, model)
 }
 
-/// Server-side fork of *thread_id*; returns the fork's id, None on failure.
-pub fn fork_member_thread(thread_id: &str, name: &str) -> Option<String> {
-    let client = shared_client()?;
+/// Server-side fork of *thread_id*; returns the fork's id.
+pub fn fork_member_thread(thread_id: &str, name: &str) -> Result<String, String> {
+    let client = shared_client().ok_or_else(no_daemon)?;
     freshen_models_cache();
     client.fork_thread(thread_id, name)
+}
+
+fn no_daemon() -> String {
+    "no connection to the shared codex app-server daemon".to_string()
 }
 
 #[cfg(test)]

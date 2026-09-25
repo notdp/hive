@@ -1024,7 +1024,10 @@ mod tests {
 
     #[test]
     fn test_send_as_puts_the_origin_in_the_frame_and_the_name_in_the_tag() {
-        let dir = tempfile::Builder::new().prefix("hsa").tempdir_in("/tmp").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("hsa")
+            .tempdir_in("/tmp")
+            .unwrap();
         let sock = dir.path().join("i.sock");
         let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let handle = std::thread::spawn(move || {
@@ -1034,7 +1037,13 @@ mod tests {
             buf
         });
         assert_eq!(
-            send_as(sock.to_str().unwrap(), "hi", "uds:/tmp/cc-socks/7.sock", "t.orch", "sid"),
+            send_as(
+                sock.to_str().unwrap(),
+                "hi",
+                "uds:/tmp/cc-socks/7.sock",
+                "t.orch",
+                "sid"
+            ),
             Some(ACCEPTED_UDS_WRITE)
         );
         let frame: Value = serde_json::from_slice(&handle.join().unwrap()).unwrap();
@@ -1052,7 +1061,10 @@ mod tests {
         env.remove("CLAUDE_CODE_MESSAGING_SOCKET");
         assert_eq!(own_peer_origin(), None);
         env.set("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/cc-socks/42.sock");
-        assert_eq!(own_peer_origin().as_deref(), Some("uds:/tmp/cc-socks/42.sock"));
+        assert_eq!(
+            own_peer_origin().as_deref(),
+            Some("uds:/tmp/cc-socks/42.sock")
+        );
     }
 
     #[test]

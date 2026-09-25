@@ -144,6 +144,7 @@ pub struct Hook {
     pub codex_spawn_daemon: bool,
     /// Some(msg) → ensure_dir_trusted fails with msg (the cwd is still recorded).
     pub ensure_dir_trusted_error: Option<String>,
+    /// None → the mint fails with `thread/start refused`.
     pub start_member_thread: Option<String>,
     pub codex_send_to_pane: Option<&'static str>,
     pub codex_send_to_thread: Option<&'static str>,
