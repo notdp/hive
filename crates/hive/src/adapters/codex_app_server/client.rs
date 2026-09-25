@@ -187,6 +187,21 @@ fn render_error(err: &Value) -> String {
     }
 }
 
+/// The `result` a `call` answered with, or why there is none.
+fn call_result<'a>(method: &str, res: &'a Value) -> Result<&'a Value, String> {
+    if let Some(result) = res.get("result") {
+        return Ok(result);
+    }
+    Err(if res.get("__timeout__").is_some() {
+        format!("{method} timed out")
+    } else {
+        match res.get("__error__") {
+            Some(err) => format!("{method}: {}", render_error(err)),
+            None => format!("{method} answered without a result"),
+        }
+    })
+}
+
 fn turn_id_of(turn: &Value) -> Option<&str> {
     turn.get("id")
         .and_then(Value::as_str)
@@ -465,27 +480,39 @@ impl CodexDaemonClient {
     /// only (state DB) and never materializes the file, so the flush is
     /// `flush_thread`, and the rollout's presence on disk is the oracle.
     /// *name* must be non-empty (the daemon rejects empty names).
-    pub fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Option<String> {
+    pub fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Result<String, String> {
         let mut params = Map::new();
         params.insert("cwd".to_string(), json!(cwd));
         if !model.is_empty() {
             params.insert("model".to_string(), json!(model));
         }
         let res = self.call("thread/start", Value::Object(params));
-        let thread = res
-            .get("result")
-            .and_then(Value::as_object)?
-            .get("thread")
-            .and_then(Value::as_object)?;
-        let tid = thread_id_from(thread)?;
-        self.seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
-        let rollout = thread_path_from(thread);
-        self.flush_thread(&tid, name, rollout.as_deref())
-            .then_some(tid)
+        self.adopt_thread("thread/start", &res, name)
     }
 
-    /// Name the thread and force its rollout onto disk; false when any step
-    /// fails, because an unflushed thread is not attachable and must be
+    /// Fork a rolled-out thread server-side; return the fork's threadId.
+    pub fn fork_thread(&self, thread_id: &str, name: &str) -> Result<String, String> {
+        let res = self.call("thread/fork", json!({"threadId": thread_id}));
+        self.adopt_thread("thread/fork", &res, name)
+    }
+
+    /// Take the thread a `thread/start` or `thread/fork` answered with:
+    /// seed its status, name it and flush its rollout.
+    fn adopt_thread(&self, method: &str, res: &Value, name: &str) -> Result<String, String> {
+        let thread = call_result(method, res)?
+            .get("thread")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("{method} answered without a thread"))?;
+        let tid = thread_id_from(thread)
+            .ok_or_else(|| format!("{method} answered without a thread id"))?;
+        self.seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
+        let rollout = thread_path_from(thread);
+        self.flush_thread(&tid, name, rollout.as_deref())?;
+        Ok(tid)
+    }
+
+    /// Name the thread and force its rollout onto disk; an error when any
+    /// step fails, because an unflushed thread is not attachable and must be
     /// treated as a spawn failure.
     ///
     /// `thread/section/move` with a null section is the materialization
@@ -496,34 +523,26 @@ impl CodexDaemonClient {
     /// itself, at the path `thread/start` reported: which call materializes
     /// has changed across codex versions, the file's presence is what the
     /// TUI's resume actually needs.
-    fn flush_thread(&self, tid: &str, name: &str, rollout: Option<&Path>) -> bool {
-        let named = self.call("thread/name/set", json!({"threadId": tid, "name": name}));
-        if named.get("result").is_none() {
-            return false;
-        }
-        let placed = self.call(
+    fn flush_thread(&self, tid: &str, name: &str, rollout: Option<&Path>) -> Result<(), String> {
+        call_result(
+            "thread/name/set",
+            &self.call("thread/name/set", json!({"threadId": tid, "name": name})),
+        )?;
+        call_result(
             "thread/section/move",
-            json!({"threadId": tid, "sectionId": Value::Null}),
-        );
-        if placed.get("result").is_none() {
-            return false;
+            &self.call(
+                "thread/section/move",
+                json!({"threadId": tid, "sectionId": Value::Null}),
+            ),
+        )?;
+        match rollout {
+            None => Err("the daemon reported no rollout path for the thread".to_string()),
+            Some(path) if !path.is_file() => Err(format!(
+                "rollout {} is not on disk after thread/section/move",
+                path.display()
+            )),
+            Some(_) => Ok(()),
         }
-        rollout.is_some_and(Path::is_file)
-    }
-
-    /// Fork a rolled-out thread server-side; return the fork's threadId.
-    pub fn fork_thread(&self, thread_id: &str, name: &str) -> Option<String> {
-        let res = self.call("thread/fork", json!({"threadId": thread_id}));
-        let thread = res
-            .get("result")
-            .and_then(Value::as_object)?
-            .get("thread")
-            .and_then(Value::as_object)?;
-        let tid = thread_id_from(thread)?;
-        self.seed_status(&tid, thread.get("status").unwrap_or(&Value::Null));
-        let rollout = thread_path_from(thread);
-        self.flush_thread(&tid, name, rollout.as_deref())
-            .then_some(tid)
     }
 
     pub fn turn_start(&self, thread_id: &str, text: &str) -> Value {
@@ -672,10 +691,10 @@ pub trait DaemonClient: Send + Sync {
     fn compact_start(&self, _thread_id: &str) -> Value {
         unimplemented!("compact_start")
     }
-    fn start_thread(&self, _cwd: &str, _name: &str, _model: &str) -> Option<String> {
+    fn start_thread(&self, _cwd: &str, _name: &str, _model: &str) -> Result<String, String> {
         unimplemented!("start_thread")
     }
-    fn fork_thread(&self, _thread_id: &str, _name: &str) -> Option<String> {
+    fn fork_thread(&self, _thread_id: &str, _name: &str) -> Result<String, String> {
         unimplemented!("fork_thread")
     }
     /// Raw `account/rateLimits/read` answer (`call` shape).
@@ -709,10 +728,10 @@ impl DaemonClient for CodexDaemonClient {
     fn compact_start(&self, thread_id: &str) -> Value {
         CodexDaemonClient::compact_start(self, thread_id)
     }
-    fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Option<String> {
+    fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Result<String, String> {
         CodexDaemonClient::start_thread(self, cwd, name, model)
     }
-    fn fork_thread(&self, thread_id: &str, name: &str) -> Option<String> {
+    fn fork_thread(&self, thread_id: &str, name: &str) -> Result<String, String> {
         CodexDaemonClient::fork_thread(self, thread_id, name)
     }
     fn account_rate_limits(&self) -> Value {

@@ -64,7 +64,7 @@ args=sys.argv[1:]
 if args and args[0]=='app-server':
     path=args[args.index('--listen')+1].removeprefix('unix://')
     sock=socket.socket(socket.AF_UNIX);sock.bind(path);sock.listen()
-    root.joinpath('engine.json').write_text(json.dumps({'pid':os.getpid(),'sessionId':job}))
+    root.joinpath('engine.json').write_text(json.dumps({'pid':os.getpid(),'sessionId':job,'cwd':os.getcwd()}))
     while True:
         peer,_=sock.accept()
         threading.Thread(target=serve,args=(peer,),daemon=True).start()

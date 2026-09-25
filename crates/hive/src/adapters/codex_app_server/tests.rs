@@ -1025,7 +1025,7 @@ fn test_start_thread_mints_and_flushes() {
         client
             .start_thread("/work", "honey.val", "gpt-x")
             .as_deref(),
-        Some("tid-new")
+        Ok("tid-new")
     );
     let calls = calls.lock().unwrap();
     assert_eq!(
@@ -1074,7 +1074,7 @@ fn test_start_thread_fails_when_the_placement_is_refused() {
         }
         _ => json!({"result": {}}),
     });
-    assert_eq!(client.start_thread("/work", "honey.val", "gpt-x"), None);
+    assert!(client.start_thread("/work", "honey.val", "gpt-x").is_err());
 }
 
 #[test]
@@ -1093,7 +1093,7 @@ fn test_start_thread_fails_when_the_rollout_never_appears() {
             false,
         ),
     );
-    assert_eq!(client.start_thread("/work", "honey.val", "gpt-x"), None);
+    assert!(client.start_thread("/work", "honey.val", "gpt-x").is_err());
     assert!(!rollout.exists());
 }
 
@@ -1109,7 +1109,7 @@ fn test_start_thread_fails_without_a_rollout_path() {
             json!({"result": {}})
         }
     });
-    assert_eq!(client.start_thread("/work", "honey.val", "gpt-x"), None);
+    assert!(client.start_thread("/work", "honey.val", "gpt-x").is_err());
 }
 
 #[test]
@@ -1121,7 +1121,7 @@ fn test_start_thread_without_model_omits_param() {
         &client,
         minting_daemon("thread/start", json!({"id": "t"}), rollout, true),
     );
-    assert_eq!(client.start_thread("/work", "n", "").as_deref(), Some("t"));
+    assert_eq!(client.start_thread("/work", "n", "").as_deref(), Ok("t"));
     let calls = calls.lock().unwrap();
     let (_, start_params) = calls
         .iter()
@@ -1142,14 +1142,18 @@ fn test_start_thread_fails_when_flush_fails() {
             json!({"__error__": "boom"})
         }
     });
-    assert_eq!(client.start_thread("/work", "n", ""), None);
+    assert!(client.start_thread("/work", "n", "").is_err());
 }
 
 #[test]
 fn test_start_thread_fails_on_rpc_error() {
     let client = bare_client();
-    client.set_call_override(|_method, _params| json!({"__error__": "nope"}));
-    assert_eq!(client.start_thread("/work", "n", ""), None);
+    client.set_call_override(|_method, _params| {
+        json!({"__error__": {"code": -32600, "message": "failed to load configuration"}})
+    });
+    let err = client.start_thread("/work", "n", "").unwrap_err();
+    assert!(err.starts_with("thread/start: "), "{err}");
+    assert!(err.contains("failed to load configuration"), "{err}");
 }
 
 #[test]
@@ -1168,7 +1172,7 @@ fn test_fork_thread_returns_fork_id_and_flushes() {
     );
     assert_eq!(
         client.fork_thread("tid-src", "clone").as_deref(),
-        Some("tid-fork")
+        Ok("tid-fork")
     );
     let calls = calls.lock().unwrap();
     assert_eq!(
@@ -1196,7 +1200,7 @@ fn test_fork_thread_returns_fork_id_and_flushes() {
 fn test_fork_thread_fails_on_rpc_error() {
     let client = bare_client();
     client.set_call_override(|_method, _params| json!({"__error__": "no rollout found"}));
-    assert_eq!(client.fork_thread("tid-src", "clone"), None);
+    assert!(client.fork_thread("tid-src", "clone").is_err());
 }
 
 // --- pane-keyed API over the shared client ------------------------------
@@ -1749,21 +1753,18 @@ fn test_start_member_thread_delegates_to_client() {
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
-        fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Option<String> {
+        fn start_thread(&self, cwd: &str, name: &str, model: &str) -> Result<String, String> {
             if (cwd, name, model) == ("/w", "n", "m") {
-                Some("tid-x".to_string())
+                Ok("tid-x".to_string())
             } else {
-                None
+                Err("unexpected".to_string())
             }
         }
     }
     override_client(Arc::new(FakeClient));
-    assert_eq!(
-        start_member_thread("/w", "n", "m").as_deref(),
-        Some("tid-x")
-    );
+    assert_eq!(start_member_thread("/w", "n", "m").as_deref(), Ok("tid-x"));
     set_shared_client_override(|| None);
-    assert_eq!(start_member_thread("/w", "n", ""), None);
+    assert!(start_member_thread("/w", "n", "").is_err());
 }
 
 #[test]
@@ -1774,18 +1775,18 @@ fn test_fork_member_thread_delegates_to_client() {
 
     struct FakeClient;
     impl DaemonClient for FakeClient {
-        fn fork_thread(&self, tid: &str, name: &str) -> Option<String> {
+        fn fork_thread(&self, tid: &str, name: &str) -> Result<String, String> {
             if (tid, name) == ("src", "n") {
-                Some("tid-f".to_string())
+                Ok("tid-f".to_string())
             } else {
-                None
+                Err("unexpected".to_string())
             }
         }
     }
     override_client(Arc::new(FakeClient));
-    assert_eq!(fork_member_thread("src", "n").as_deref(), Some("tid-f"));
+    assert_eq!(fork_member_thread("src", "n").as_deref(), Ok("tid-f"));
     set_shared_client_override(|| None);
-    assert_eq!(fork_member_thread("src", "n"), None);
+    assert!(fork_member_thread("src", "n").is_err());
 }
 
 // --- directory trust ----------------------------------------------------

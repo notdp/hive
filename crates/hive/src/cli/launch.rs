@@ -286,7 +286,7 @@ fn exec_codex_managed(args: &[String]) -> ! {
         let sub_index = sub_index.expect("sub implies index");
         let source = codex_positional_after(args, sub_index);
         let forked = source.as_deref().and_then(|source| {
-            codex_app_server::fork_member_thread(source, &codex_pane_thread_name(&pane))
+            codex_app_server::fork_member_thread(source, &codex_pane_thread_name(&pane)).ok()
         });
         if let (Some(source), Some(forked)) = (source, forked) {
             let _ = codex_app_server::write_pane_thread(
@@ -321,7 +321,8 @@ fn exec_codex_managed(args: &[String]) -> ! {
         &cwd,
         &codex_pane_thread_name(&pane),
         &codex_opt_value(args, &["--model", "-m"]).unwrap_or_default(),
-    );
+    )
+    .ok();
     if let Some(minted) = minted {
         let _ = codex_app_server::write_pane_thread(
             &pane,
@@ -431,7 +432,9 @@ fn exec_codex_outside(args: &[String]) -> ! {
     let _ = codex_app_server::ensure_dir_trusted(&cwd);
     let name = format!("hive-{}", &uuid4()[..8]);
     let thread = match sub {
-        Some("resume") => source.clone(),
+        Some("resume") => source
+            .clone()
+            .ok_or_else(|| "resume names no thread".to_string()),
         Some("fork") => codex_app_server::fork_member_thread(source.as_deref().unwrap(), &name),
         _ => codex_app_server::start_member_thread(
             &cwd,
@@ -439,8 +442,8 @@ fn exec_codex_outside(args: &[String]) -> ! {
             &codex_opt_value(args, &["--model", "-m"]).unwrap_or_default(),
         ),
     }
-    .unwrap_or_else(|| {
-        eprintln!("hive: could not create Codex thread");
+    .unwrap_or_else(|reason| {
+        eprintln!("hive: could not create Codex thread: {reason}");
         std::process::exit(1);
     });
     let session = crate::terminal_handoff::Session {
