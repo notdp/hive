@@ -28,7 +28,7 @@ curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer
 hive plugin setup
 ```
 
-内部では marketplace を実体化し、claude（2.1.229 以上）と codex それぞれに `plugin marketplace add` + install を実行します。claude 側の marketplace エントリは command source で、Claude はセッションごとに `hive plugin sync` を再実行するため、スキルの更新はバイナリに乗って届きます。codex 側のプラグインはフックを一切持ちません（フックは codex のフック審査ダイアログの後ろに置かれてしまいます）。バイナリのバージョンが変わると、hive 自身の codex 起動パスがエンジン起動前にプラグインを再 add します。リモートからは何も取得しません。claude の settings に書くのは 1 キーだけです: `~/.claude/settings.json` の `env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`（Claude Code の function hooks スイッチ。デスクトップのセッションはこれでチームの hived に turn を報告します。`hive doctor` で有無を確認できます）。
+内部では marketplace を実体化し、claude と codex それぞれに `plugin marketplace add` + install を実行します。claude 側の marketplace エントリは command source で、Claude はセッションごとに `hive plugin sync` を再実行するため、スキルの更新はバイナリに乗って届きます。codex 側のプラグインはフックを一切持ちません（フックは codex のフック審査ダイアログの後ろに置かれてしまいます）。バイナリのバージョンが変わると、hive 自身の codex 起動パスがエンジン起動前にプラグインを再 add します。リモートからは何も取得せず、claude の settings も変更しません。claude プラグインの mod（`mod/register.ts`）がチームの claude エンジンの turn を hived に報告し、mod を読み込むかどうかは Claude Code 自身のロールアウトフラグが決め、hive は何も有効化しません。2.1.287 以降、`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` はこのフラグを上書きしません。
 
 必要な環境:
 

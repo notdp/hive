@@ -152,8 +152,10 @@ behavior is documented in the modules themselves.
   members, so the codex re-add lives in hive's launch path
   (`ensure_codex_plugin_current`), and the claude side needs none — the
   command source is the sync. The claude side does ship a function-hooks
-  module, `mod/register.ts`, named by the claude manifest's `hooks` field
-  alone: codex never reads that manifest or that path. The module is the
+  module (a Claude mod, Claude Code 2.1.287; hive switches nothing on,
+  Claude Code's rollout flag decides), `mod/register.ts`, listed by
+  `mod/hooks.json`, which the claude manifest's `hooks` field alone names:
+  codex never reads that manifest or that path. The module is the
   engine's own report of its turn boundaries and its end to the hived,
   the relay that takes a hive frame off the session's inbox and
   submits it again as the plugin's own prompt (the short wrapper), and
