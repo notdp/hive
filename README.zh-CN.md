@@ -28,7 +28,7 @@ curl -fsSL https://github.com/notdp/hive/releases/latest/download/hive-installer
 hive plugin setup
 ```
 
-它在底下物化 marketplace，再对 claude（2.1.229+）和 codex 各执行 `plugin marketplace add` + install。claude 侧的 marketplace 条目是 command source——Claude 每个 session 重跑一次 `hive plugin sync`，所以 skill 更新随二进制走；codex 侧插件不带任何 hook（hook 会卡在 codex 的 hook 审阅对话框后面）——hive 自己的 codex 启动路径在二进制版本变化时、引擎启动前重新 add 插件。不从远端拉取任何东西；对 claude 的 settings 只写一个键：`~/.claude/settings.json` 的 `env.CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`（Claude Code 的 function hooks 开关，桌面 session 靠它向团队的 hived 报 turn；`hive doctor` 能看到开没开）。
+它在底下物化 marketplace，再对 claude 和 codex 各执行 `plugin marketplace add` + install。claude 侧的 marketplace 条目是 command source——Claude 每个 session 重跑一次 `hive plugin sync`，所以 skill 更新随二进制走；codex 侧插件不带任何 hook（hook 会卡在 codex 的 hook 审阅对话框后面）——hive 自己的 codex 启动路径在二进制版本变化时、引擎启动前重新 add 插件。不从远端拉取任何东西，也不改 claude 的 settings：claude 插件的 mod（`mod/register.ts`）让团队里的 claude 引擎向 hived 报 turn，mod 加不加载由 Claude Code 自己的灰度开关决定，hive 不打开任何东西；从 2.1.287 起 `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` 不再能覆盖这个开关。
 
 依赖：
 

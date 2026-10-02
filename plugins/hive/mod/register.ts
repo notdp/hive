@@ -230,7 +230,9 @@ export const register: Register = (on) => {
   // message is never lost to the relay. A plugin's prompt runs once the
   // session is idle, as its own turn; nothing folds into a running turn.
   on('session.receive', async ($, e, next) => {
-    if (e.origin?.kind !== 'peer') return next(e)
+    // An agent's message is received inside its turn, where awaiting
+    // $.prompt.submit hangs; only the session's own inbox is relayed.
+    if (e.agentId || e.origin?.kind !== 'peer') return next(e)
     const inner = hiveEnvelopeOf(e.text)
     if (!inner) return next(e)
     try {

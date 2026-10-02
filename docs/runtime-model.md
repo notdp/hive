@@ -973,12 +973,6 @@ Two spawn-time requirements, neither visible at the call site:
   `COLORTERM=truecolor`, and inherited `NO_COLOR` is removed.
 - Path-valued spawn flags must be absolute: they persist verbatim as the job's
   respawn flags.
-- Every spawn carries `--settings '{"env":{"CLAUDE_CODE_ENABLE_FUNCTION_HOOKS":"1"}}'`
-  (`claude_bg::FUNCTION_HOOKS_SETTINGS`), inline so it survives as a respawn
-  flag: it switches on Claude Code's function hooks, which is what loads the
-  hive plugin's hooks module and gives the engine its report lane
-  (next section). A wake re-uses the recorded flags, so a job spawned
-  before this flag existed reports nothing until it is respawned.
 
 The pane sits in an attach watch loop because `claude attach` exits 0 both on
 user detach and when an engine respawn kicks the viewer; the loop cannot tell
@@ -1002,8 +996,7 @@ pane's own fact.
 ### The engine's own turn reports
 
 A claude engine can say where its turns begin and end: Claude Code's
-function hooks (the "Claude Mods" primitive, anthropics/claude-code#91870,
-gated by `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` on 2.1.278) run the hive
+function hooks (Claude Mods, 2.1.287) run the hive
 plugin's hooks module, `plugins/hive/mod/register.ts`, inside the engine,
 and it posts `session.start`, `turn.start`, `turn.complete` and
 `session.end` over
@@ -1084,14 +1077,17 @@ exists; the module looks its team up again at every event, so the first
 report that lands is typically the task turn's `turn.complete`, and the
 member reads as before until then.
 
-The desktop's own session is not spawned by hive, so its switch lives in
-Claude's own user settings: `hive plugin setup` writes
-`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1` into `~/.claude/settings.json` under
-`env` (`claude_settings.rs`, every other key kept), and `hive doctor`
-reports it as `claudeFunctionHooks`. A desktop member without it reads as
-before. The desktop
+Hive switches nothing on, in a spawned engine or a desktop session:
+Claude Code's own rollout flag (`tengu_plugin_hooks_modules`, default on)
+decides whether the module loads, and from 2.1.287
+`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` no longer overrides it. The flag is
+cached in `~/.claude.json`, shared by every Claude Code version on the
+machine; served off, the module does not load and the member reads as
+before (`claude --debug` names the flag and its source). The desktop
 path itself (its hooks module finding the roster and posting) is not yet
-verified; the CLI path is, on `-p`, `--bg` and a hive-spawned member.
+verified. The CLI path was verified on 2.1.278 on `-p`, `--bg` and a
+hive-spawned member, with the env switch then needed; on 2.1.287, without
+it, on `-p` so far.
 
 ### What the viewer is showing
 

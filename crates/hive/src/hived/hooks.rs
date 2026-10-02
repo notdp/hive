@@ -3,11 +3,11 @@
 //!
 //! Claude Code's function hooks run inside the engine and reach the host
 //! only through `$`; the hive plugin's hooks module
-//! (`plugins/hive/mod/register.ts`) posts `session.start`, `turn.start`
-//! and `turn.complete` over `$.http.fetch` to a loopback port this module
-//! listens on. The engine's own turn boundary thereby becomes a signal the
-//! hived holds, the way codex's `turn/completed` and grok's prompt
-//! response already are. `$.process.run` is CLI-only, so HTTP is the one
+//! (`plugins/hive/mod/register.ts`) posts `session.start`, `turn.start`,
+//! `turn.complete` and `session.end` over `$.http.fetch` to a loopback
+//! port this module listens on. The engine's own turn boundary thereby
+//! becomes a signal the hived holds, the way codex's `turn/completed` and
+//! grok's prompt response already are. `$.process.run` is CLI-only, so HTTP is the one
 //! path a desktop session's hooks can take too.
 //!
 //! Discovery is a file, `<workspace>/run/hooks-endpoint.json`, mode 0600,
