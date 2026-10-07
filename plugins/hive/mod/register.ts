@@ -80,6 +80,7 @@ const BADGE_RE = /^\[[A-Za-z0-9_.-]+\] /
 const DESKTOP_MCP = 'ccd_session_mgmt'
 let desktopTools: boolean | null = null
 let badgeKey: string | null = null
+let desktopSession = ''
 let syncing = false
 let badgePoll: (() => void) | null = null
 const BADGE_POLL_MS = 5000
@@ -89,39 +90,77 @@ const mcpText = (r: any): string => {
   return typeof block?.text === 'string' ? block.text : ''
 }
 
-const syncBadge = async ($: EngineInterface) => {
+const syncBadge = async ($: EngineInterface, m: Membership | null) => {
+  const key = m && m.member ? `${m.team}.${m.member}` : ''
+  if (key === badgeKey) return
+  let got
+  try { got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' }) } catch { desktopTools = false; return }
+  if (got.isError) { desktopTools = false; return }
+  desktopTools = true
+  let title = ''
+  try {
+    const info = JSON.parse(mcpText(got))
+    title = String(info?.title ?? '')
+    desktopSession = String(info?.sessionId ?? '')
+  } catch { return }
+  const base = title.replace(BADGE_RE, '')
+  const want = key ? (base ? `[${key}] ${base}` : `[${key}]`) : base
+  if (want !== title) {
+    const set = await $.mcp.call(DESKTOP_MCP, 'set_session_title', { session_id: 'self', title: want })
+    if (set.isError) return
+  }
+  badgeKey = key
+}
+
+// The team's workspace granted to a desktop session, so a path into it (a
+// member's report, a task file) opens in the desktop's file pane, which
+// shows only the session's working directory and the folders granted to
+// it. Outside bypass mode the call is a permission prompt that waits on
+// the person's answer, for hours if need be, so it is never awaited here,
+// and the desktop prompts again for a folder it already granted: a grant
+// is asked once per workspace per module instance, recorded before the
+// call, and once granted it is kept in the plugin's store under the
+// desktop session, whose record holds the grant across engine processes,
+// so a reload or a new process does not ask again. The workspace root,
+// which exists while the roster does; `artifacts/` may not yet, and a path
+// that does not exist is refused. Nothing takes a grant back: one outlives
+// the team in that session.
+// ponytail: the store keeps one key per desktop session and workspace and
+// prunes none; a few hundred bytes a team, worth a sweep only if it grows.
+const DIRECTORY_MCP = 'ccd_directory'
+let grantedWorkspace: string | null = null
+
+const grantWorkspace = ($: EngineInterface, m: Membership | null) => {
+  if (desktopTools !== true || !m || m.workspace === grantedWorkspace) return
+  grantedWorkspace = m.workspace
+  const key = desktopSession ? `grant:${desktopSession}:${m.workspace}` : ''
+  void (async () => {
+    if (key && (await $.store.get(key))) return
+    const r = await $.mcp.call(DIRECTORY_MCP, 'request_directory', { path: m.workspace })
+    if (key && !r.isError) await $.store.set(key, true)
+  })().catch(() => undefined)
+}
+
+const syncDesktop = async ($: EngineInterface) => {
   if (desktopTools === false || syncing) return
   syncing = true
   try {
     if (!sessionId) sessionId = await $.session.id()
     const m = await membership($, sessionId)
-    const key = m && m.member ? `${m.team}.${m.member}` : ''
-    if (key === badgeKey) return
-    let got
-    try { got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' }) } catch { desktopTools = false; return }
-    if (got.isError) { desktopTools = false; return }
-    desktopTools = true
-    let title = ''
-    try { title = String(JSON.parse(mcpText(got))?.title ?? '') } catch { return }
-    const base = title.replace(BADGE_RE, '')
-    const want = key ? (base ? `[${key}] ${base}` : `[${key}]`) : base
-    if (want !== title) {
-      const set = await $.mcp.call(DESKTOP_MCP, 'set_session_title', { session_id: 'self', title: want })
-      if (set.isError) return
-    }
-    badgeKey = key
+    await syncBadge($, m)
+    grantWorkspace($, m)
   } finally {
     syncing = false
   }
 }
 
-// A desktop session's badge follows the roster within seconds, not at its
-// next turn: once the desktop tools are known to answer, the roster is
-// read every few seconds (one directory listing and a few small files) and
-// the title touched only when the membership changed.
-const pollBadge = ($: EngineInterface) => {
+// A desktop session follows the roster within seconds, not at its next
+// turn: once the desktop tools are known to answer, the roster is read
+// every few seconds (one directory listing and a few small files) and the
+// title and the grant touched only when the membership changed.
+const pollDesktop = ($: EngineInterface) => {
   if (badgePoll || desktopTools !== true) return
-  badgePoll = $.clock.every(BADGE_POLL_MS, () => { void syncBadge($).catch(() => undefined) })
+  badgePoll = $.clock.every(BADGE_POLL_MS, () => { void syncDesktop($).catch(() => undefined) })
 }
 
 type Sent = { status: number; unregistered: boolean }
@@ -195,8 +234,8 @@ const bounded = ($: EngineInterface, work: Promise<void>, ms = POST_BUDGET_MS) =
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await bounded($, report($, 'session.start', { cwd: e.cwd, surface: e.surface, isInteractive: e.isInteractive }))
-    await bounded($, syncBadge($).catch(() => undefined))
-    pollBadge($)
+    await bounded($, syncDesktop($).catch(() => undefined))
+    pollDesktop($)
     return next(e)
   })
   on('turn.start', async ($, e, next) => {
@@ -208,8 +247,8 @@ export const register: Register = (on) => {
       turnId: e.turnId, reason: e.reason, isAborted: e.isAborted, durationMs: e.durationMs,
       agentId: e.agentId ?? null, usage: e.usage ?? null,
     }))
-    await bounded($, syncBadge($).catch(() => undefined))
-    pollBadge($)
+    await bounded($, syncDesktop($).catch(() => undefined))
+    pollDesktop($)
     return next(e)
   })
   // The engine leaving (exit, /clear, resume, logout, a signal; a kill -9

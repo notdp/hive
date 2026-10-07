@@ -1183,6 +1183,25 @@ those tools is learned from the first call (a desktop session's
 `session.start` names no surface, so the surface is no gate); a terminal
 session or a bg job, whose call fails, is left alone from then on.
 
+On the same look the module grants the team's workspace to a desktop
+session (`$.mcp.call` to `ccd_directory`'s `request_directory`), because
+the desktop's file pane opens only files under the session's working
+directory and the folders granted to it: without the grant, a path into
+`<workspace>/artifacts/` that a member reports, or the session names
+itself, shows as "Couldn't find this file" although the engine reads it.
+Outside bypass mode (manual and auto alike) the call is a permission
+prompt that waits on the person (measured at hours), so it is never
+awaited, and the desktop prompts again for a folder it already granted.
+So the module asks once per workspace per module instance, recording the
+ask before the call, and once a grant lands keeps it in the plugin's
+`$.store` under the desktop session id (`grant:<local_…>:<workspace>`):
+the desktop keeps the grant in that session's record across engine
+processes, and a reload or a new process finds the key and does not ask
+again. A prompt still pending when the module reloads is withdrawn by the
+desktop and asked anew by the new instance. The root is granted, not
+`artifacts/`, which may not exist yet; a path that does not exist is
+refused. Nothing takes a grant back, and the store prunes no key.
+
 When the daemon lane is unavailable the delivery falls back to the inbox
 socket with an explicit `priority: next`: a mid-turn arrival folds into the
 running turn at the next tool boundary, everything else lands as its own turn
