@@ -4,6 +4,13 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.22.3
+
+### Fixes
+
+- A desktop session on a team gets the team's workspace granted to it by the hooks module, so a path into `<workspace>/artifacts/` opens in the desktop's file pane instead of "Couldn't find this file"; silent in bypass mode, one prompt per desktop session and team otherwise, remembered across reloads and engine restarts (#256)
+- Claude Code 2.1.287 is required and hive no longer switches mods on: `hive plugin setup` stops writing `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`, bg spawns stop passing it, and `hive doctor` drops `claudeFunctionHooks`; the relay passes an agent-addressed message through instead of hanging on `$.prompt.submit` (#255)
+
 ## 0.22.2
 
 ### Fixes
