@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.22.4
+
+### Fixes
+
+- A team's panes and status bar follow the terminal's light or dark instead of falling light: `hive attach` and the `hclaude` / `hcodex` / `hgrok` handoff ask the terminal over OSC 11 and stamp the answer on the team session, which covers a terminal that reports no theme to tmux (the Claude desktop terminal); with no terminal asked yet the macOS system appearance decides before light does (#257)
+
 ## 0.22.3
 
 ### Fixes
