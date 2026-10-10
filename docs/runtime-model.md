@@ -378,9 +378,30 @@ client that wrote it.
 Reports resolve `HIVE_VIEW_THEME`, then `view.theme`. Auto/system keeps its
 existing meaning: an env value of auto bypasses a fixed config preference.
 Auto chooses the first non-control client in the same session whose
-`client_theme` is dark or light (tmux 3.6+), then falls back to `HIVE_APPEARANCE`,
-`COLORFGBG`, and light. A headless session with no explicit preference or
-environment hint therefore starts with a provisional light answer.
+`client_theme` is dark or light (tmux 3.6+), then the session's own
+`HIVE_APPEARANCE` (source `session`), then falls back to the hived's
+`HIVE_APPEARANCE`, `COLORFGBG`, the system's appearance (source `system`:
+macOS `AppleInterfaceStyle`, read only when nothing nearer answered) and
+light. A headless session with no explicit preference or environment hint
+therefore starts with the system's answer, which is the desktop's and not
+necessarily the terminal's — an app themed apart from the system is right
+only once a terminal has been asked.
+
+The session stamp is written by whoever brings a terminal: `hive attach` run
+outside tmux, and the `hclaude` / `hcodex` / `hgrok` launcher at its handoff
+into the team (it asks at startup, while the terminal is still its own). Each
+asks that terminal OSC 11 (or takes its own `HIVE_APPEARANCE`) before tmux
+has the terminal, writes the answer into the session environment, reports it
+to the session's panes at once through any client already there (unless an
+explicit theme is set), and draws the team session's status bar again from it. It exists for terminals that
+answer OSC 11 and never report a theme — the desktop app's terminal (xterm.js)
+answers neither DSR 996 nor mode 2031, so its `client_theme` stays empty — and
+for the bar, which a team built from an agent's tool shell draws with no
+terminal to ask. The stamp is as old as the last such attach: a theme switched
+afterwards is not followed until the next `hive attach`, and a desktop session
+that is not open in any window answers nothing, so an attach typed into it
+leaves the stamp as it was. Panes the session starts later inherit the
+variable, which `hive view` reads before probing.
 
 The monitor samples on attachment and relevant client events. It samples
 every two seconds while any non-control client has an empty `client_theme`

@@ -4,6 +4,7 @@ The wrapper pins every tmux call, including hived's, to a named disposable
 server. No engine CLI, real terminal, or user configuration participates.
 """
 
+import contextlib
 import fcntl
 import json
 import os
@@ -28,13 +29,13 @@ from tests.e2e._helpers import hive_binary_argv, wait_for
 
 
 class Terminal:
-    """Drain an attached tmux client and answer OSC queries, withholding 997."""
+    """Drain an attached client and answer OSC queries dark, withholding 997."""
 
-    def __init__(self, env: dict[str, str], team: str):
+    def __init__(self, env: dict[str, str], argv: list[str]):
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         self.child = subprocess.Popen(
-            ["tmux", "-u", "attach", "-t", team],
+            argv,
             env={**env, "TERM": "xterm-256color"},
             stdin=slave, stdout=slave, stderr=slave,
             start_new_session=True,
@@ -112,14 +113,18 @@ finally:
 '''
 
 
-@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
-@pytest.mark.parametrize("probe_before_theme", [False, True], ids=["attach-before-probe", "probe-before-997"])
-def test_e2e_hived_follows_delayed_client_theme(probe_before_theme):
+class Lane:
+    """One disposable tmux server, hive home and team with a running hived."""
+
+
+@contextlib.contextmanager
+def colour_lane():
     real_tmux = shutil.which("tmux")
     version = subprocess.check_output([real_tmux, "-V"], text=True).strip()
     parsed = re.search(r"(\d+)\.(\d+)", version)
     if not parsed or tuple(map(int, parsed.groups())) < (3, 6):
         pytest.skip("client_theme requires tmux 3.6+")
+    lane = Lane()
     server = f"probe-{uuid.uuid4().hex[:12]}"
     with tempfile.TemporaryDirectory(prefix="hive-colour-", dir="/tmp") as directory:
         root = Path(directory)
@@ -140,13 +145,16 @@ def test_e2e_hived_follows_delayed_client_theme(probe_before_theme):
                "CLAUDE_HOME": str(root / "claude"), "CLAUDE_CONFIG_DIR": str(root / "claude"),
                "CODEX_HOME": str(root / "codex"), "GROK_HOME": str(root / "grok"),
                "XDG_CACHE_HOME": str(root / "cache"), "TERM": "xterm-256color"}
+        # A light hint of the weakest kind, so the fallback never asks this
+        # machine's own appearance; a client theme or an attach still beats it.
+        hint = {"COLORFGBG": "0;15"}
         for key in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR", "CODEX_THREAD_ID", "GROK_SESSION_ID",
                     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_HOST_SESSION_ID",
                     "HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"):
             env.pop(key, None)
+        env.update(hint)
         workspace = root / "ws"
         team = "colour-test"
-        human = None
         daemon = None
 
         def tmux(*args):
@@ -158,6 +166,45 @@ def test_e2e_hived_follows_delayed_client_theme(probe_before_theme):
                 return []
             return [event for line in path.read_text().splitlines()
                     if (event := json.loads(line)).get("event") == "pane-colours.selected"]
+
+        try:
+            created = subprocess.run([*hive_binary_argv(), "create", team, "--workspace", str(workspace)],
+                                     env=env, cwd=root, text=True, capture_output=True, timeout=30)
+            assert created.returncode == 0, created.stderr
+            window = tmux("list-windows", "-t", team, "-F", "#{window_id}").splitlines()[0]
+            pane = tmux("list-panes", "-t", window, "-F", "#{pane_id}").splitlines()[0]
+            with (root / "daemon.stderr").open("w") as stderr:
+                daemon = subprocess.Popen([*hive_binary_argv(), "--hived", str(workspace), team, team, window],
+                                          env=env, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                          stderr=stderr, start_new_session=True)
+            wait_for(lambda: any(s["source"] == "fallback" for s in selections()), timeout=15)
+            clients = tmux("list-clients", "-t", team, "-F", "#{client_control_mode}")
+            assert clients == "1", clients
+            lane.__dict__.update(root=root, env=env, team=team, pane=pane, trace=trace, server=server,
+                                 version=version, tmux=tmux, selections=selections)
+            yield lane
+        finally:
+            for human in getattr(lane, "humans", []):
+                human.close()
+            if daemon:
+                daemon.terminate()
+                try:
+                    daemon.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    daemon.kill()
+                    daemon.wait(timeout=5)
+            subprocess.run([real_tmux, "-L", server, "kill-server"], capture_output=True, timeout=10)
+            gone = subprocess.run([real_tmux, "-L", server, "list-sessions"], capture_output=True, timeout=10)
+            assert gone.returncode != 0, f"private server {server} survived teardown"
+            print(f"{server}: killed; list-sessions exit={gone.returncode}")
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
+@pytest.mark.parametrize("probe_before_theme", [False, True], ids=["attach-before-probe", "probe-before-997"])
+def test_e2e_hived_follows_delayed_client_theme(probe_before_theme):
+    with colour_lane() as lane:
+        root, env, team, pane, trace = lane.root, lane.env, lane.team, lane.pane, lane.trace
+        tmux, selections, server, version = lane.tmux, lane.selections, lane.server, lane.version
 
         def start_probe(queries):
             probe = root / "probe.py"
@@ -174,59 +221,60 @@ def test_e2e_hived_follows_delayed_client_theme(probe_before_theme):
             return sum("list-panes" in args and any(a.startswith("C\t") for a in args)
                        for line in trace.read_text().splitlines() if (args := json.loads(line)))
 
-        try:
-            created = subprocess.run([*hive_binary_argv(), "create", team, "--workspace", str(workspace)],
-                                     env=env, cwd=root, text=True, capture_output=True, timeout=30)
-            assert created.returncode == 0, created.stderr
-            window = tmux("list-windows", "-t", team, "-F", "#{window_id}").splitlines()[0]
-            pane = tmux("list-panes", "-t", window, "-F", "#{pane_id}").splitlines()[0]
-            with (root / "daemon.stderr").open("w") as stderr:
-                daemon = subprocess.Popen([*hive_binary_argv(), "--hived", str(workspace), team, team, window],
-                                          env=env, cwd=root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                          stderr=stderr, start_new_session=True)
-            wait_for(lambda: any(s["source"] == "fallback" for s in selections()), timeout=15)
-            clients = tmux("list-clients", "-t", team, "-F", "#{client_control_mode}")
-            assert clients == "1", clients
-            if probe_before_theme:
-                start_probe(2)
-                first = reply(0)
-                assert "rgb:ffff/ffff/ffff" in first, repr(first)
-            human = Terminal(env, team)
-            assert human.theme_requested.wait(5), "tmux did not request terminal theme"
-            wait_for(lambda: "0\t\t" in tmux("list-clients", "-t", team, "-F",
-                                            "#{client_control_mode}\t#{client_theme}\t#{client_name}"), timeout=5)
-            # Let attach processing settle while theme is still unknown. The
-            # subsequent 997 alone must be enough, with no new pane/layout.
-            time.sleep(2.5)
-            before = pane_enumerations()
-            human.report_dark()
-            wait_for(lambda: any(s["source"] == "client" and s["appearance"] == "dark" for s in selections()), timeout=8)
-            assert pane_enumerations() == before, "theme update relied on pane enumeration"
-            # Selection logging precedes the control connection's queued writes.
-            time.sleep(0.1)
-            if probe_before_theme:
-                (root / "again").touch()
-                dark = reply(1)
-            else:
-                start_probe(1)
-                dark = reply(0)
-            assert "rgb:0000/0000/0000" in dark, repr(dark)
-            print(json.dumps({"server": server, "version": version,
-                              "scenario": "probe-before-997" if probe_before_theme else "attach-before-probe",
-                              "first": first if probe_before_theme else dark, "after_997": dark,
-                              "pane_enumerations_during_997": pane_enumerations() - before,
-                              "selections": selections()}))
-        finally:
-            if human:
-                human.close()
-            if daemon:
-                daemon.terminate()
-                try:
-                    daemon.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    daemon.kill()
-                    daemon.wait(timeout=5)
-            subprocess.run([real_tmux, "-L", server, "kill-server"], capture_output=True, timeout=10)
-            gone = subprocess.run([real_tmux, "-L", server, "list-sessions"], capture_output=True, timeout=10)
-            assert gone.returncode != 0, f"private server {server} survived teardown"
-            print(f"{server}: killed; list-sessions exit={gone.returncode}")
+        if probe_before_theme:
+            start_probe(2)
+            first = reply(0)
+            assert "rgb:ffff/ffff/ffff" in first, repr(first)
+        human = Terminal(env, ["tmux", "-u", "attach", "-t", team])
+        lane.humans = [human]
+        assert human.theme_requested.wait(5), "tmux did not request terminal theme"
+        wait_for(lambda: "0\t\t" in tmux("list-clients", "-t", team, "-F",
+                                        "#{client_control_mode}\t#{client_theme}\t#{client_name}"), timeout=5)
+        # Let attach processing settle while theme is still unknown. The
+        # subsequent 997 alone must be enough, with no new pane/layout.
+        time.sleep(2.5)
+        before = pane_enumerations()
+        human.report_dark()
+        wait_for(lambda: any(s["source"] == "client" and s["appearance"] == "dark" for s in selections()), timeout=8)
+        assert pane_enumerations() == before, "theme update relied on pane enumeration"
+        # Selection logging precedes the control connection's queued writes.
+        time.sleep(0.1)
+        if probe_before_theme:
+            (root / "again").touch()
+            dark = reply(1)
+        else:
+            start_probe(1)
+            dark = reply(0)
+        assert "rgb:0000/0000/0000" in dark, repr(dark)
+        print(json.dumps({"server": server, "version": version,
+                          "scenario": "probe-before-997" if probe_before_theme else "attach-before-probe",
+                          "first": first if probe_before_theme else dark, "after_997": dark,
+                          "pane_enumerations_during_997": pane_enumerations() - before,
+                          "selections": selections()}))
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
+def test_e2e_attach_stamps_what_a_terminal_without_theme_reports_answers():
+    """A terminal that answers OSC 11 and never 997, as xterm.js does."""
+    with colour_lane() as lane:
+        root, env, team, tmux = lane.root, lane.env, lane.team, lane.tmux
+        assert "bg=colour254" in tmux("show-options", "-t", team, "-v", "status-style")
+        human = Terminal(env, [*hive_binary_argv(), "attach", team])
+        lane.humans = [human]
+        wait_for(lambda: any(s["source"] == "session" and s["appearance"] == "dark"
+                             for s in lane.selections()), timeout=15)
+        themes = tmux("list-clients", "-t", team, "-F", "#{client_control_mode}:#{client_theme}")
+        assert themes.splitlines().count("0:") == 1, themes
+        assert tmux("show-environment", "-t", team, "HIVE_APPEARANCE") == "HIVE_APPEARANCE=dark"
+        # The attach told the pane itself, ahead of the monitor's next sample.
+        direct = [args for line in lane.trace.read_text().splitlines()
+                  if (args := json.loads(line))[:1] == ["refresh-client"] and "-r" in args]
+        assert any(args[-1].startswith(f"{lane.pane}:\x1b]11;rgb:0000/") for args in direct), direct
+        assert "bg=colour235" in tmux("show-options", "-t", team, "-v", "status-style")
+        time.sleep(0.1)
+        probe = root / "probe.py"
+        probe.write_text(PROBE)
+        tmux("respawn-pane", "-k", "-t", lane.pane, shlex.join([sys.executable, str(probe), str(root), "1"]))
+        path = root / "reply-0.json"
+        wait_for(path.exists, timeout=10)
+        assert "rgb:0000/0000/0000" in json.loads(path.read_text())

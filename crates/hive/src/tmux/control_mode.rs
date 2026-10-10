@@ -1081,7 +1081,11 @@ mod colour_tests {
                 "-t",
                 "team",
                 "-F",
-                "C\t#{client_control_mode}\t#{client_theme}\t#{client_name}"
+                "C\t#{client_control_mode}\t#{client_theme}\t#{client_name}",
+                ";",
+                "show-environment",
+                "-t",
+                "team"
             ]
         );
         let changed = output.metadata().unwrap().len();

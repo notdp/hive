@@ -13,8 +13,8 @@ use super::run::run;
 
 /// The bar's colours, one set per appearance. The bar follows the same
 /// switch as the viewer (`view.theme`, `HIVE_VIEW_THEME`, then detection),
-/// resolved once at install: a theme change takes effect at the next
-/// session build.
+/// resolved at install: a theme change takes effect at the next session
+/// build or the next `hive attach` from a terminal that answers OSC 11.
 pub struct StatusPalette {
     pub bar: &'static str,
     pub team_bg: &'static str,
