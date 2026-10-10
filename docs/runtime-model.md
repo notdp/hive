@@ -380,8 +380,12 @@ existing meaning: an env value of auto bypasses a fixed config preference.
 Auto chooses the first non-control client in the same session whose
 `client_theme` is dark or light (tmux 3.6+), then the session's own
 `HIVE_APPEARANCE` (source `session`), then falls back to the hived's
-`HIVE_APPEARANCE`, `COLORFGBG`, and light. A headless session with no explicit
-preference or environment hint therefore starts with a provisional light answer.
+`HIVE_APPEARANCE`, `COLORFGBG`, the system's appearance (source `system`:
+macOS `AppleInterfaceStyle`, read only when nothing nearer answered) and
+light. A headless session with no explicit preference or environment hint
+therefore starts with the system's answer, which is the desktop's and not
+necessarily the terminal's — an app themed apart from the system is right
+only once a terminal has been asked.
 
 The session stamp is written by whoever brings a terminal: `hive attach` run
 outside tmux, and the `hclaude` / `hcodex` / `hgrok` launcher at its handoff

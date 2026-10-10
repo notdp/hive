@@ -7,10 +7,11 @@
 //! defaults to dark and makes auto opt-in; hive view defaults to auto and
 //! falls back light.
 //!
-//! Auto-detection is grok's minimal chain for a tmux pane
-//! (system_appearance.rs::detect_with_osc11_fallback, desktop API dropped):
-//! explicit `HIVE_APPEARANCE` stamp → OSC 11 background query (bare, tmux
-//! ≥ 3.2 answers it; 500ms) → `COLORFGBG` polarity guess → None. The OSC 11
+//! Auto-detection is grok's chain for a tmux pane
+//! (system_appearance.rs::detect_with_osc11_fallback): explicit
+//! `HIVE_APPEARANCE` stamp → OSC 11 background query (bare, tmux ≥ 3.2
+//! answers it; 500ms) → `COLORFGBG` polarity guess → the system's own
+//! appearance (macOS `AppleInterfaceStyle`) → None. The OSC 11
 //! probe owns raw stdin, so [`active_theme_kind`] must run before crossterm
 //! takes the terminal (alternate screen / event reads).
 
@@ -313,6 +314,32 @@ impl Appearance {
 fn detect_appearance() -> Option<Appearance> {
     stamped_or_probed_appearance()
         .or_else(|| parse_colorfgbg(std::env::var("COLORFGBG").ok().as_deref()))
+        .or_else(system_appearance)
+}
+
+/// The desktop's own light/dark switch, for a process with no terminal to
+/// ask (a team built from an agent's tool shell, the hived). macOS only:
+/// `AppleInterfaceStyle` reads `Dark` in dark mode and does not exist in
+/// light mode. None anywhere else, when `defaults` cannot be run, and under
+/// test (the machine's setting is not a fixture).
+pub fn system_appearance() -> Option<Appearance> {
+    if cfg!(test) || !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = std::process::Command::new("/usr/bin/defaults")
+        .args(["read", "-g", "AppleInterfaceStyle"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if out.status.success() {
+        return String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .eq_ignore_ascii_case("dark")
+            .then_some(Appearance::Dark);
+    }
+    String::from_utf8_lossy(&out.stderr)
+        .contains("does not exist")
+        .then_some(Appearance::Light)
 }
 
 /// What this process's own terminal says: the stamp it was started under,

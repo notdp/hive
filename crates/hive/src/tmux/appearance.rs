@@ -10,7 +10,8 @@
 //! non-control client in this session with a known `client_theme`, then the
 //! session's own `HIVE_APPEARANCE` (what `hive attach` heard from the
 //! terminal it ran in, `stamp_session_appearance`), then the hived's
-//! `HIVE_APPEARANCE`, `COLORFGBG`, and finally a provisional light fallback.
+//! `HIVE_APPEARANCE`, `COLORFGBG`, the system's appearance (source `system`),
+//! and finally a provisional light fallback.
 //! The monitor samples every two seconds while a client theme is unknown or
 //! for 30 seconds after a client event, otherwise every 60 seconds. Only new
 //! panes or a changed appearance receive colour reports.
@@ -110,6 +111,7 @@ fn resolve_pane_appearance(
     session_stamp: Option<&str>,
     stamp: Option<&str>,
     colorfgbg: Option<&str>,
+    system: impl FnOnce() -> Option<Appearance>,
 ) -> PaneAppearance {
     let explicit = match resolve_pref(env_theme, config_theme) {
         ThemePref::Light => Some(Appearance::Light),
@@ -148,12 +150,25 @@ fn resolve_pane_appearance(
             client: None,
         };
     }
-    PaneAppearance {
-        appearance: parse_appearance_var(stamp)
-            .or_else(|| parse_colorfgbg(colorfgbg))
-            .unwrap_or(Appearance::Light),
-        source: "fallback",
-        client: None,
+    if let Some(appearance) = parse_appearance_var(stamp).or_else(|| parse_colorfgbg(colorfgbg)) {
+        return PaneAppearance {
+            appearance,
+            source: "fallback",
+            client: None,
+        };
+    }
+    // Asked last and only when nothing nearer answered: it costs a process.
+    match system() {
+        Some(appearance) => PaneAppearance {
+            appearance,
+            source: "system",
+            client: None,
+        },
+        None => PaneAppearance {
+            appearance: Appearance::Light,
+            source: "fallback",
+            client: None,
+        },
     }
 }
 
@@ -291,6 +306,7 @@ pub(super) fn session_colour_snapshot(
             session_stamp,
             stamp.as_deref(),
             colorfgbg.as_deref(),
+            crate::view_theme::system_appearance,
         ),
         panes,
         has_unknown_client: human_clients.iter().any(|(_, unknown)| *unknown),
@@ -448,7 +464,8 @@ mod tests {
         for (env, config, clients, stamp, colors, appearance, source) in cases {
             // The session's stamp disagrees with the hived's own.
             let session = (source == "session").then_some("dark");
-            let got = resolve_pane_appearance(env, config, clients, session, stamp, colors);
+            let got =
+                resolve_pane_appearance(env, config, clients, session, stamp, colors, || None);
             assert_eq!(
                 got.appearance, appearance,
                 "{env:?} / {config:?} / {clients:?}"
@@ -472,7 +489,8 @@ mod tests {
                     "0\tdark\thuman",
                     None,
                     None,
-                    None
+                    None,
+                    || None,
                 )
                 .appearance,
                 Appearance::Dark
@@ -484,7 +502,8 @@ mod tests {
                     "0\tdark\thuman",
                     None,
                     None,
-                    None
+                    None,
+                    || None,
                 )
                 .source,
                 "client"
@@ -497,7 +516,8 @@ mod tests {
                 "",
                 None,
                 Some("dark"),
-                None
+                None,
+                || None,
             )
             .appearance,
             Appearance::Dark
@@ -505,15 +525,31 @@ mod tests {
     }
 
     #[test]
+    fn test_system_appearance_answers_only_when_nothing_nearer_does() {
+        let dark = || Some(Appearance::Dark);
+        let got = resolve_pane_appearance(None, None, "0\t\thuman", None, None, None, dark);
+        assert_eq!((got.appearance, got.source), (Appearance::Dark, "system"));
+        let got = resolve_pane_appearance(None, None, "", None, None, Some("0;15"), dark);
+        assert_eq!(
+            (got.appearance, got.source),
+            (Appearance::Light, "fallback")
+        );
+        let got = resolve_pane_appearance(None, None, "", Some("light"), None, None, || {
+            panic!("the session stamp answers first")
+        });
+        assert_eq!(got.source, "session");
+    }
+
+    #[test]
     fn test_client_selection_skips_control_unknown_and_malformed_rows() {
         let clients = "1\tlight\tcontrol\n0\t\tunknown\n0\tblue\tbad\n0\tdark\n0\tdark\t\n0\tdark\thuman with spaces\n0\tlight\tsecond";
-        let selected = resolve_pane_appearance(None, None, clients, None, None, None);
+        let selected = resolve_pane_appearance(None, None, clients, None, None, None, || None);
         assert_eq!(selected.source, "client");
         assert_eq!(selected.appearance, Appearance::Dark);
         assert_eq!(selected.client.as_deref(), Some("human with spaces"));
         for clients in ["", "1\tdark\tcontrol", "0\t\thuman"] {
             assert_eq!(
-                resolve_pane_appearance(None, None, clients, None, None, None).source,
+                resolve_pane_appearance(None, None, clients, None, None, None, || None).source,
                 "fallback"
             );
         }
@@ -535,7 +571,15 @@ mod tests {
         let mut reports = PaneColourReports::default();
         reports.set_panes("%1\n%2");
         assert!(writes(&mut reports).is_empty());
-        reports.selected = Some(resolve_pane_appearance(None, None, "", None, None, None));
+        reports.selected = Some(resolve_pane_appearance(
+            None,
+            None,
+            "",
+            None,
+            None,
+            None,
+            || None,
+        ));
         assert_eq!(writes(&mut reports).len(), 2);
         assert!(writes(&mut reports).is_empty());
         // Changing the source but keeping light does not repeat the overrides.
@@ -546,6 +590,7 @@ mod tests {
             None,
             None,
             None,
+            || None,
         ));
         reports.set_panes("%2\n%1\n%3");
         let added = writes(&mut reports);
@@ -558,6 +603,7 @@ mod tests {
             None,
             None,
             None,
+            || None,
         ));
         assert_eq!(writes(&mut reports).len(), 3);
         assert!(writes(&mut reports).is_empty());
@@ -571,7 +617,15 @@ mod tests {
     fn test_failed_colour_write_remains_pending() {
         let mut reports = PaneColourReports::default();
         reports.set_panes("%1");
-        reports.selected = Some(resolve_pane_appearance(None, None, "", None, None, None));
+        reports.selected = Some(resolve_pane_appearance(
+            None,
+            None,
+            "",
+            None,
+            None,
+            None,
+            || None,
+        ));
         assert!(reports
             .write_pending(|_| Err(std::io::ErrorKind::BrokenPipe.into()))
             .is_err());

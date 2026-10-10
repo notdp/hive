@@ -145,10 +145,14 @@ def colour_lane():
                "CLAUDE_HOME": str(root / "claude"), "CLAUDE_CONFIG_DIR": str(root / "claude"),
                "CODEX_HOME": str(root / "codex"), "GROK_HOME": str(root / "grok"),
                "XDG_CACHE_HOME": str(root / "cache"), "TERM": "xterm-256color"}
+        # A light hint of the weakest kind, so the fallback never asks this
+        # machine's own appearance; a client theme or an attach still beats it.
+        hint = {"COLORFGBG": "0;15"}
         for key in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR", "CODEX_THREAD_ID", "GROK_SESSION_ID",
                     "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_HOST_SESSION_ID",
                     "HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"):
             env.pop(key, None)
+        env.update(hint)
         workspace = root / "ws"
         team = "colour-test"
         daemon = None
