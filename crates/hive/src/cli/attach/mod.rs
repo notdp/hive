@@ -107,12 +107,7 @@ pub(crate) fn attach_cmd(team_name: &str) {
     }
     let (window, built) = ok_or_fail(ensure_team_display(&entry));
     if let Some(appearance) = appearance {
-        if let Some(session) = tmux::display_value(&window, "#{session_id}") {
-            tmux::stamp_session_appearance(&session, appearance);
-            if !built && crate::team_display::owns_team_session(team_name) {
-                tmux::install_team_status(&session);
-            }
-        }
+        crate::team_display::adopt_terminal_appearance(team_name, &window, appearance, !built);
     }
     let ws = map_str(&entry, "workspace");
     if !ws.is_empty() {

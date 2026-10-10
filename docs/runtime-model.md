@@ -383,10 +383,13 @@ Auto chooses the first non-control client in the same session whose
 `HIVE_APPEARANCE`, `COLORFGBG`, and light. A headless session with no explicit
 preference or environment hint therefore starts with a provisional light answer.
 
-The session stamp is `hive attach`'s: run outside tmux on a terminal, it asks
-that terminal OSC 11 (or takes its own `HIVE_APPEARANCE`) before handing the
-terminal to tmux, writes the answer into the session environment, and draws
-the team session's status bar again from it. It exists for terminals that
+The session stamp is written by whoever brings a terminal: `hive attach` run
+outside tmux, and the `hclaude` / `hcodex` / `hgrok` launcher at its handoff
+into the team (it asks at startup, while the terminal is still its own). Each
+asks that terminal OSC 11 (or takes its own `HIVE_APPEARANCE`) before tmux
+has the terminal, writes the answer into the session environment, reports it
+to the session's panes at once through any client already there (unless an
+explicit theme is set), and draws the team session's status bar again from it. It exists for terminals that
 answer OSC 11 and never report a theme — the desktop app's terminal (xterm.js)
 answers neither DSR 996 nor mode 2031, so its `client_theme` stays empty — and
 for the bar, which a team built from an agent's tool shell draws with no

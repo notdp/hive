@@ -262,6 +262,10 @@ def test_e2e_attach_stamps_what_a_terminal_without_theme_reports_answers():
         themes = tmux("list-clients", "-t", team, "-F", "#{client_control_mode}:#{client_theme}")
         assert themes.splitlines().count("0:") == 1, themes
         assert tmux("show-environment", "-t", team, "HIVE_APPEARANCE") == "HIVE_APPEARANCE=dark"
+        # The attach told the pane itself, ahead of the monitor's next sample.
+        direct = [args for line in lane.trace.read_text().splitlines()
+                  if (args := json.loads(line))[:1] == ["refresh-client"] and "-r" in args]
+        assert any(args[-1].startswith(f"{lane.pane}:\x1b]11;rgb:0000/") for args in direct), direct
         assert "bg=colour235" in tmux("show-options", "-t", team, "-v", "status-style")
         time.sleep(0.1)
         probe = root / "probe.py"

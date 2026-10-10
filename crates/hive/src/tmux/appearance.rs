@@ -164,6 +164,9 @@ const SESSION_STAMP: &str = "HIVE_APPEARANCE";
 
 /// Record what the attaching terminal said its background is. Display
 /// state on the session, rewritten by every attach that got an answer.
+/// The panes are told at once as well, through whichever client the
+/// session has (a report is stored per pane, whoever writes it): an engine
+/// started in the next moment asks before the monitor's next sample.
 pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
     let _ = run(
         &[
@@ -176,6 +179,31 @@ pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
         false,
         5,
     );
+    let env_theme = std::env::var("HIVE_VIEW_THEME").ok();
+    let config_theme =
+        crate::settings::get_setting("view.theme").and_then(|v| v.as_str().map(str::to_string));
+    if resolve_pref(env_theme.as_deref(), config_theme.as_deref()) != ThemePref::Auto {
+        return;
+    }
+    let list = |verb: &str, flag: &[&str], format: &str| -> Vec<String> {
+        let mut args = vec![verb];
+        args.extend_from_slice(flag);
+        args.extend(["-t", session_target, "-F", format]);
+        match run(&args, false, 5) {
+            Ok(r) if r.returncode == 0 => r.stdout.lines().map(str::to_string).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let clients = list("list-clients", &[], "#{client_name}");
+    let Some(client) = clients.iter().find(|name| !name.is_empty()) else {
+        return;
+    };
+    for pane in list("list-panes", &["-s"], "#{pane_id}") {
+        for reply in colour_replies(appearance) {
+            let report = format!("{pane}:{reply}");
+            let _ = run(&["refresh-client", "-t", client, "-r", &report], false, 5);
+        }
+    }
 }
 
 pub(super) struct PaneColourSnapshot {

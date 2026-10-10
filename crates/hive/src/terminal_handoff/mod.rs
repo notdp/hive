@@ -449,6 +449,7 @@ fn transfer(
     session: &Session,
     term: &terminal::Terminal,
     child: &mut terminal::Foreground,
+    appearance: Option<crate::view_theme::Appearance>,
 ) -> Result<Option<Target>> {
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(TIMEOUT))?;
@@ -475,6 +476,14 @@ fn transfer(
     }
     if target.new_session {
         set_session_roots(&target.pane)?;
+    }
+    if let Some(appearance) = appearance {
+        crate::team_display::adopt_terminal_appearance(
+            &target.team,
+            &target.pane,
+            appearance,
+            true,
+        );
     }
     reader.get_mut().set_read_timeout(None)?;
     child.stop()?;
@@ -503,6 +512,13 @@ fn transfer(
 
 pub(crate) fn run(session: &Session, initial_args: &[String]) -> Result<i32> {
     let term = terminal::Terminal::capture()?;
+    // Asked while the terminal is still the launcher's own: the viewer owns
+    // it from here until the handoff, which stamps the answer on the team.
+    let appearance = if crate::identity::is_inside_tmux() {
+        None
+    } else {
+        crate::view_theme::stamped_or_probed_appearance()
+    };
     let (registration, listener) = Registration::create(session)?;
     let mut child = viewer(&term, session, initial_args)?;
     loop {
@@ -512,7 +528,14 @@ pub(crate) fn run(session: &Session, initial_args: &[String]) -> Result<i32> {
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                let transferred = transfer(stream, &registration, session, &term, &mut child);
+                let transferred = transfer(
+                    stream,
+                    &registration,
+                    session,
+                    &term,
+                    &mut child,
+                    appearance,
+                );
                 match transferred {
                     Ok(Some(target)) => {
                         drop(registration);
