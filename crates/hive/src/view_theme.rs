@@ -299,11 +299,26 @@ pub enum Appearance {
     Dark,
 }
 
+impl Appearance {
+    /// The `HIVE_APPEARANCE` spelling `parse_appearance_var` reads back.
+    pub fn stamp(self) -> &'static str {
+        match self {
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+        }
+    }
+}
+
 /// Startup chain: explicit `HIVE_APPEARANCE` stamp → OSC 11 → `COLORFGBG`.
 fn detect_appearance() -> Option<Appearance> {
-    parse_appearance_var(std::env::var("HIVE_APPEARANCE").ok().as_deref())
-        .or_else(detect_via_osc11)
+    stamped_or_probed_appearance()
         .or_else(|| parse_colorfgbg(std::env::var("COLORFGBG").ok().as_deref()))
+}
+
+/// What this process's own terminal says: the stamp it was started under,
+/// else the OSC 11 answer. None without a terminal that answers.
+pub(crate) fn stamped_or_probed_appearance() -> Option<Appearance> {
+    parse_appearance_var(std::env::var("HIVE_APPEARANCE").ok().as_deref()).or_else(detect_via_osc11)
 }
 
 /// `dark`/`night` and `light`/`day` stamps (grok env_appearance.rs);

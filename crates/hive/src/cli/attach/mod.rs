@@ -81,12 +81,39 @@ fn jump_to_window(window: &str, verdict: &str) {
     ok_or_fail(tmux::exec_attach(&session, window));
 }
 
+/// What the terminal this attach runs in says its background is. Asked
+/// only outside tmux: inside, the answer is tmux's (in a team session,
+/// hive's own report read back).
+fn terminal_appearance() -> Option<crate::view_theme::Appearance> {
+    if identity::is_inside_tmux() {
+        return None;
+    }
+    crate::view_theme::stamped_or_probed_appearance()
+}
+
+/// A team is usually built by an agent's tool shell, which has no terminal
+/// to ask: the bar is drawn and the panes are answered light. The attach is
+/// the first process on the human's own terminal, so what that terminal
+/// says is stamped on the session (the pane colour reports and every later
+/// pane read it) and the bar is drawn again from it.
 pub(crate) fn attach_cmd(team_name: &str) {
     let entry = match team_entry(team_name) {
         Ok(entry) => entry,
         Err(message) => fail(&message),
     };
+    let appearance = terminal_appearance();
+    if let Some(appearance) = appearance {
+        std::env::set_var("HIVE_APPEARANCE", appearance.stamp());
+    }
     let (window, built) = ok_or_fail(ensure_team_display(&entry));
+    if let Some(appearance) = appearance {
+        if let Some(session) = tmux::display_value(&window, "#{session_id}") {
+            tmux::stamp_session_appearance(&session, appearance);
+            if !built && crate::team_display::owns_team_session(team_name) {
+                tmux::install_team_status(&session);
+            }
+        }
+    }
     let ws = map_str(&entry, "workspace");
     if !ws.is_empty() {
         if let Ok(mut t) = Team::load(team_name, "") {

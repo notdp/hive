@@ -7,7 +7,9 @@
 //! These override pane styles while any control client exists on the server.
 //!
 //! Explicit `HIVE_VIEW_THEME` / `view.theme` wins. Auto uses the first
-//! non-control client in this session with a known `client_theme`, then
+//! non-control client in this session with a known `client_theme`, then the
+//! session's own `HIVE_APPEARANCE` (what `hive attach` heard from the
+//! terminal it ran in, `stamp_session_appearance`), then the hived's
 //! `HIVE_APPEARANCE`, `COLORFGBG`, and finally a provisional light fallback.
 //! The monitor samples every two seconds while a client theme is unknown or
 //! for 30 seconds after a client event, otherwise every 60 seconds. Only new
@@ -17,7 +19,9 @@
 //! Linked windows share their overrides across sessions; differently themed
 //! sessions can overwrite each other's reports. Updating the cache does not
 //! notify running applications or undo an answer already consumed at startup.
-//! A terminal without mode 2031 support can leave `client_theme` unknown.
+//! A terminal without mode 2031 support (the desktop app's xterm.js) leaves
+//! `client_theme` unknown; the session stamp is what answers for it, and it
+//! is as old as the last `hive attach` from a terminal that answered OSC 11.
 
 use super::run::run;
 use std::collections::BTreeMap;
@@ -103,6 +107,7 @@ fn resolve_pane_appearance(
     env_theme: Option<&str>,
     config_theme: Option<&str>,
     clients: &str,
+    session_stamp: Option<&str>,
     stamp: Option<&str>,
     colorfgbg: Option<&str>,
 ) -> PaneAppearance {
@@ -136,6 +141,13 @@ fn resolve_pane_appearance(
             };
         }
     }
+    if let Some(appearance) = parse_appearance_var(session_stamp) {
+        return PaneAppearance {
+            appearance,
+            source: "session",
+            client: None,
+        };
+    }
     PaneAppearance {
         appearance: parse_appearance_var(stamp)
             .or_else(|| parse_colorfgbg(colorfgbg))
@@ -145,6 +157,27 @@ fn resolve_pane_appearance(
     }
 }
 
+/// The session environment variable `hive attach` leaves for the reporter
+/// and for every pane the session starts afterwards (`hive view` reads it
+/// before probing).
+const SESSION_STAMP: &str = "HIVE_APPEARANCE";
+
+/// Record what the attaching terminal said its background is. Display
+/// state on the session, rewritten by every attach that got an answer.
+pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
+    let _ = run(
+        &[
+            "set-environment",
+            "-t",
+            session_target,
+            SESSION_STAMP,
+            appearance.stamp(),
+        ],
+        false,
+        5,
+    );
+}
+
 pub(super) struct PaneColourSnapshot {
     pub selected: PaneAppearance,
     pub panes: Option<String>,
@@ -152,8 +185,9 @@ pub(super) struct PaneColourSnapshot {
     pub has_unknown_client: bool,
 }
 
-/// One subprocess per sample, regardless of pane count. Layout events add
-/// list-panes to the same tmux command queue. A failed query preserves the
+/// One subprocess per sample, regardless of pane count: the clients and the
+/// session environment. Layout events add list-panes to the same tmux
+/// command queue. A failed query preserves the
 /// previous snapshot instead of impersonating a headless session.
 pub(super) fn session_colour_snapshot(
     session_target: &str,
@@ -166,6 +200,10 @@ pub(super) fn session_colour_snapshot(
         session_target,
         "-F",
         "C\t#{client_control_mode}\t#{client_theme}\t#{client_name}",
+        ";",
+        "show-environment",
+        "-t",
+        session_target,
     ];
     if refresh_panes {
         args.extend([
@@ -208,6 +246,10 @@ pub(super) fn session_colour_snapshot(
             .collect::<Vec<_>>()
             .join("\n")
     });
+    let session_stamp = snapshot
+        .stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(SESSION_STAMP)?.strip_prefix('='));
     let env_theme = std::env::var("HIVE_VIEW_THEME").ok();
     let config_theme =
         crate::settings::get_setting("view.theme").and_then(|v| v.as_str().map(str::to_string));
@@ -218,6 +260,7 @@ pub(super) fn session_colour_snapshot(
             env_theme.as_deref(),
             config_theme.as_deref(),
             &clients,
+            session_stamp,
             stamp.as_deref(),
             colorfgbg.as_deref(),
         ),
@@ -340,6 +383,15 @@ mod tests {
             (
                 None,
                 None,
+                "0\t\thuman",
+                Some("light"),
+                Some("0;15"),
+                Appearance::Dark,
+                "session",
+            ),
+            (
+                None,
+                None,
                 "",
                 Some("night"),
                 Some("0;15"),
@@ -366,7 +418,9 @@ mod tests {
             ),
         ];
         for (env, config, clients, stamp, colors, appearance, source) in cases {
-            let got = resolve_pane_appearance(env, config, clients, stamp, colors);
+            // The session's stamp disagrees with the hived's own.
+            let session = (source == "session").then_some("dark");
+            let got = resolve_pane_appearance(env, config, clients, session, stamp, colors);
             assert_eq!(
                 got.appearance, appearance,
                 "{env:?} / {config:?} / {clients:?}"
@@ -384,19 +438,40 @@ mod tests {
         for auto in ["auto", "system", " AUTO "] {
             // An explicit auto in env overrides a fixed config value.
             assert_eq!(
-                resolve_pane_appearance(Some(auto), Some("light"), "0\tdark\thuman", None, None)
-                    .appearance,
+                resolve_pane_appearance(
+                    Some(auto),
+                    Some("light"),
+                    "0\tdark\thuman",
+                    None,
+                    None,
+                    None
+                )
+                .appearance,
                 Appearance::Dark
             );
             assert_eq!(
-                resolve_pane_appearance(Some("invalid"), Some(auto), "0\tdark\thuman", None, None)
-                    .source,
+                resolve_pane_appearance(
+                    Some("invalid"),
+                    Some(auto),
+                    "0\tdark\thuman",
+                    None,
+                    None,
+                    None
+                )
+                .source,
                 "client"
             );
         }
         assert_eq!(
-            resolve_pane_appearance(Some("invalid"), Some("invalid"), "", Some("dark"), None)
-                .appearance,
+            resolve_pane_appearance(
+                Some("invalid"),
+                Some("invalid"),
+                "",
+                None,
+                Some("dark"),
+                None
+            )
+            .appearance,
             Appearance::Dark
         );
     }
@@ -404,13 +479,13 @@ mod tests {
     #[test]
     fn test_client_selection_skips_control_unknown_and_malformed_rows() {
         let clients = "1\tlight\tcontrol\n0\t\tunknown\n0\tblue\tbad\n0\tdark\n0\tdark\t\n0\tdark\thuman with spaces\n0\tlight\tsecond";
-        let selected = resolve_pane_appearance(None, None, clients, None, None);
+        let selected = resolve_pane_appearance(None, None, clients, None, None, None);
         assert_eq!(selected.source, "client");
         assert_eq!(selected.appearance, Appearance::Dark);
         assert_eq!(selected.client.as_deref(), Some("human with spaces"));
         for clients in ["", "1\tdark\tcontrol", "0\t\thuman"] {
             assert_eq!(
-                resolve_pane_appearance(None, None, clients, None, None).source,
+                resolve_pane_appearance(None, None, clients, None, None, None).source,
                 "fallback"
             );
         }
@@ -432,7 +507,7 @@ mod tests {
         let mut reports = PaneColourReports::default();
         reports.set_panes("%1\n%2");
         assert!(writes(&mut reports).is_empty());
-        reports.selected = Some(resolve_pane_appearance(None, None, "", None, None));
+        reports.selected = Some(resolve_pane_appearance(None, None, "", None, None, None));
         assert_eq!(writes(&mut reports).len(), 2);
         assert!(writes(&mut reports).is_empty());
         // Changing the source but keeping light does not repeat the overrides.
@@ -440,6 +515,7 @@ mod tests {
             None,
             None,
             "0\tlight\thuman",
+            None,
             None,
             None,
         ));
@@ -451,6 +527,7 @@ mod tests {
             None,
             None,
             "0\tdark\thuman",
+            None,
             None,
             None,
         ));
@@ -466,7 +543,7 @@ mod tests {
     fn test_failed_colour_write_remains_pending() {
         let mut reports = PaneColourReports::default();
         reports.set_panes("%1");
-        reports.selected = Some(resolve_pane_appearance(None, None, "", None, None));
+        reports.selected = Some(resolve_pane_appearance(None, None, "", None, None, None));
         assert!(reports
             .write_pending(|_| Err(std::io::ErrorKind::BrokenPipe.into()))
             .is_err());
