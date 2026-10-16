@@ -32,7 +32,7 @@ hive plugin setup
 
 必要な環境:
 
-- `tmux` 3.5 以上 — hive はチーム session ごとに control-mode クライアント（hived の pane モニタ）を繋いだままにしますが、tmux は pane の OSC 10/11 色問い合わせにそのクライアントで答え、しかもそのクライアントには本物の色が一度も渡されません。放っておくとチーム pane 内の codex と `hive view` が「背景は黒」と告げられ、明るい端末でダークに描画します。3.5 からは hive が pane の色を自分で報告します（`refresh-client -r`、`view.theme`、端末、`HIVE_APPEARANCE` / `COLORFGBG`、システムの外観の順、既定はライト）。それより古い tmux にはこの報告がないため、hive は各チーム pane の `window-style` を同じ純黒か純白に設定します。tmux はそれで色問い合わせに答えますが、端末本来の背景色もその色で塗りつぶされます。`hive create`、`hive attach`、`hive doctor`、`hive plugin setup` が警告し、チームのステータスバーにもバージョンが表示されます。`hive cvim` / `hive vim` のポップアップには 3.2 以上が必要です
+- `tmux` 3.4 以上 — hive はチーム session ごとに control-mode クライアント（hived の pane モニタ）を繋いだままにします。tmux は pane の OSC 10/11 色問い合わせに、クライアント一覧でその session に繋がった最初のクライアントで答えます。それが本物の色を一度も渡されていない control クライアントだと、チーム pane 内の codex と `hive view` は「背景は黒」と告げられ、明るい端末でダークに描画します。3.4 では端末が attach するたびに hive が自分の control クライアントをその後ろへ移すので、その時点から pane には端末本来の背景色が伝わります。tmux 3.5 以上では代わりに hive が pane の色を純黒か純白で自分で報告し（`refresh-client -r`、`view.theme`、端末、`HIVE_APPEARANCE` / `COLORFGBG`、システムの外観の順、既定はライト）、どの端末も attach する前に起動したエンジンにも届きます。3.4 ではそうしたエンジンは黒と告げられ済みで、問い合わせも一度きりです。3.4 未満では `hive create`、`hive attach`、`hive doctor`、`hive plugin setup` が警告し、チームのステータスバーにもバージョンが表示されます。`hive cvim` / `hive vim` のポップアップには 3.2 以上が必要です
 - Rust ツールチェイン — ソースからビルドする経路でのみ必要です。インストーラはビルド済みバイナリを配ります
 - 少なくとも 1 つのエージェント CLI: `claude` / `codex` / `grok`
 

@@ -1,13 +1,17 @@
 //! What a pane is told its terminal background is.
 //!
-//! A tmux control client starts with ANSI black tty colours. When it is
-//! the first eligible client and a pane has no background override, OSC
-//! 11 queries therefore return black, even on a light terminal.
-//! On tmux 3.5+, Hive supplies per-pane answers through `refresh-client -r`.
-//! These override pane styles while any control client exists on the server.
-//! Older tmux has no such report, but answers from a pane's own
-//! `window-style` before any client: there Hive sets that style per pane,
-//! which also paints the pane.
+//! tmux answers a pane's OSC 10/11 query (a pane with no background of its
+//! own) from the first client in its client list attached to a session
+//! holding the window. A control client carries ANSI black tty colours, a
+//! terminal the colours it answered tmux at attach. The hived's control
+//! client attaches first when the team is built headless, so a terminal
+//! arriving later would sit behind it and the pane would hear black.
+//! On tmux before 3.5 the monitor re-attaches its control client behind an
+//! arriving terminal (`control_mode.rs`), and the pane hears the
+//! terminal's real background. On tmux 3.5+ Hive supplies per-pane answers
+//! through `refresh-client -r`, which override any client while a control
+//! client exists on the server, and which also cover the time before any
+//! terminal attached.
 //!
 //! Explicit `HIVE_VIEW_THEME` / `view.theme` wins. Auto uses the first
 //! non-control client in this session with a known `client_theme`, then the
@@ -19,10 +23,7 @@
 //! for 30 seconds after a client event, otherwise every 60 seconds. Only new
 //! panes or a changed appearance receive colour reports.
 //!
-//! ponytail: these are black/white approximations, not the terminal's RGB;
-//! on tmux before 3.5 the pane is painted that colour too, over the
-//! terminal's own background and over a human's `window-style`. The
-//! terminal's RGB (attach's OSC 11 answer) would make the paint invisible.
+//! ponytail: reports are black/white approximations, not the terminal's RGB.
 //! Linked windows share their overrides across sessions; differently themed
 //! sessions can overwrite each other's reports. Updating the cache does not
 //! notify running applications or undo an answer already consumed at startup.
@@ -55,44 +56,28 @@ pub(crate) fn parse_version(output: &str) -> Option<(u32, u32)> {
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
-/// How a pane is told its colours, by tmux version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ColourDelivery {
-    /// `refresh-client -r`: an answer stored per pane, nothing drawn.
-    #[default]
-    Report,
-    /// A pane `window-style`: tmux answers OSC 10/11 from it, and paints it.
-    Style,
-}
+/// The oldest tmux hive supports, the oldest its suite runs against.
+pub const TMUX_MIN_VERSION: (u32, u32) = (3, 4);
 
-/// The delivery this tmux takes, or None when tmux is missing.
-pub fn colour_delivery() -> Option<ColourDelivery> {
-    version().map(|v| {
-        if v >= PANE_COLOUR_REPORT_SINCE {
-            ColourDelivery::Report
-        } else {
-            ColourDelivery::Style
-        }
-    })
-}
-
-/// The tmux this server runs, as `3.4`, when it predates pane colour
-/// reports; None on 3.5+ or with no tmux.
+/// The tmux this server runs, as `3.3`, when it is older than hive
+/// supports; None otherwise or with no tmux.
 pub fn stale_version() -> Option<String> {
-    let v = version()?;
-    (v < PANE_COLOUR_REPORT_SINCE).then(|| format!("{}.{}", v.0, v.1))
+    version().and_then(stale)
 }
 
-/// The warning a human-facing verb prints on a tmux that cannot take a
-/// pane colour report, or None when it can (or tmux is absent — that
-/// fails louder elsewhere).
+fn stale(version: (u32, u32)) -> Option<String> {
+    (version < TMUX_MIN_VERSION).then(|| format!("{}.{}", version.0, version.1))
+}
+
+/// The warning a human-facing verb prints on a tmux older than hive
+/// supports, or None when it is supported (or absent — that fails louder
+/// elsewhere).
 pub fn stale_version_warning() -> Option<String> {
     let version = stale_version()?;
+    let min = format!("{}.{}", TMUX_MIN_VERSION.0, TMUX_MIN_VERSION.1);
     Some(format!(
-        "warning: tmux {version} cannot report a pane's colours, so hive paints team panes \
-         plain black or white to keep codex and hive view off a false black background; \
-         tmux {}.{}+ keeps the terminal's own background",
-        PANE_COLOUR_REPORT_SINCE.0, PANE_COLOUR_REPORT_SINCE.1
+        "warning: tmux {version} is older than hive supports ({min}+), so team windows may \
+         draw or behave wrongly; upgrade tmux to {min} or newer"
     ))
 }
 
@@ -109,31 +94,13 @@ pub(crate) fn colour_replies(appearance: Appearance) -> [String; 2] {
     ]
 }
 
-/// The pane `window-style` that answers like `colour_replies`.
-fn pane_style(appearance: Appearance) -> &'static str {
-    match appearance {
-        Appearance::Light => "fg=#000000,bg=#ffffff",
-        Appearance::Dark => "fg=#ffffff,bg=#000000",
-    }
-}
-
 /// Pure control-mode commands; the monitor checks tmux support once per attach.
-pub fn pane_colour_report_lines(
-    pane_id: &str,
-    appearance: Appearance,
-    delivery: ColourDelivery,
-) -> Vec<String> {
+pub fn pane_colour_report_lines(pane_id: &str, appearance: Appearance) -> Vec<String> {
     if !pane_id
         .strip_prefix('%')
         .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
     {
         return Vec::new();
-    }
-    if delivery == ColourDelivery::Style {
-        return vec![format!(
-            "set-option -p -t {pane_id} window-style '{}'\n",
-            pane_style(appearance)
-        )];
     }
     colour_replies(appearance)
         .into_iter()
@@ -259,23 +226,16 @@ pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
             _ => Vec::new(),
         }
     };
-    let panes = list("list-panes", &["-s"], "#{pane_id}");
-    if colour_delivery() == Some(ColourDelivery::Style) {
-        for pane in panes {
-            let style = pane_style(appearance);
-            let _ = run(
-                &["set-option", "-p", "-t", &pane, "window-style", style],
-                false,
-                5,
-            );
-        }
+    // Before 3.5 there is no report to store; the terminal answers once the
+    // hived's control client has moved behind it.
+    if version().is_none_or(|v| v < PANE_COLOUR_REPORT_SINCE) {
         return;
     }
     let clients = list("list-clients", &[], "#{client_name}");
     let Some(client) = clients.iter().find(|name| !name.is_empty()) else {
         return;
     };
-    for pane in panes {
+    for pane in list("list-panes", &["-s"], "#{pane_id}") {
         for reply in colour_replies(appearance) {
             let report = format!("{pane}:{reply}");
             let _ = run(&["refresh-client", "-t", client, "-r", &report], false, 5);
@@ -384,20 +344,12 @@ pub(super) fn session_colour_snapshot(
 #[derive(Default)]
 pub(super) struct PaneColourReports {
     panes: BTreeMap<String, Option<Appearance>>,
-    delivery: ColourDelivery,
     pub selected: Option<PaneAppearance>,
     pub clients: Vec<String>,
     pub has_unknown_client: bool,
 }
 
 impl PaneColourReports {
-    pub fn new(delivery: ColourDelivery) -> Self {
-        Self {
-            delivery,
-            ..Default::default()
-        }
-    }
-
     pub fn set_panes(&mut self, snapshot: &str) {
         let mut next = BTreeMap::new();
         for pane in snapshot.lines().map(str::trim).filter(|p| !p.is_empty()) {
@@ -417,7 +369,7 @@ impl PaneColourReports {
             if *reported == Some(selected.appearance) {
                 continue;
             }
-            let lines = pane_colour_report_lines(pane, selected.appearance, self.delivery).concat();
+            let lines = pane_colour_report_lines(pane, selected.appearance).concat();
             write(&lines)?;
             *reported = Some(selected.appearance);
         }
@@ -442,45 +394,25 @@ mod tests {
     #[test]
     fn test_pane_colour_report_lines_encode_both_colours_and_reject_invalid_panes() {
         assert_eq!(
-            pane_colour_report_lines("%7", Appearance::Dark, ColourDelivery::Report),
+            pane_colour_report_lines("%7", Appearance::Dark),
             vec![
                 "refresh-client -r '%7:\x1b]10;rgb:ffff/ffff/ffff\x1b\\\\'\n",
                 "refresh-client -r '%7:\x1b]11;rgb:0000/0000/0000\x1b\\\\'\n",
             ]
         );
-        for delivery in [ColourDelivery::Report, ColourDelivery::Style] {
-            for invalid in ["", "%", "not-a-pane", "%7'", "%1\nkill-server"] {
-                assert!(pane_colour_report_lines(invalid, Appearance::Light, delivery).is_empty());
-            }
+        for invalid in ["", "%", "not-a-pane", "%7'", "%1\nkill-server"] {
+            assert!(pane_colour_report_lines(invalid, Appearance::Light).is_empty());
         }
     }
 
     #[test]
-    fn test_pane_colour_style_lines_set_the_pane_window_style_both_colours_agree_with() {
-        assert_eq!(
-            pane_colour_report_lines("%7", Appearance::Light, ColourDelivery::Style),
-            vec!["set-option -p -t %7 window-style 'fg=#000000,bg=#ffffff'\n"]
-        );
-        assert_eq!(
-            pane_colour_report_lines("%7", Appearance::Dark, ColourDelivery::Style),
-            vec!["set-option -p -t %7 window-style 'fg=#ffffff,bg=#000000'\n"]
-        );
-        // The style answers what the report would have said.
-        for appearance in [Appearance::Light, Appearance::Dark] {
-            let [fg, bg] = colour_replies(appearance);
-            let rgb = |reply: &str| {
-                let channels = &reply.split("rgb:").nth(1).unwrap()[..14];
-                channels
-                    .replace('/', "")
-                    .chars()
-                    .step_by(2)
-                    .collect::<String>()
-            };
-            assert_eq!(
-                pane_style(appearance),
-                format!("fg=#{},bg=#{}", rgb(&fg), rgb(&bg))
-            );
-        }
+    fn test_stale_names_only_a_tmux_older_than_3_4() {
+        assert_eq!(stale((3, 3)), Some("3.3".to_string()));
+        assert_eq!(stale((2, 9)), Some("2.9".to_string()));
+        assert_eq!(stale((3, 4)), None);
+        assert_eq!(stale((3, 7)), None);
+        assert_eq!(stale((3, 10)), None);
+        assert_eq!(stale((4, 0)), None);
     }
 
     #[test]
@@ -730,29 +662,6 @@ mod tests {
             .write_pending(|_| Err(std::io::ErrorKind::BrokenPipe.into()))
             .is_err());
         assert_eq!(writes(&mut reports).len(), 1);
-        assert!(writes(&mut reports).is_empty());
-    }
-
-    #[test]
-    fn test_colour_reports_on_a_style_delivery_write_one_style_per_pane() {
-        let mut reports = PaneColourReports::new(ColourDelivery::Style);
-        reports.set_panes("%1\n%2");
-        reports.selected = Some(resolve_pane_appearance(
-            None,
-            None,
-            "0\tdark\thuman",
-            None,
-            None,
-            None,
-            || None,
-        ));
-        assert_eq!(
-            writes(&mut reports),
-            vec![
-                "set-option -p -t %1 window-style 'fg=#ffffff,bg=#000000'\n",
-                "set-option -p -t %2 window-style 'fg=#ffffff,bg=#000000'\n",
-            ]
-        );
         assert!(writes(&mut reports).is_empty());
     }
 }

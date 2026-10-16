@@ -32,7 +32,7 @@ hive plugin setup
 
 依赖：
 
-- `tmux` 3.5+ —— hive 在每个团 session 上挂着一个 control-mode 客户端（hived 的 pane 监视器），而 tmux 会用这个从未拿到真实颜色的客户端去回答 pane 的 OSC 10/11 颜色查询：放着不管，团 pane 里的 codex 和 `hive view` 会被告知背景是黑的，在浅色终端里画成深色。3.5 起 hive 自己替 pane 上报颜色（`refresh-client -r`，依次看 `view.theme`、终端、`HIVE_APPEARANCE` / `COLORFGBG`、系统外观，缺省浅色）。更旧的 tmux 没有这个上报，hive 改为给每个团 pane 设同样纯黑或纯白的 `window-style`，tmux 按它回答颜色查询，但也会用它盖掉终端自己的背景色；`hive create`、`hive attach`、`hive doctor`、`hive plugin setup` 会警告，团的状态栏也会显示版本。`hive cvim` / `hive vim` 的弹窗要 3.2+
+- `tmux` 3.4+ —— hive 在每个团 session 上挂着一个 control-mode 客户端（hived 的 pane 监视器），而 tmux 用客户端列表里第一个挂在该 session 上的客户端回答 pane 的 OSC 10/11 颜色查询。排第一的若是这个从未拿到真实颜色的 control 客户端，团 pane 里的 codex 和 `hive view` 会被告知背景是黑的，在浅色终端里画成深色。3.4 上 hive 会在每个终端 attach 进来时把自己的 control 客户端挪到它后面，从那一刻起 pane 得到的就是终端真实的背景色。tmux 3.5+ 则改由 hive 自己替 pane 上报颜色，只分纯黑或纯白（`refresh-client -r`，依次看 `view.theme`、终端、`HIVE_APPEARANCE` / `COLORFGBG`、系统外观，缺省浅色），没有任何终端 attach 之前就启动的引擎也能拿到；在 3.4 上这样的引擎已经被告知是黑色，而且只问一次。低于 3.4 时 `hive create`、`hive attach`、`hive doctor`、`hive plugin setup` 会警告，团的状态栏也会显示版本。`hive cvim` / `hive vim` 的弹窗要 3.2+
 - Rust 工具链 —— 仅源码编译这条路需要；installer 装的是预编译二进制
 - 至少一种 agent CLI：`claude`、`codex` 或 `grok`
 

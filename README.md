@@ -34,14 +34,14 @@ Under the hood that materializes the marketplace and runs `plugin marketplace ad
 
 Requires (hive is written against these exact versions — the versions on the machine it is developed on — and carries no compatibility code for older ones; upgrade the engine, then hive):
 
-- `tmux` 3.7c
+- `tmux` 3.7c (the one exception: 3.4+ is supported too, see below)
 - `claude` 2.1.287 (Claude Code; the minimum the Claude Code docs set for mods, and the first build that ignores `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` — the hive module's events and `$` calls pass `claude plugin validate --strict` on it, and it loads on `-p`; the desktop app bundles its own CLI, 2.1.286 at the time of writing)
 - `codex-cli` 0.153.4
 - `grok` 1.0.30
 
 Notes on why:
 
-- `tmux` 3.5+ — hive keeps a control-mode client (the hived's pane monitor) on every team session, and tmux answers a pane's OSC 10/11 colour query from that client, which it never gave real colours: left alone, codex and `hive view` in a team pane would be told the background is black and draw dark on a light terminal. From 3.5 hive reports the pane's colours itself (`refresh-client -r`, following `view.theme`, then the attached terminal — its reported theme, or what it answered `hive attach` over OSC 11 — then `HIVE_APPEARANCE` / `COLORFGBG`, then the macOS system appearance, light when nothing answers). An older tmux has no such report, so hive sets each team pane's `window-style` to the same plain black or white, which tmux answers from and also paints over the terminal's own background; `hive create`, `hive attach`, `hive doctor` and `hive plugin setup` warn, and the team's status bar shows the version. The `hive cvim` / `hive vim` popups need 3.2+
+- `tmux` 3.4+ — hive keeps a control-mode client (the hived's pane monitor) on every team session, and tmux answers a pane's OSC 10/11 colour query from the first client in its list attached to the session. When that is the control client, which tmux never gave real colours, codex and `hive view` in a team pane are told the background is black and draw dark on a light terminal. On 3.4 hive moves its control client behind each terminal as it attaches, so from that moment panes are told the terminal's real background. tmux 3.5+ lets hive report a pane's colours itself instead, plain black or white (`refresh-client -r`, following `view.theme`, then the attached terminal — its reported theme, or what it answered `hive attach` over OSC 11 — then `HIVE_APPEARANCE` / `COLORFGBG`, then the macOS system appearance, light when nothing answers), which also covers an engine started before any terminal attached; on 3.4 such an engine was told black, and asks only once. `hive create`, `hive attach`, `hive doctor` and `hive plugin setup` warn below 3.4, and the team's status bar names the version. The `hive cvim` / `hive vim` popups need 3.2+
 - a Rust toolchain — only for the build-from-source route; the installer ships prebuilt binaries
 - at least one agent CLI: `claude`, `codex`, or `grok`
 

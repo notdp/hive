@@ -540,8 +540,8 @@ fn test_team_status_argv_targets_the_session_id() {
         ]
     );
     assert_eq!(
-        team_status_argv("$3", ThemeKind::Dark, Some("3.4")).last(),
-        Some(&rows(TMUX_STALE_KEY, "3.4"))
+        team_status_argv("$3", ThemeKind::Dark, Some("3.3")).last(),
+        Some(&rows(TMUX_STALE_KEY, "3.3"))
     );
 }
 

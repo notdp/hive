@@ -88,8 +88,8 @@ pub fn team_status_format_0(p: &StatusPalette) -> String {
             "#{{?@hive-busy,#[fg={busy}] ● ,#[fg={muted}] ○ }}}}}}#{{@hive-agent}} ,",
             "#[fg={muted}] #{{pane_current_command}} }}",
             "#[norange]#[default] }}}}",
-            // a tmux too old for pane colour reports: panes are painted
-            "#[align=right]#{{?@hive-tmux-stale,#[fg={alert}]tmux #{{@hive-tmux-stale}} < 3.5 #[fg={muted}]· ,}}",
+            // a tmux older than hive supports
+            "#[align=right]#{{?@hive-tmux-stale,#[fg={alert}]tmux #{{@hive-tmux-stale}} < {min} #[fg={muted}]· ,}}",
             "#[fg={muted}]#{{?@hive-pr,PR#{{@hive-pr}} · ,}}#{{session_name}} · %H:%M "
         ),
         team_bg = p.team_bg,
@@ -101,6 +101,11 @@ pub fn team_status_format_0(p: &StatusPalette) -> String {
         chip_bg = p.chip_bg,
         alert = p.alert,
         busy = p.busy,
+        min = format_args!(
+            "{}.{}",
+            super::TMUX_MIN_VERSION.0,
+            super::TMUX_MIN_VERSION.1
+        ),
     )
 }
 
@@ -129,8 +134,8 @@ pub const STATUS_CLICK_FALLBACK_OPTION: &str = "@hive-status-click";
 /// value = team name.
 pub const HIDDEN_WINDOW_KEY: &str = "hive-hidden";
 
-/// Session option naming the tmux version when it predates pane colour
-/// reports (`stale_version`); unset otherwise.
+/// Session option naming the tmux version when it is older than hive
+/// supports (`stale_version`); unset otherwise.
 pub const TMUX_STALE_KEY: &str = "@hive-tmux-stale";
 
 /// The session options, targeted by session id (`set-option -t =name`

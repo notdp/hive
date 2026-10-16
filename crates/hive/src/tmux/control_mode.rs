@@ -1,4 +1,15 @@
 //! tmux control-mode output parsing and the pane-activity monitor.
+//!
+//! The monitor's control client is also what tmux answers a pane's colour
+//! query from while it is the session's first client (`appearance.rs`).
+//! On tmux before 3.5, which has no colour report, a terminal arriving in
+//! the team session behind it ends the run, and the monitor attaches again
+//! at once: a new client joins the tail of tmux's client list, so the
+//! terminal leads and panes hear its real background.
+//!
+//! ponytail: an engine that asked while no terminal was attached was told
+//! black, and asks only once; a terminal attached to another session that
+//! links the window is not looked at (the query is the team session's).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -341,6 +352,15 @@ fn record_control_mode_output(inner: &MonitorInner, pane_id: &str, payload: &str
         .insert(pane_id.to_string(), Instant::now());
 }
 
+/// Why a run of the monitor ended.
+#[derive(Debug, PartialEq, Eq)]
+enum RunEnd {
+    /// The client went away, or `stop` asked it to.
+    Detached,
+    /// A terminal arrived behind the control client: attach again now.
+    YieldedToTerminal,
+}
+
 /// The delay before the next attach: `CONTROL_MODE_RESTART_DELAY` after a
 /// run that stayed attached (or for the first retry), otherwise double the
 /// previous delay up to `CONTROL_MODE_MAX_RESTART_DELAY`.
@@ -571,9 +591,14 @@ fn monitor_run_loop(inner: Arc<MonitorInner>, session_target: String) {
     while !inner.stop.load(Ordering::SeqCst) {
         let started = Instant::now();
         // Best-effort monitor: fall back to retry rather than crashing hived.
-        let _ = monitor_run_once(&inner, &session_target);
+        let end = monitor_run_once(&inner, &session_target);
         if inner.stop.load(Ordering::SeqCst) {
             break;
+        }
+        if matches!(end, Ok(RunEnd::YieldedToTerminal)) {
+            // A deliberate end of an attach that worked, not a failure.
+            delay = None;
+            continue;
         }
         let next = next_restart_delay(delay, started.elapsed().as_secs_f64());
         delay = Some(next);
@@ -689,6 +714,41 @@ fn write_control_command(master: RawFd, mut bytes: &[u8]) -> std::io::Result<()>
     Ok(())
 }
 
+/// Whether the client with *own_pid* comes before the first terminal
+/// (non-control client) in *clients*, `list-clients` lines of
+/// `#{client_pid}\t#{client_control_mode}` in tmux's own order. False
+/// when it is not listed or no terminal is.
+fn control_client_leads_terminals(clients: &str, own_pid: u32) -> bool {
+    let mut ours_seen = false;
+    for line in clients.lines() {
+        let Some((pid, control)) = line.split_once('\t') else {
+            continue;
+        };
+        if pid.parse() == Ok(own_pid) {
+            ours_seen = true;
+        } else if control == "0" {
+            return ours_seen;
+        }
+    }
+    false
+}
+
+/// `control_client_leads_terminals` over the session's clients as tmux
+/// lists them now; false when the query fails.
+fn session_control_client_leads(session_target: &str, own_pid: u32) -> bool {
+    let args = [
+        "list-clients",
+        "-t",
+        session_target,
+        "-F",
+        "#{client_pid}\t#{client_control_mode}",
+    ];
+    match super::run::run(&args, false, 1) {
+        Ok(r) if r.returncode == 0 => control_client_leads_terminals(&r.stdout, own_pid),
+        _ => false,
+    }
+}
+
 fn colour_client_changed(line: &str, session_target: &str, clients: &[String]) -> bool {
     if let Some(detached) = line.strip_prefix("%client-detached ") {
         return clients.iter().any(|client| client == detached);
@@ -716,7 +776,7 @@ fn colour_client_changed(line: &str, session_target: &str, clients: &[String]) -
 /// created from an agent's tool shell — is then reported as the terminal,
 /// and codex refuses to draw. The client presents the terminal the panes
 /// are given: the server's `default-terminal`.
-fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Result<()> {
+fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Result<RunEnd> {
     let (master, slave) = monitor_openpty()?;
     let mut cmd = Command::new("tmux");
     cmd.args(["-C", "attach", "-t", session_target]);
@@ -759,9 +819,12 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
     };
     *inner.master_fd.lock().unwrap() = Some(master);
     record_control_client(&inner.workspace, session_target, child.id() as i32);
-    let delivery = super::colour_delivery();
-    let supports_colours = delivery.is_some();
-    let mut colour_reports = PaneColourReports::new(delivery.unwrap_or_default());
+    let version = super::version();
+    let supports_colours = version.is_some_and(|v| v >= super::PANE_COLOUR_REPORT_SINCE);
+    // A fresh attach is already last in the client list: only a client
+    // event can put a terminal behind it.
+    let yields_to_terminals = version.is_some_and(|v| v < super::PANE_COLOUR_REPORT_SINCE);
+    let mut colour_reports = PaneColourReports::default();
     let mut panes_dirty = true;
     if supports_colours {
         panes_dirty = !report_session_pane_colours(
@@ -777,6 +840,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         last_client_event: None,
     };
 
+    let mut end = RunEnd::Detached;
     let mut buffer: Vec<u8> = Vec::new();
     while !inner.stop.load(Ordering::SeqCst) {
         if let Ok(Some(_)) = child.try_wait() {
@@ -816,6 +880,18 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
                 colour_sampling.last_client_event = Some(Instant::now());
             }
         }
+        if yields_to_terminals
+            && refresh_clients
+            && session_control_client_leads(session_target, child.id())
+        {
+            crate::notify_debug::emit(
+                &inner.workspace,
+                "monitor.yield_to_terminal",
+                &[("session", serde_json::json!(session_target))],
+            );
+            end = RunEnd::YieldedToTerminal;
+            break;
+        }
         if supports_colours {
             let sampled = colour_sampling.sample_if_due(
                 Instant::now(),
@@ -842,7 +918,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
     unsafe {
         libc::close(master);
     }
-    Ok(())
+    Ok(end)
 }
 
 #[cfg(test)]
@@ -895,6 +971,21 @@ mod colour_tests {
             "team",
             &[]
         ));
+    }
+
+    #[test]
+    fn test_control_client_leads_only_when_it_precedes_the_first_terminal() {
+        // A terminal arrived behind the hived's client (pid 10).
+        assert!(control_client_leads_terminals("10\t1\n20\t0\n", 10));
+        // Another control client ahead does not stop ours from moving.
+        assert!(control_client_leads_terminals("5\t1\n10\t1\n20\t0", 10));
+        // The terminal already leads, also with a second one behind ours.
+        assert!(!control_client_leads_terminals("20\t0\n10\t1", 10));
+        assert!(!control_client_leads_terminals("20\t0\n10\t1\n30\t0", 10));
+        // Ours not listed, or no terminal at all.
+        assert!(!control_client_leads_terminals("20\t0\n30\t1", 10));
+        assert!(!control_client_leads_terminals("10\t1\n30\t1", 10));
+        assert!(!control_client_leads_terminals("", 10));
     }
 
     #[test]
@@ -1123,12 +1214,8 @@ mod colour_tests {
         let commands = std::fs::read_to_string(temp.path().join("commands")).unwrap();
         assert_eq!(
             commands[changed as usize..],
-            super::super::pane_colour_report_lines(
-                "%3",
-                crate::view_theme::Appearance::Dark,
-                super::super::ColourDelivery::Report
-            )
-            .concat()
+            super::super::pane_colour_report_lines("%3", crate::view_theme::Appearance::Dark)
+                .concat()
         );
         let log = std::fs::read_to_string(crate::notify_debug::log_path(workspace)).unwrap();
         let events: Vec<serde_json::Value> = log

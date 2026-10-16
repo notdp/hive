@@ -144,8 +144,9 @@ fn setup_plugins() -> bool {
         .to_path_buf();
     println!("setup: marketplace synced at {}", marketplace.display());
     if crate::tmux::version().is_none() {
+        let (major, minor) = crate::tmux::TMUX_MIN_VERSION;
         eprintln!(
-            "setup: warning: tmux not found; hive draws every team in tmux (3.5+ recommended)"
+            "setup: warning: tmux not found; hive draws every team in tmux, so install tmux {major}.{minor} or newer"
         );
     } else if let Some(warning) = crate::tmux::stale_version_warning() {
         eprintln!("setup: {warning}");

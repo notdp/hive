@@ -99,7 +99,18 @@ pub struct PtyClient {
 impl PtyClient {
     /// Run *cmd* (a `tmux … attach …` command, its env already set) with a
     /// 200x50 pty as its controlling terminal.
-    pub fn spawn(mut cmd: Command) -> PtyClient {
+    pub fn spawn(cmd: Command) -> PtyClient {
+        PtyClient::spawn_with_background(cmd, None)
+    }
+
+    /// `spawn`, the terminal answering tmux's OSC 11 query (what tmux asks
+    /// every terminal at attach) with *background*, `rgb:` channels such as
+    /// `2222/4444/6666`, and its OSC 10 with a fixed foreground.
+    pub fn spawn_answering_background(cmd: Command, background: &str) -> PtyClient {
+        PtyClient::spawn_with_background(cmd, Some(background.to_string()))
+    }
+
+    fn spawn_with_background(mut cmd: Command, background: Option<String>) -> PtyClient {
         use std::os::unix::io::FromRawFd;
         use std::os::unix::process::CommandExt;
         let mut master: libc::c_int = -1;
@@ -134,11 +145,25 @@ impl PtyClient {
         let drain = master;
         let reader = std::thread::spawn(move || {
             let mut buf = [0u8; 4096];
+            // The query can arrive split across reads: keep a short tail.
+            let mut seen: Vec<u8> = Vec::new();
+            let mut answer = background
+                .map(|bg| format!("\x1b]10;rgb:1111/1111/1111\x1b\\\x1b]11;rgb:{bg}\x1b\\"));
             loop {
                 let n = unsafe { libc::read(drain, buf.as_mut_ptr() as *mut _, buf.len()) };
                 if n <= 0 {
                     break;
                 }
+                if answer.is_none() {
+                    continue;
+                }
+                seen.extend_from_slice(&buf[..n as usize]);
+                if seen.windows(5).any(|w| w == b"]11;?") {
+                    let reply = answer.take().unwrap();
+                    unsafe { libc::write(drain, reply.as_ptr() as *const _, reply.len()) };
+                }
+                let keep = seen.len().saturating_sub(8);
+                seen.drain(..keep);
             }
         });
         PtyClient {
