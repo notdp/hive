@@ -34,7 +34,7 @@ Under the hood that materializes the marketplace and runs `plugin marketplace ad
 
 Requires (hive is written against these exact versions — the versions on the machine it is developed on — and carries no compatibility code for older ones; upgrade the engine, then hive):
 
-- `tmux` 3.7c (the one exception: 3.4+ is supported too, see below)
+- `tmux` 3.4+ (developed on 3.7c; the whole suite also runs against 3.4, see below)
 - `claude` 2.1.287 (Claude Code; the minimum the Claude Code docs set for mods, and the first build that ignores `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` — the hive module's events and `$` calls pass `claude plugin validate --strict` on it, and it loads on `-p`; the desktop app bundles its own CLI, 2.1.286 at the time of writing)
 - `codex-cli` 0.153.4
 - `grok` 1.0.30
