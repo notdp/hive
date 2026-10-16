@@ -158,7 +158,18 @@ impl Rig {
         for (key, value) in env {
             cmd.env(key, value);
         }
-        let client = PtyClient::spawn(cmd);
+        self.attached(PtyClient::spawn(cmd))
+    }
+
+    /// `attach_client` from a terminal whose background is *background*
+    /// (`rgb:` channels), its answer to tmux's OSC 11 query at attach.
+    fn attach_client_with_background(&self, background: &str) -> PtyClient {
+        let cmd = self.tmux_cmd(&["attach", "-t", &format!("={}", self.team)]);
+        self.attached(PtyClient::spawn_answering_background(cmd, background))
+    }
+
+    /// *client*, once the server lists it.
+    fn attached(&self, client: PtyClient) -> PtyClient {
         let pid = client.pid().to_string();
         wait_until("the terminal client to attach", || {
             self.tmux_ok(&["list-clients", "-F", "#{client_pid}"])
@@ -1046,6 +1057,11 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     let line = rig.status_line(&window_id, 0);
     assert!(line.contains(&format!(" {} ", rig.team)), "{line}");
     assert!(line.contains(" ▾ orch "), "{line}");
+    // A tmux older than hive supports names itself on the bar.
+    match hive::tmux::stale_version() {
+        Some(version) => assert!(line.contains(&format!("tmux {version} < 3.4")), "{line}"),
+        None => assert!(!line.contains("< 3.4"), "{line}"),
+    }
     assert!(!line.contains(" ▴ orch "), "{line}");
 
     // The window build changed exactly one root binding: the status click,
@@ -1294,47 +1310,126 @@ fn test_create_outside_tmux_tells_team_panes_their_background_colour() {
         return;
     }
     let window_id = rig.create_outside_tmux();
-    // A create with no orch starts no hived; the first team query does,
-    // and the hived attaches its control client to the team session.
-    rig.hive_ok(&["team", "-t", &rig.team], None);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let control = rig.tmux_ok(&["list-clients", "-F", "#{client_control_mode}"]);
-        if control.lines().any(|l| l == "1") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no control client attached to the team session"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    // A pane's own OSC 11 query, answered by tmux, read back off the tty.
+    wait_for_control_client(&rig);
     let pane = rig.panes(&window_id)[0].0.clone();
-    let out = rig.tmp.path().join("osc11.txt");
-    let probe = format!(
-        "python3 -c \"import os,sys,termios,tty,select;fd=os.open('/dev/tty',os.O_RDWR);o=termios.tcgetattr(fd);tty.setraw(fd);os.write(fd,b'\\x1b]11;?\\x1b\\\\\\\\');b=b''\nwhile select.select([fd],[],[],1)[0]: b+=os.read(fd,256)\ntermios.tcsetattr(fd,termios.TCSADRAIN,o);open('{}','wb').write(b)\"",
-        out.display()
-    );
-    rig.tmux_ok(&["send-keys", "-t", &pane, "-l", &probe]);
-    rig.tmux_ok(&["send-keys", "-t", &pane, "Enter"]);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !out.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the probe never wrote its reply"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    std::thread::sleep(std::time::Duration::from_millis(200));
-    let reply = std::fs::read(&out).unwrap();
-    let reply = String::from_utf8_lossy(&reply);
+    let reply = pane_background(&rig, &pane);
     assert!(
         reply.contains("]11;rgb:ffff/ffff/ffff"),
         "pane was told its background is {reply:?}"
     );
     rig.delete();
+}
+
+/// A terminal attaching to a team session the hived's control client
+/// already sits on: on tmux before 3.5 the control client re-attaches
+/// behind it, so a pane asking hears the terminal's own background; on
+/// 3.5+ hive's report answers (the rig's light), whatever the terminal is.
+#[test]
+fn test_a_terminal_attaching_after_the_hived_answers_the_panes_colour_queries() {
+    let rig = Rig::new("oscterm");
+    let window_id = rig.create_outside_tmux();
+    wait_for_control_client(&rig);
+    let _terminal = rig.attach_client_with_background("2222/4444/6666");
+    let reports = hive::tmux::version().is_some_and(|v| v >= hive::tmux::PANE_COLOUR_REPORT_SINCE);
+    if !reports {
+        wait_until("the control client to move behind the terminal", || {
+            rig.tmux_ok(&["list-clients", "-F", "#{client_control_mode}"])
+                .lines()
+                .collect::<Vec<_>>()
+                == ["0", "1"]
+        });
+    }
+    let pane = rig.panes(&window_id)[0].0.clone();
+    let reply = pane_background(&rig, &pane);
+    let expected = if reports {
+        "]11;rgb:ffff/ffff/ffff"
+    } else {
+        "]11;rgb:2222/4444/6666"
+    };
+    assert!(
+        reply.contains(expected),
+        "pane was told its background is {reply:?}"
+    );
+    rig.delete();
+}
+
+/// The terminal ahead of the hived's control client leaving: on tmux
+/// before 3.5 the control client, now first, re-attaches behind the
+/// terminal still attached, so a pane hears that terminal's background;
+/// on 3.5+ hive's report answers (the rig's light).
+#[test]
+fn test_the_leading_terminal_leaving_hands_the_panes_colour_to_the_next_terminal() {
+    let rig = Rig::new("oscleave");
+    let window_id = rig.create_outside_tmux();
+    wait_for_control_client(&rig);
+    let reports = hive::tmux::version().is_some_and(|v| v >= hive::tmux::PANE_COLOUR_REPORT_SINCE);
+    let order = || {
+        rig.tmux_ok(&["list-clients", "-F", "#{client_control_mode}"])
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let mut first = rig.attach_client_with_background("1111/2222/3333");
+    if !reports {
+        wait_until(
+            "the control client to move behind the first terminal",
+            || order() == ["0", "1"],
+        );
+    }
+    let _second = rig.attach_client_with_background("2222/4444/6666");
+    if !reports {
+        // The first terminal leads: the control client stays put.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(order(), ["0", "1", "0"]);
+    }
+    first.hangup();
+    if !reports {
+        wait_until(
+            "the control client to move behind the second terminal",
+            || order() == ["0", "1"],
+        );
+    }
+    let pane = rig.panes(&window_id)[0].0.clone();
+    let reply = pane_background(&rig, &pane);
+    let expected = if reports {
+        "]11;rgb:ffff/ffff/ffff"
+    } else {
+        "]11;rgb:2222/4444/6666"
+    };
+    assert!(
+        reply.contains(expected),
+        "pane was told its background is {reply:?}"
+    );
+    rig.delete();
+}
+
+/// A create with no orch starts no hived; the first team query does, and
+/// the hived attaches its control client to the team session.
+fn wait_for_control_client(rig: &Rig) {
+    rig.hive_ok(&["team", "-t", &rig.team], None);
+    wait_until("a control client on the team session", || {
+        rig.tmux_ok(&["list-clients", "-F", "#{client_control_mode}"])
+            .lines()
+            .any(|l| l == "1")
+    });
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
+/// *pane*'s own OSC 11 query, answered by tmux, read back off its tty.
+fn pane_background(rig: &Rig, pane: &str) -> String {
+    let out = rig
+        .tmp
+        .path()
+        .join(format!("osc11-{}.txt", pane.trim_start_matches('%')));
+    let probe = format!(
+        "python3 -c \"import os,sys,termios,tty,select;fd=os.open('/dev/tty',os.O_RDWR);o=termios.tcgetattr(fd);tty.setraw(fd);os.write(fd,b'\\x1b]11;?\\x1b\\\\\\\\');b=b''\nwhile select.select([fd],[],[],1)[0]: b+=os.read(fd,256)\ntermios.tcsetattr(fd,termios.TCSADRAIN,o);open('{}','wb').write(b)\"",
+        out.display()
+    );
+    rig.tmux_ok(&["send-keys", "-t", pane, "-l", &probe]);
+    rig.tmux_ok(&["send-keys", "-t", pane, "Enter"]);
+    wait_until("the probe to write its reply", || out.exists());
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned()
 }
 
 #[test]

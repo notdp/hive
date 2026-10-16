@@ -527,7 +527,7 @@ fn test_team_status_argv_targets_the_session_id() {
     let rows = |option: &str, value: &str| v(&["set-option", "-t", "$3", option, value]);
     let p = status_palette(ThemeKind::Dark);
     assert_eq!(
-        team_status_argv("$3", ThemeKind::Dark),
+        team_status_argv("$3", ThemeKind::Dark, None),
         vec![
             rows("mouse", "on"),
             rows("status", "2"),
@@ -536,7 +536,12 @@ fn test_team_status_argv_targets_the_session_id() {
             rows("status-right", ""),
             rows("status-format[0]", &team_status_format_0(p)),
             rows("status-format[1]", &team_status_format_1(p)),
+            v(&["set-option", "-u", "-t", "$3", TMUX_STALE_KEY]),
         ]
+    );
+    assert_eq!(
+        team_status_argv("$3", ThemeKind::Dark, Some("3.3")).last(),
+        Some(&rows(TMUX_STALE_KEY, "3.3"))
     );
 }
 
@@ -729,11 +734,12 @@ fn test_install_team_status_runs_options_then_bindings() {
 
     install_team_status("$3");
 
-    // The two fallback probes come first (the rows are built before they
-    // run) — the root table carries no status click here, so the stock
-    // click stands in without a look at the option — then the session
-    // options, then the two bindings.
+    // The tmux version and the two fallback probes come first (the rows
+    // are built before they run) — the root table carries no status click
+    // here, so the stock click stands in without a look at the option —
+    // then the session options, then the two bindings.
     let mut expected = vec![
+        v(&["-V"]),
         v(&["list-keys", "-T", "root"]),
         v(&["list-keys", "-T", "prefix"]),
         v(&[
@@ -746,6 +752,7 @@ fn test_install_team_status_runs_options_then_bindings() {
     expected.extend(team_status_argv(
         "$3",
         crate::view_theme::active_theme_kind(),
+        None,
     ));
     expected.push(status_click_binding("/x/hive", STOCK_STATUS_CLICK));
     expected.push(mirror_key_binding("/x/hive", "select-pane -m"));
@@ -779,6 +786,7 @@ fn test_team_status_format_reads_only_options() {
         "hive-pr",
         "hive-notify-text",
         "hive-ticker",
+        "hive-tmux-stale",
     ];
     let p = status_palette(crate::view_theme::ThemeKind::Dark);
     for format in [team_status_format_0(p), team_status_format_1(p)] {

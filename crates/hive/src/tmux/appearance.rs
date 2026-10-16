@@ -1,10 +1,18 @@
 //! What a pane is told its terminal background is.
 //!
-//! A tmux control client starts with ANSI black tty colours. When it is
-//! the first eligible client and a pane has no background override, OSC
-//! 11 queries therefore return black, even on a light terminal.
-//! On tmux 3.5+, Hive supplies per-pane answers through `refresh-client -r`.
-//! These override pane styles while any control client exists on the server.
+//! tmux answers a pane's OSC 10/11 query (a pane with no background of its
+//! own) from the first client in its client list attached to a session
+//! holding the window. A control client carries ANSI black tty colours, a
+//! terminal the colours it answered tmux at attach. The hived's control
+//! client attaches first when the team is built headless, so a terminal
+//! arriving later would sit behind it and the pane would hear black.
+//! On tmux before 3.5 the monitor re-attaches its control client behind
+//! the terminals whenever a client event leaves it ahead of one
+//! (`control_mode.rs`), and the pane hears a terminal's real background.
+//! On tmux 3.5+ Hive supplies per-pane answers through
+//! `refresh-client -r`, which override any client while a control client
+//! exists on the server, and which also cover the time before any terminal
+//! attached.
 //!
 //! Explicit `HIVE_VIEW_THEME` / `view.theme` wins. Auto uses the first
 //! non-control client in this session with a known `client_theme`, then the
@@ -16,7 +24,7 @@
 //! for 30 seconds after a client event, otherwise every 60 seconds. Only new
 //! panes or a changed appearance receive colour reports.
 //!
-//! ponytail: these are black/white approximations, not the terminal's RGB.
+//! ponytail: reports are black/white approximations, not the terminal's RGB.
 //! Linked windows share their overrides across sessions; differently themed
 //! sessions can overwrite each other's reports. Updating the cache does not
 //! notify running applications or undo an answer already consumed at startup.
@@ -49,19 +57,29 @@ pub(crate) fn parse_version(output: &str) -> Option<(u32, u32)> {
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
-/// The warning a team-building verb prints on a tmux that cannot take a
-/// pane colour report, or None when it can (or tmux is absent — that
-/// fails louder elsewhere).
+/// The oldest tmux hive supports, the oldest its suite runs against.
+pub const TMUX_MIN_VERSION: (u32, u32) = (3, 4);
+
+/// The tmux this server runs, as `3.3`, when it is older than hive
+/// supports; None otherwise or with no tmux.
+pub fn stale_version() -> Option<String> {
+    version().and_then(stale)
+}
+
+fn stale(version: (u32, u32)) -> Option<String> {
+    (version < TMUX_MIN_VERSION).then(|| format!("{}.{}", version.0, version.1))
+}
+
+/// The warning a human-facing verb prints on a tmux older than hive
+/// supports, or None when it is supported (or absent — that fails louder
+/// elsewhere).
 pub fn stale_version_warning() -> Option<String> {
-    let v = version()?;
-    (v < PANE_COLOUR_REPORT_SINCE).then(|| {
-        format!(
-            "warning: tmux {}.{} answers default-background pane queries with black \
-             when the hived control client is first; tmux {}.{}+ supports \
-             pane colour reports (refresh-client -r)",
-            v.0, v.1, PANE_COLOUR_REPORT_SINCE.0, PANE_COLOUR_REPORT_SINCE.1
-        )
-    })
+    let version = stale_version()?;
+    let min = format!("{}.{}", TMUX_MIN_VERSION.0, TMUX_MIN_VERSION.1);
+    Some(format!(
+        "warning: tmux {version} is older than hive supports ({min}+), so team windows may \
+         draw or behave wrongly; upgrade tmux to {min} or newer"
+    ))
 }
 
 /// The OSC 10 (foreground) and OSC 11 (background) replies for an
@@ -209,6 +227,11 @@ pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
             _ => Vec::new(),
         }
     };
+    // Before 3.5 there is no report to store; the terminal answers once the
+    // hived's control client has moved behind it.
+    if version().is_none_or(|v| v < PANE_COLOUR_REPORT_SINCE) {
+        return;
+    }
     let clients = list("list-clients", &[], "#{client_name}");
     let Some(client) = clients.iter().find(|name| !name.is_empty()) else {
         return;
@@ -381,6 +404,16 @@ mod tests {
         for invalid in ["", "%", "not-a-pane", "%7'", "%1\nkill-server"] {
             assert!(pane_colour_report_lines(invalid, Appearance::Light).is_empty());
         }
+    }
+
+    #[test]
+    fn test_stale_names_only_a_tmux_older_than_3_4() {
+        assert_eq!(stale((3, 3)), Some("3.3".to_string()));
+        assert_eq!(stale((2, 9)), Some("2.9".to_string()));
+        assert_eq!(stale((3, 4)), None);
+        assert_eq!(stale((3, 7)), None);
+        assert_eq!(stale((3, 10)), None);
+        assert_eq!(stale((4, 0)), None);
     }
 
     #[test]
