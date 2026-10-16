@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.22.5
+
+### Fixes
+
+- tmux 3.4 is supported: codex and `hive view` in a team pane no longer hear a black background once a terminal is attached, because on tmux before 3.5 the hived moves its control client back behind the terminals whenever a client attaching or leaving puts it ahead of one; hive now warns below 3.4 in `hive create`, `attach`, `doctor`, `plugin setup`, the install script and the team's status bar (#258)
+
 ## 0.22.4
 
 ### Fixes
