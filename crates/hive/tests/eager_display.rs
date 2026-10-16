@@ -1046,6 +1046,11 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     let line = rig.status_line(&window_id, 0);
     assert!(line.contains(&format!(" {} ", rig.team)), "{line}");
     assert!(line.contains(" ▾ orch "), "{line}");
+    // A tmux too old for pane colour reports names itself on the bar.
+    match hive::tmux::stale_version() {
+        Some(version) => assert!(line.contains(&format!("tmux {version} < 3.5")), "{line}"),
+        None => assert!(!line.contains("< 3.5"), "{line}"),
+    }
     assert!(!line.contains(" ▴ orch "), "{line}");
 
     // The window build changed exactly one root binding: the status click,
@@ -1283,16 +1288,13 @@ fn test_status_bar_reflects_pane_options_tmux_renders() {
 }
 
 /// The hived's control client is what tmux answers a pane's OSC 11 query
-/// from; on tmux 3.5+ the hived hands it hive's own appearance for every
-/// pane of the team session, so an engine asking gets the configured
-/// light background, not the control client's uninitialised black.
+/// from; the hived hands every pane of the team session hive's own
+/// appearance (a colour report on tmux 3.5+, a pane style before), so an
+/// engine asking gets the configured light background, not the control
+/// client's uninitialised black.
 #[test]
 fn test_create_outside_tmux_tells_team_panes_their_background_colour() {
     let rig = Rig::new("osc");
-    if hive::tmux::version().is_none_or(|v| v < hive::tmux::PANE_COLOUR_REPORT_SINCE) {
-        eprintln!("tmux without refresh-client -r: nothing to report through");
-        return;
-    }
     let window_id = rig.create_outside_tmux();
     // A create with no orch starts no hived; the first team query does,
     // and the hived attaches its control client to the team session.

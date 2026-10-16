@@ -115,6 +115,11 @@ pub(crate) fn attach_cmd(team_name: &str) {
             start_team_hived_or_warn(&mut t, &ws);
         }
     }
+    // The human's own terminal: a team is usually built where nobody reads
+    // stderr. Outside tmux the attach covers it, and a detach shows it again.
+    if let Some(warning) = tmux::stale_version_warning() {
+        eprintln!("{warning}");
+    }
     jump_to_window(&window, if built { "built" } else { "found" });
 }
 

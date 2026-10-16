@@ -373,7 +373,10 @@ answers (`tmux/appearance.rs`, tmux 3.5+). Without a report, tmux can answer
 black when the control client is the first eligible client and the pane
 has a default background. A stored report takes precedence over pane style
 while any control client exists on the server; it is not owned by the
-client that wrote it.
+client that wrote it. Before 3.5 there is no report: the same resolved
+appearance goes out as a pane `window-style` (plain black or white), which
+tmux answers from ahead of any client and also paints, and the team
+session's `@hive-tmux-stale` puts the version on the status bar.
 
 Reports resolve `HIVE_VIEW_THEME`, then `view.theme`. Auto/system keeps its
 existing meaning: an env value of auto bypasses a fixed config preference.

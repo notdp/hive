@@ -409,7 +409,7 @@ fn test_create_outside_tmux_seats_a_claude_session_creator_as_orch_with_its_mirr
 /// The team session's status bar, by session id, then the two bindings
 /// naming this binary (`HIVE_BIN`).
 fn assert_status_bar_installed(argv: &Argv) {
-    for row in crate::tmux::team_status_argv("$1", crate::view_theme::active_theme_kind()) {
+    for row in crate::tmux::team_status_argv("$1", crate::view_theme::active_theme_kind(), None) {
         let row: Vec<&str> = row.iter().map(String::as_str).collect();
         assert!(has_row(argv, &row), "{row:?}");
     }

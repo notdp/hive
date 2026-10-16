@@ -759,8 +759,9 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
     };
     *inner.master_fd.lock().unwrap() = Some(master);
     record_control_client(&inner.workspace, session_target, child.id() as i32);
-    let supports_colours = super::version().is_some_and(|v| v >= super::PANE_COLOUR_REPORT_SINCE);
-    let mut colour_reports = PaneColourReports::default();
+    let delivery = super::colour_delivery();
+    let supports_colours = delivery.is_some();
+    let mut colour_reports = PaneColourReports::new(delivery.unwrap_or_default());
     let mut panes_dirty = true;
     if supports_colours {
         panes_dirty = !report_session_pane_colours(
@@ -1122,8 +1123,12 @@ mod colour_tests {
         let commands = std::fs::read_to_string(temp.path().join("commands")).unwrap();
         assert_eq!(
             commands[changed as usize..],
-            super::super::pane_colour_report_lines("%3", crate::view_theme::Appearance::Dark)
-                .concat()
+            super::super::pane_colour_report_lines(
+                "%3",
+                crate::view_theme::Appearance::Dark,
+                super::super::ColourDelivery::Report
+            )
+            .concat()
         );
         let log = std::fs::read_to_string(crate::notify_debug::log_path(workspace)).unwrap();
         let events: Vec<serde_json::Value> = log

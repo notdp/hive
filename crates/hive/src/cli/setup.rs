@@ -143,7 +143,11 @@ fn setup_plugins() -> bool {
         .expect("payload sits three levels under the marketplace root")
         .to_path_buf();
     println!("setup: marketplace synced at {}", marketplace.display());
-    if let Some(warning) = crate::tmux::stale_version_warning() {
+    if crate::tmux::version().is_none() {
+        eprintln!(
+            "setup: warning: tmux not found; hive draws every team in tmux (3.5+ recommended)"
+        );
+    } else if let Some(warning) = crate::tmux::stale_version_warning() {
         eprintln!("setup: {warning}");
     }
 

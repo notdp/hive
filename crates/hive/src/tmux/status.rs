@@ -68,8 +68,8 @@ pub fn status_palette(kind: crate::view_theme::ThemeKind) -> &'static StatusPale
 }
 
 /// Line 0: the team chip, the orch mirror chip, one chip per pane of the
-/// current window (mirror excluded, active pane bold), then `PR<n>`,
-/// session name and clock.
+/// current window (mirror excluded, active pane bold), then a stale tmux
+/// version, `PR<n>`, session name and clock.
 pub fn team_status_format_0(p: &StatusPalette) -> String {
     format!(
         concat!(
@@ -88,7 +88,9 @@ pub fn team_status_format_0(p: &StatusPalette) -> String {
             "#{{?@hive-busy,#[fg={busy}] ● ,#[fg={muted}] ○ }}}}}}#{{@hive-agent}} ,",
             "#[fg={muted}] #{{pane_current_command}} }}",
             "#[norange]#[default] }}}}",
-            "#[align=right]#[fg={muted}]#{{?@hive-pr,PR#{{@hive-pr}} · ,}}#{{session_name}} · %H:%M "
+            // a tmux too old for pane colour reports: panes are painted
+            "#[align=right]#{{?@hive-tmux-stale,#[fg={alert}]tmux #{{@hive-tmux-stale}} < 3.5 #[fg={muted}]· ,}}",
+            "#[fg={muted}]#{{?@hive-pr,PR#{{@hive-pr}} · ,}}#{{session_name}} · %H:%M "
         ),
         team_bg = p.team_bg,
         team_fg = p.team_fg,
@@ -127,11 +129,28 @@ pub const STATUS_CLICK_FALLBACK_OPTION: &str = "@hive-status-click";
 /// value = team name.
 pub const HIDDEN_WINDOW_KEY: &str = "hive-hidden";
 
+/// Session option naming the tmux version when it predates pane colour
+/// reports (`stale_version`); unset otherwise.
+pub const TMUX_STALE_KEY: &str = "@hive-tmux-stale";
+
 /// The session options, targeted by session id (`set-option -t =name`
-/// is refused).
-pub fn team_status_argv(session_id: &str, kind: crate::view_theme::ThemeKind) -> Vec<Vec<String>> {
+/// is refused); *stale* is the tmux version the bar warns about.
+pub fn team_status_argv(
+    session_id: &str,
+    kind: crate::view_theme::ThemeKind,
+    stale: Option<&str>,
+) -> Vec<Vec<String>> {
     let p = status_palette(kind);
-    [
+    let set = |option: &str, value: String| {
+        vec![
+            "set-option".to_string(),
+            "-t".to_string(),
+            session_id.to_string(),
+            option.to_string(),
+            value,
+        ]
+    };
+    let mut rows: Vec<Vec<String>> = [
         // The chips are click targets: `mouse` is a session option, so the
         // team session turns it on for itself whatever the global says.
         ("mouse", "on".to_string()),
@@ -143,16 +162,19 @@ pub fn team_status_argv(session_id: &str, kind: crate::view_theme::ThemeKind) ->
         ("status-format[1]", team_status_format_1(p)),
     ]
     .into_iter()
-    .map(|(option, value)| {
-        vec![
+    .map(|(option, value)| set(option, value))
+    .collect();
+    rows.push(match stale {
+        Some(version) => set(TMUX_STALE_KEY, version.to_string()),
+        None => vec![
             "set-option".to_string(),
+            "-u".to_string(),
             "-t".to_string(),
             session_id.to_string(),
-            option.to_string(),
-            value,
-        ]
-    })
-    .collect()
+            TMUX_STALE_KEY.to_string(),
+        ],
+    });
+    rows
 }
 
 /// The shell line both bindings run: `hive mirror` on the clicked/current
@@ -292,7 +314,11 @@ pub fn mirror_key_binding(hive: &str, fallback: &str) -> Vec<String> {
 /// same fallback back from behind hive's own binding).
 fn install_status_rows(session_id: &str) -> Vec<Vec<String>> {
     let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
-    let mut rows = team_status_argv(session_id, crate::view_theme::active_theme_kind());
+    let mut rows = team_status_argv(
+        session_id,
+        crate::view_theme::active_theme_kind(),
+        super::stale_version().as_deref(),
+    );
     rows.push(status_click_binding(&hive, &status_click_fallback()));
     rows.push(mirror_key_binding(&hive, &prefix_m_fallback()));
     rows
