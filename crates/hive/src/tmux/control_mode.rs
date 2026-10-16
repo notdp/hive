@@ -2,10 +2,12 @@
 //!
 //! The monitor's control client is also what tmux answers a pane's colour
 //! query from while it is the session's first client (`appearance.rs`).
-//! On tmux before 3.5, which has no colour report, a terminal arriving in
-//! the team session behind it ends the run, and the monitor attaches again
-//! at once: a new client joins the tail of tmux's client list, so the
-//! terminal leads and panes hear its real background.
+//! On tmux before 3.5, which has no colour report, the run ends whenever a
+//! client event (its own attach, a client attaching, switching or leaving
+//! anywhere on the server) leaves it ahead of a terminal in the team
+//! session's client list, and the monitor attaches again at once: a new
+//! client joins the tail of tmux's client list, so a terminal leads and
+//! panes hear its real background.
 //!
 //! ponytail: an engine that asked while no terminal was attached was told
 //! black, and asks only once; a terminal attached to another session that
@@ -357,7 +359,7 @@ fn record_control_mode_output(inner: &MonitorInner, pane_id: &str, payload: &str
 enum RunEnd {
     /// The client went away, or `stop` asked it to.
     Detached,
-    /// A terminal arrived behind the control client: attach again now.
+    /// The control client led a terminal in the session: attach again now.
     YieldedToTerminal,
 }
 
@@ -749,6 +751,20 @@ fn session_control_client_leads(session_target: &str, own_pid: u32) -> bool {
     }
 }
 
+/// Whether *line* may have changed which client leads the team session's
+/// client list: this client's own attach (`%session-changed`), or any
+/// client attaching, switching or leaving — one ahead of ours leaving, or
+/// switching away, puts ours first.
+fn client_order_may_change(line: &str) -> bool {
+    [
+        "%session-changed ",
+        "%client-session-changed ",
+        "%client-detached ",
+    ]
+    .iter()
+    .any(|prefix| line.starts_with(prefix))
+}
+
 fn colour_client_changed(line: &str, session_target: &str, clients: &[String]) -> bool {
     if let Some(detached) = line.strip_prefix("%client-detached ") {
         return clients.iter().any(|client| client == detached);
@@ -821,8 +837,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
     record_control_client(&inner.workspace, session_target, child.id() as i32);
     let version = super::version();
     let supports_colours = version.is_some_and(|v| v >= super::PANE_COLOUR_REPORT_SINCE);
-    // A fresh attach is already last in the client list: only a client
-    // event can put a terminal behind it.
+    // Checked on client events only, this run's own attach among them.
     let yields_to_terminals = version.is_some_and(|v| v < super::PANE_COLOUR_REPORT_SINCE);
     let mut colour_reports = PaneColourReports::default();
     let mut panes_dirty = true;
@@ -862,12 +877,14 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         }
         let mut refresh_panes = false;
         let mut refresh_clients = false;
+        let mut client_order_changed = false;
         while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
             let raw_line: Vec<u8> = buffer.drain(..=pos).collect();
             // Drop invalid UTF-8 bytes.
             let decoded =
                 String::from_utf8_lossy(&raw_line[..raw_line.len() - 1]).replace('\u{fffd}', "");
             let decoded = decoded.trim_end_matches('\r');
+            client_order_changed |= client_order_may_change(decoded);
             let (pane_id, payload) = parse_control_mode_output(decoded);
             if !pane_id.is_empty() {
                 record_control_mode_output(inner, &pane_id, &payload);
@@ -881,7 +898,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
             }
         }
         if yields_to_terminals
-            && refresh_clients
+            && client_order_changed
             && session_control_client_leads(session_target, child.id())
         {
             crate::notify_debug::emit(
@@ -986,6 +1003,19 @@ mod colour_tests {
         assert!(!control_client_leads_terminals("20\t0\n30\t1", 10));
         assert!(!control_client_leads_terminals("10\t1\n30\t1", 10));
         assert!(!control_client_leads_terminals("", 10));
+    }
+
+    #[test]
+    fn test_client_order_may_change_on_any_attach_switch_or_detach() {
+        // This client's own attach, then any client, any session.
+        assert!(client_order_may_change("%session-changed $1 team"));
+        assert!(client_order_may_change(
+            "%client-session-changed /dev/ttys001 $2 other"
+        ));
+        assert!(client_order_may_change("%client-detached /dev/ttys001"));
+        assert!(!client_order_may_change("%output %1 %client-detached x"));
+        assert!(!client_order_may_change("%layout-change @1 x"));
+        assert!(!client_order_may_change("%sessions-changed"));
     }
 
     #[test]

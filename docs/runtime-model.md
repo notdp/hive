@@ -376,11 +376,12 @@ attach. On tmux 3.5+ the hived reports each pane's answer itself
 (`tmux/appearance.rs`, `refresh-client -r`). A stored report takes
 precedence over pane style and over every client while any control client
 exists on the server; it is not owned by the client that wrote it. tmux 3.4
-has no report: when a terminal arrives in the team session behind the
-hived's control client (`%client-session-changed`, then the session's
-`list-clients` order, the control client known by its pid), the monitor
-ends that attach and attaches again at once, outside the restart backoff,
-so the terminal leads the list and panes hear its real background. An
+has no report: when a client event (the control client's own attach, or
+any client attaching, switching or leaving) leaves the hived's control
+client ahead of a terminal in the team session's `list-clients` order (the
+control client known by its pid), the monitor ends that attach and
+attaches again at once, outside the restart backoff, so a terminal leads
+the list and panes hear its real background. An
 engine that asked before any terminal attached was told black. Below 3.4
 `hive create`, `hive attach`, `hive doctor` and `hive plugin setup` warn,
 and the team session's `@hive-tmux-stale` puts the version on the status

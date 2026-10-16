@@ -1353,6 +1353,56 @@ fn test_a_terminal_attaching_after_the_hived_answers_the_panes_colour_queries() 
     rig.delete();
 }
 
+/// The terminal ahead of the hived's control client leaving: on tmux
+/// before 3.5 the control client, now first, re-attaches behind the
+/// terminal still attached, so a pane hears that terminal's background;
+/// on 3.5+ hive's report answers (the rig's light).
+#[test]
+fn test_the_leading_terminal_leaving_hands_the_panes_colour_to_the_next_terminal() {
+    let rig = Rig::new("oscleave");
+    let window_id = rig.create_outside_tmux();
+    wait_for_control_client(&rig);
+    let reports = hive::tmux::version().is_some_and(|v| v >= hive::tmux::PANE_COLOUR_REPORT_SINCE);
+    let order = || {
+        rig.tmux_ok(&["list-clients", "-F", "#{client_control_mode}"])
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let mut first = rig.attach_client_with_background("1111/2222/3333");
+    if !reports {
+        wait_until(
+            "the control client to move behind the first terminal",
+            || order() == ["0", "1"],
+        );
+    }
+    let _second = rig.attach_client_with_background("2222/4444/6666");
+    if !reports {
+        // The first terminal leads: the control client stays put.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert_eq!(order(), ["0", "1", "0"]);
+    }
+    first.hangup();
+    if !reports {
+        wait_until(
+            "the control client to move behind the second terminal",
+            || order() == ["0", "1"],
+        );
+    }
+    let pane = rig.panes(&window_id)[0].0.clone();
+    let reply = pane_background(&rig, &pane);
+    let expected = if reports {
+        "]11;rgb:ffff/ffff/ffff"
+    } else {
+        "]11;rgb:2222/4444/6666"
+    };
+    assert!(
+        reply.contains(expected),
+        "pane was told its background is {reply:?}"
+    );
+    rig.delete();
+}
+
 /// A create with no orch starts no hived; the first team query does, and
 /// the hived attaches its control client to the team session.
 fn wait_for_control_client(rig: &Rig) {

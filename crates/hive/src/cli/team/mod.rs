@@ -984,6 +984,9 @@ pub(crate) fn doctor(agent_name: &str) {
     };
     let (payload, healthy) = doctor_report(&mut t, &ws, &target_name);
     println!("{}", json_pretty(&Value::Object(payload)));
+    if let Some(warning) = tmux::stale_version_warning() {
+        eprintln!("{warning}");
+    }
     if !healthy {
         std::process::exit(1);
     }

@@ -6,12 +6,13 @@
 //! terminal the colours it answered tmux at attach. The hived's control
 //! client attaches first when the team is built headless, so a terminal
 //! arriving later would sit behind it and the pane would hear black.
-//! On tmux before 3.5 the monitor re-attaches its control client behind an
-//! arriving terminal (`control_mode.rs`), and the pane hears the
-//! terminal's real background. On tmux 3.5+ Hive supplies per-pane answers
-//! through `refresh-client -r`, which override any client while a control
-//! client exists on the server, and which also cover the time before any
-//! terminal attached.
+//! On tmux before 3.5 the monitor re-attaches its control client behind
+//! the terminals whenever a client event leaves it ahead of one
+//! (`control_mode.rs`), and the pane hears a terminal's real background.
+//! On tmux 3.5+ Hive supplies per-pane answers through
+//! `refresh-client -r`, which override any client while a control client
+//! exists on the server, and which also cover the time before any terminal
+//! attached.
 //!
 //! Explicit `HIVE_VIEW_THEME` / `view.theme` wins. Auto uses the first
 //! non-control client in this session with a known `client_theme`, then the
