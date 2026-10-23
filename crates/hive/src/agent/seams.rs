@@ -13,7 +13,7 @@ use anyhow::bail;
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions;
 use crate::adapters::codex_app_server::TurnStartFailure;
-use crate::adapters::grok_leader::{Confirmation, PromptId, RecordBinding};
+use crate::adapters::grok_leader::{Confirmation, RecordBinding};
 
 use super::support::{wait_codex_attached, wait_grok_session_ready, AGENT_STARTUP_TIMEOUT};
 #[cfg(test)]
@@ -631,19 +631,17 @@ pub(super) fn hooked_codex_send_to_thread(thread_id: &str, text: &str) -> Option
 pub(super) fn hooked_codex_dispatch_to_pane(
     pane_id: &str,
     text: &str,
-) -> Result<(String, String), TurnStartFailure> {
+) -> Result<(), TurnStartFailure> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
         h.codex_sent.push((pane_id.to_string(), text.to_string()));
         h.codex_dispatch.clone()
     }) {
-        return v
-            .unwrap_or_else(|| {
-                Err(TurnStartFailure::Refused(
-                    "codex dispatch not hooked".into(),
-                ))
-            })
-            .map(|turn_id| (format!("thread-of-{pane_id}"), turn_id));
+        return v.unwrap_or_else(|| {
+            Err(TurnStartFailure::Refused(
+                "codex dispatch not hooked".into(),
+            ))
+        });
     }
     crate::adapters::codex_app_server::dispatch_to_pane(pane_id, text)
 }
@@ -651,7 +649,7 @@ pub(super) fn hooked_codex_dispatch_to_pane(
 pub(super) fn hooked_codex_dispatch_to_thread(
     thread_id: &str,
     text: &str,
-) -> Result<String, TurnStartFailure> {
+) -> Result<(), TurnStartFailure> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
         h.codex_sent_thread
@@ -785,10 +783,7 @@ pub(super) fn hooked_grok_send_to_key(key: &str, text: &str) -> Option<&'static 
     crate::adapters::grok_leader::send_to_key(key, text)
 }
 
-pub(super) fn hooked_grok_dispatch(
-    confirmation: &Confirmation,
-    text: &str,
-) -> Result<PromptId, String> {
+pub(super) fn hooked_grok_dispatch(confirmation: &Confirmation, text: &str) -> Result<(), String> {
     #[cfg(test)]
     if let Some(v) = testhook::with(|h| {
         h.grok_sent_key

@@ -39,5 +39,4 @@ pub mod transcript_view;
 pub mod uninstall;
 pub mod update;
 pub mod view_theme;
-pub mod workflow;
 pub mod worktree;

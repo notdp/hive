@@ -8,12 +8,9 @@ use crate::adapters::base::GateResult;
 use crate::adapters::claude_bg::{EngineSession, PaneJob};
 use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::claude_view::PaneView;
-use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome, ThreadRuntime, TurnResult};
-use crate::adapters::grok_leader::PromptId;
-use crate::adapters::grok_leader::{
-    Confirmation, PromptResult, Revival, ReviveFailure, SessionRecord, SessionRuntime,
-};
-use crate::agent::{Agent, DeliveryError, TurnHandle};
+use crate::adapters::codex_app_server::{AuthVerdict, DaemonOutcome, ThreadRuntime};
+use crate::adapters::grok_leader::{Confirmation, ReviveFailure, SessionRecord, SessionRuntime};
+use crate::agent::{Agent, DeliveryError};
 use crate::team::Team;
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
@@ -113,8 +110,6 @@ pub struct Hook {
     // codex_app_server
     pub cas_runtime_for_pane: Option<S1<Option<ThreadRuntime>>>,
     pub cas_runtime_for_thread: Option<S1<Option<ThreadRuntime>>>,
-    pub cas_turn_open_for_thread: Option<S1<Option<bool>>>,
-    pub cas_turn_result: Option<S1<Option<TurnResult>>>,
     pub cas_session_id_for_pane: Option<S1<Option<String>>>,
     pub cas_shared_socket_path: Option<F0<PathBuf>>,
     pub cas_daemon_alive: Option<F0<bool>>,
@@ -132,9 +127,6 @@ pub struct Hook {
     // grok_leader
     pub gl_runtime_for_pane: Option<S1<Option<SessionRuntime>>>,
     pub gl_runtime_for_key: Option<S1<Option<SessionRuntime>>>,
-    pub gl_turn_open_for_key: Option<S1<Option<Option<bool>>>>,
-    #[allow(clippy::type_complexity)]
-    pub gl_prompt_result: Option<Arc<dyn Fn(&str, PromptId) -> Option<PromptResult> + Send + Sync>>,
     pub gl_session_id_for_pane: Option<S1<Option<String>>>,
     pub gl_read_session_key: Option<S1<Option<SessionRecord>>>,
     pub gl_list_daemon_keys: Option<F0<Vec<String>>>,
@@ -143,7 +135,7 @@ pub struct Hook {
     pub gl_pool_drop_key: Option<S1<()>>,
     pub gl_connect_pane: Option<S1<bool>>,
     pub gl_retained: Option<S1<bool>>,
-    pub gl_revive_key: Option<S1<Result<Revival, ReviveFailure>>>,
+    pub gl_revive_key: Option<S1<Result<Confirmation, ReviveFailure>>>,
     // notify / plugin
     #[allow(clippy::type_complexity)]
     pub notify_debug_emit: Option<Arc<dyn Fn(&str, &str, &[(&str, Value)]) + Send + Sync>>,
@@ -160,7 +152,7 @@ pub struct Hook {
     #[allow(clippy::type_complexity)]
     pub agent_dispatch_turn: Option<
         Arc<
-            dyn Fn(&Agent, &str, Option<&Confirmation>) -> Result<TurnHandle, DeliveryError>
+            dyn Fn(&Agent, &str, Option<&Confirmation>) -> Result<Option<String>, DeliveryError>
                 + Send
                 + Sync,
         >,

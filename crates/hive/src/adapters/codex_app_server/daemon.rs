@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use super::auth_guard::{
     clear_auth_baseline, daemon_auth_stale_locked, disk_account_id, write_auth_baseline,
 };
-use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime, TurnResult, TurnStartFailure};
+use super::client::{CodexDaemonClient, DaemonClient, ThreadRuntime, TurnStartFailure};
 use super::records::{
     codex_home, shared_lock_path, shared_pidfile_path, shared_socket_path, thread_id_for_pane,
 };
@@ -582,29 +582,21 @@ pub fn send_to_thread(thread_id: &str, text: &str) -> Option<&'static str> {
     }
 }
 
-/// A workflow node's task as a tracked turn on the pane's recorded thread:
-/// the turn id comes back so `turn_result` can read the turn's outcome.
-/// `Refused` covers no recorded thread and no daemon as well.
-pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(String, String), TurnStartFailure> {
+/// A send as one turn on the pane's recorded thread, whose failure says
+/// whether the turn may have been taken all the same. `Refused` covers no
+/// recorded thread and no daemon as well.
+pub fn dispatch_to_pane(pane: &str, text: &str) -> Result<(), TurnStartFailure> {
     let tid = thread_id_for_pane(pane).ok_or_else(|| {
         TurnStartFailure::Refused(format!("pane {pane} has no recorded codex thread"))
     })?;
-    let turn_id = dispatch_to_thread(&tid, text)?;
-    Ok((tid, turn_id))
+    dispatch_to_thread(&tid, text)
 }
 
 /// `dispatch_to_pane` keyed by the thread.
-pub fn dispatch_to_thread(thread_id: &str, text: &str) -> Result<String, TurnStartFailure> {
+pub fn dispatch_to_thread(thread_id: &str, text: &str) -> Result<(), TurnStartFailure> {
     let client = shared_client()
         .ok_or_else(|| TurnStartFailure::Refused("codex daemon unreachable".to_string()))?;
-    client.turn_start_tracked(thread_id, text)
-}
-
-/// The outcome of a turn `dispatch_to_thread` started, from the shared
-/// client that started it; None when no client, or one that never saw
-/// the turn (reconnected since).
-pub fn turn_result(turn_id: &str) -> Option<TurnResult> {
-    shared_client()?.turn_result(turn_id)
+    client.turn_start_checked(thread_id, text)
 }
 
 /// Abort the running turn on the pane's recorded thread.

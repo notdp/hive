@@ -1,15 +1,12 @@
 """The acceptance oracle's one transcript read: how many input records of
-the member's own transcript carry the dispatch id.
+the member's own transcript carry the task's marker (its artifact path).
 
-A node's result is the engine's own end of the turn, read by the hived
-that started it, so the transcript is not where the result comes from. What it still
-proves is delivery causality: the dispatch envelope landed in the member's
-conversation exactly once — not zero times (the hived answered ok without
-injecting), not twice (a retry after a lost answer). These readers resolve
-a member's engine session from its registry row (cli, sessionId, cwd),
-locate the transcript the way the engines lay files out, and count the
-input records carrying the marker. Nothing here takes the node's own
-answer as a key to find anything.
+What it proves is delivery causality: the task envelope landed in the
+member's conversation exactly once — not zero times (the hived answered ok
+without injecting), not twice (a retry after a lost answer). These readers
+resolve a member's engine session from its registry row (cli, sessionId,
+cwd), locate the transcript the way the engines lay files out, and count
+the input records carrying the marker.
 
 Identity: a codex or grok registry row holds the engine's own session id.
 A claude row holds the bg job id (8 hex, the leading block of the session
@@ -40,7 +37,6 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
-DISPATCH_ID_RE = re.compile(r"^nd-[0-9a-f]{12}$")
 # A claude bg job id: the session uuid's leading 8 hex, with the same band
 # the runner accepts (`claude_bg::looks_like_job_id`).
 JOB_ID_RE = re.compile(r"^[0-9a-f]{6,12}$")

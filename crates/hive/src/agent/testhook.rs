@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use crate::adapters::claude_bg::{EngineSession, KeyResult};
 use crate::adapters::claude_sessions::ClaudeSession;
 use crate::adapters::codex_app_server::TurnStartFailure;
-use crate::adapters::grok_leader::{PromptId, RecordBinding};
+use crate::adapters::grok_leader::RecordBinding;
 use crate::agent::Agent;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,8 +148,8 @@ pub struct Hook {
     pub start_member_thread: Option<String>,
     pub codex_send_to_pane: Option<&'static str>,
     pub codex_send_to_thread: Option<&'static str>,
-    /// `Ok(turn id)` or the failure `dispatch_to_pane` / `dispatch_to_thread` answer.
-    pub codex_dispatch: Option<Result<String, TurnStartFailure>>,
+    /// What `dispatch_to_pane` / `dispatch_to_thread` answer.
+    pub codex_dispatch: Option<Result<(), TurnStartFailure>>,
     pub codex_interrupt_pane: Option<&'static str>,
     pub codex_interrupt_thread: Option<&'static str>,
     pub codex_daemon_alive: Option<bool>,
@@ -158,8 +158,8 @@ pub struct Hook {
     pub grok_create_member_session: bool,
     pub grok_send_to_pane: Option<&'static str>,
     pub grok_send_to_key: Option<&'static str>,
-    /// `Ok(PromptId)` or the error `dispatch_confirmed` answers.
-    pub grok_dispatch: Option<Result<PromptId, String>>,
+    /// What `dispatch_confirmed` answers.
+    pub grok_dispatch: Option<Result<(), String>>,
     pub grok_interrupt_pane: Option<&'static str>,
     pub grok_interrupt_key: Option<&'static str>,
     pub grok_probe_socket: Option<bool>,

@@ -246,7 +246,7 @@ pub(crate) fn reexec_hived(
     busy_monitor: Option<&Arc<dyn OutputMonitor>>,
     on_reexec: Option<&dyn Fn()>,
 ) -> Option<Box<dyn HivedServerApi>> {
-    if !drain_ready(workspace) {
+    if !close_admission() {
         reopen_admission();
         return None;
     }

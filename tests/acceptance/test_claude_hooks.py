@@ -46,7 +46,7 @@ def _hook_rows(notify: Path, member: str) -> list[dict]:
 
 
 def _env(rig) -> dict[str, str]:
-    """The same parentage as the rig's nodes: no $TMUX, the rig pane's own
+    """The same parentage as the rig's spawns: no $TMUX, the rig pane's own
     identity pinned, so every verb is issued by the team's orch."""
     env = dict(os.environ)
     env.pop("TMUX", None)

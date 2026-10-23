@@ -80,7 +80,7 @@ fn sweep_team_grok_daemons(team: &str) {
 ///
 /// With `down`, every member is retired before the entry goes and the
 /// team's owned tmux session (named after the team) is killed after it —
-/// the teardown of a workflow run.
+/// the teardown of a team `hive create` built outside tmux.
 /// Every session target is exact (`=<name>`): once the team window has
 /// closed, and with it the session, a bare `-t <name>` would prefix-match
 /// a stranger's `<name>-x` session and kill that instead.

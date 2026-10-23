@@ -16,12 +16,11 @@
 //! what it has closed first: an expired team gets a *close intent* on its
 //! entry (`gc.closing`, under the store lock), which every hive writer
 //! refuses to admit work into (`Team::load`, the registry's write lane);
-//! its hived is asked to stop gracefully (a pending node result declines);
-//! the team is classified once more; and the archive commits under the
+//! its hived is asked to stop gracefully (a request still in flight
+//! declines); the team is classified once more; and the archive commits under the
 //! lock only if the entry is still the instance the intent was written on.
 //! tmux not answering, a ledger call failing, a hived that listens and
-//! stays silent, an unreadable or unfinished node record — each blocks the
-//! team until it clears. Every manifest transition (quarantine, keep,
+//! stays silent — each blocks the team until it clears. Every manifest transition (quarantine, keep,
 //! restore, purge) re-reads the manifest under the same lock before it
 //! moves anything. Manifests and entries are written by atomic rename
 //! without fsync, like every registry write: a power cut can lose the last
@@ -62,7 +61,7 @@ const SCHEMA: u64 = 1;
 
 /// The verbs whose success is a use of the team and a chance to collect.
 const USE_VERBS: &[&str] = &[
-    "create", "join", "spawn", "send", "kill", "delete", "attach", "workflow", "fork",
+    "create", "join", "spawn", "send", "kill", "delete", "attach", "fork",
 ];
 
 /// The wall clock, for the callers that archive on their own account.
@@ -897,47 +896,6 @@ fn displayed_teams() -> Result<HashSet<String>, &'static str> {
         .collect())
 }
 
-/// A node operation the hived journaled and never brought to a terminal
-/// state (`run/operations/<incarnation>/<dispatchId>.json`): Ok(Some) with
-/// its id, Err when a record or the journal cannot be read — which is not
-/// "no obligation".
-fn unfinished_operation(workspace: &str) -> Result<Option<String>, String> {
-    let root = Path::new(workspace).join("run").join("operations");
-    let incarnations = match fs::read_dir(&root) {
-        Ok(read) => read,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("operations journal unreadable: {e}")),
-    };
-    for incarnation in incarnations {
-        let incarnation = incarnation.map_err(|e| format!("operations journal unreadable: {e}"))?;
-        if !incarnation.path().is_dir() {
-            continue;
-        }
-        let records = fs::read_dir(incarnation.path())
-            .map_err(|e| format!("operations journal unreadable: {e}"))?;
-        for record in records {
-            let record = record.map_err(|e| format!("operations journal unreadable: {e}"))?;
-            let name = record.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || !name.ends_with(".json") {
-                continue; // a writer's temp file, not a record
-            }
-            let text = fs::read_to_string(record.path())
-                .map_err(|e| format!("operation record {name} unreadable: {e}"))?;
-            let doc: Value = serde_json::from_str(&text)
-                .map_err(|_| format!("operation record {name} is corrupt"))?;
-            if doc["state"] != "terminal" {
-                return Ok(Some(
-                    doc["dispatchId"]
-                        .as_str()
-                        .unwrap_or(name.trim_end_matches(".json"))
-                        .to_string(),
-                ));
-            }
-        }
-    }
-    Ok(None)
-}
-
 /// A test's stand-in for the hived's `team-runtime` answer.
 #[cfg(test)]
 pub(crate) fn fake_hived_runtime() -> &'static Mutex<Option<Map<String, Value>>> {
@@ -1075,11 +1033,6 @@ impl Observations {
                     }
                 }
             }
-            Ok(None) => {}
-        }
-        match unfinished_operation(&workspace) {
-            Err(reason) => return Activity::Unknown(reason),
-            Ok(Some(id)) => return Activity::Unknown(format!("unfinished operation {id}")),
             Ok(None) => {}
         }
         for member in member_rows(entry) {
@@ -1996,35 +1949,6 @@ mod tests {
         assert_eq!(state_of(&report, "honey"), "blocked");
         assert_eq!(cold_since(&crate::registry::load("honey").unwrap()), None);
         drop(silent);
-
-        // an unfinished node operation blocks even a cold team; so does a
-        // record the collector cannot read
-        let _empty = ledger(Some(Vec::new()));
-        let ops = crate::registry::team_dir("honey")
-            .unwrap()
-            .join("run")
-            .join("operations")
-            .join("100");
-        fs::create_dir_all(&ops).unwrap();
-        fs::write(
-            ops.join("nd-1.json"),
-            r#"{"dispatchId":"nd-1","state":"running"}"#,
-        )
-        .unwrap();
-        set_cold_since("honey", Some(T0 - 40.0 * DAY)).unwrap();
-        let report = run_at(Mode::Manual, T0 + 40.0 * DAY).unwrap();
-        assert_eq!(state_of(&report, "honey"), "blocked");
-        assert!(crate::registry::load("honey").is_some());
-        fs::write(ops.join("nd-1.json"), "{").unwrap();
-        set_cold_since("honey", Some(T0 - 40.0 * DAY)).unwrap();
-        let report = run_at(Mode::Manual, T0 + 40.0 * DAY).unwrap();
-        assert_eq!(state_of(&report, "honey"), "blocked", "{:?}", report.teams);
-        assert!(crate::registry::load("honey").is_some());
-        // a writer's temp file beside the records is not a record
-        fs::remove_file(ops.join("nd-1.json")).unwrap();
-        fs::write(ops.join(".nd-2.json.tmp"), "{").unwrap();
-        let report = run_at(Mode::Manual, T0 + 41.0 * DAY).unwrap();
-        assert_eq!(state_of(&report, "honey"), "cooling", "{:?}", report.teams);
     }
 
     #[test]

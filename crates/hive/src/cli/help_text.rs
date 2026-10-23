@@ -42,8 +42,6 @@ Workflow:
   ls        List hive teams from the registry, with their display state.
   pr        Pin a PR number on the team window's status bar.
   view      Read-only viewer for a Claude session transcript (follows live).
-  workflow  One task on one live codex or grok member, one turn, its result
-            read off the engine.
   worktree  Per-feature worktree pool: start a feature, finish it, inspect
             state.
 
@@ -273,17 +271,16 @@ Options:
   is stopped. The two exclude each other.
 
   The stop is forced: unlike the graceful stop an upgrade or `hive gc`
-  asks for, it is not deferred by a workflow node whose result has not
-  been read — every unresolved node is recorded interrupted before the
-  desk exits. The display's session keeps this hive home's wake hooks
-  only while another team of this home still shows a window there.
+  asks for, it is not deferred by a request still in flight — the desk
+  exits after a short wait for it. The display's session keeps this hive
+  home's wake hooks only while another team of this home still shows a
+  window there.
 
-  A member mid-turn refuses the delete: let it finish, or --down. --down is
-  the teardown of a workflow run (`hive create RUN`, `hive workflow run`
-  nodes, `hive delete RUN --down`): every member is retired first, and the
-  team's own tmux session — the one `hive create` built outside tmux, named
-  after the team — is killed after, by its exact name, never a prefix
-  match. Refuses when neither a team nor such a session exists.
+  A member mid-turn refuses the delete: let it finish, or --down. With
+  --down every member is retired first, and the team's own tmux session —
+  the one `hive create` built outside tmux, named after the team — is
+  killed after, by its exact name, never a prefix match. Refuses when
+  neither a team nor such a session exists.
 
 Options:
   -w, --workspace TEXT  Workspace path to remove (default: the entry's)
@@ -305,13 +302,13 @@ Options:
   whole to $HIVE_HOME/trash/<archive-id>/payload/ and its name is free.
   An archive not kept is purged 30 days later. `hive delete` is the same
   archive without the wait. The collector runs by itself at the tail of a
-  mutating verb (create, join, spawn, send, kill, delete, attach, workflow,
-  fork) at most once a day per hive home, within a 20s budget; it only
-  archives what it has positively seen idle — tmux not answering, an
-  unreadable claude job ledger, a hived that listens without answering, an
-  unreadable or unfinished node record, an engine it cannot ask, each
-  block a team — and only after closing the team (writers are refused for
-  a moment), asking its hived to stop gracefully and looking again.
+  mutating verb (create, join, spawn, send, kill, delete, attach, fork) at
+  most once a day per hive home, within a 20s budget; it only archives
+  what it has positively seen idle — tmux not answering, an unreadable
+  claude job ledger, a hived that listens without answering, an engine it
+  cannot ask, each block a team — and only after closing the team
+  (writers are refused for a moment), asking its hived to stop gracefully
+  and looking again.
 
 Options:
   -h, --help  Show this message and exit.
@@ -718,9 +715,6 @@ Options:
   outside any team is `ccd.<name or title or pid>` (how a member reaches out;
   a session without hive answers with its own SendMessage, which lands here
   as a native peer message).
-  An envelope with no `from=` is a `hive workflow run` task: its result is
-  the last thing you say in that turn, read off your engine — nothing to
-  send back.
 
   Keep `body` to a short summary and put details in `--artifact`; a body
   longer than 500 chars, with 3+ lines, fenced code, or markdown heading/list
@@ -888,7 +882,7 @@ Options:
   image until it picks the new bytes up, which happens one of two ways and
   the wall clock does not decide which: the desk itself re-execs in place
   (same pid) at one of its 5s checks, once two of them agree on the new
-  binary and no request or unfinished workflow node is outstanding; or a
+  binary and no request is outstanding; or a
   hive verb gets there first, finds a build that is not its own on the
   socket and replaces that generation with a new pid. Either way the
   in-memory state — engine clients, idle clock, idle-notify — starts over.
@@ -937,72 +931,6 @@ Options:
 
 Options:
   --help  Show this message and exit.
-"#
-        }
-        ["workflow"] => {
-            r#"Usage: hive workflow [OPTIONS] COMMAND [ARGS]...
-
-  One task on one live codex or grok member, one turn, its result read off
-  the engine.
-
-  `run` is the seam an external orchestrator — Claude Code's Workflow tool
-  through the `hive-node` agent the hive plugin ships — runs in the
-  background: a workflow run is `hive create RUN`, one `hive workflow run`
-  per node, `hive delete RUN --down`. Every node is a visible pane on the
-  team window. A node runs codex or grok; a claude node is Claude Code's
-  own subagent.
-
-Options:
-  -h, --help  Show this message and exit.
-
-Commands:
-  run  Place the task on stdin onto member NAME and block until its turn ends.
-"#
-        }
-        ["workflow", "run"] => {
-            r#"Usage: hive workflow run [OPTIONS] --name <NAME> --cli <CLI> < task.md
-
-  Place the task on stdin onto member NAME and block until its turn ends.
-
-  Spawns the member (or reuses one of that name that is still alive), waits
-  until it is between turns, dispatches the task as a `<HIVE>` envelope with
-  no sender as one turn, and waits for the engine's own word that the turn
-  ended: codex `turn/completed`, grok the `session/prompt` response. The
-  result is the last thing the member said in that turn — the task is the
-  turn, and a member that stops to ask has ended it with that question.
-  Nothing is read from a transcript, and the member runs nothing to return.
-  The wait has no timeout. Progress goes to stderr; stdout is one JSON
-  object: {"status":…,"name":…,"pane":…,"reused":…,"dispatchId":"nd-…"}
-  plus "body" (the member's text) when the turn ended, and "reason" for
-  every status but completed.
-
-  status: completed (codex completed, grok end_turn) | interrupted (the
-  turn was cut short: codex interrupted, grok cancelled) | failed (the
-  engine ended the turn on an error; reason carries its word) | no_result
-  (the turn is not running and nothing holds its result: the hived was
-  restarted since the dispatch) | unknown (120 result polls went
-  unanswered; the record still owns the member) | member_gone (the
-  member died before its turn ended) | member_busy (a pending or unknown
-  dispatch owns the member, another runner holds its lock, or its turn
-  stayed open for 600s). Every status exits 0; exit 1 with the error on
-  stderr only when no dispatch happened: bad team, a claude member, spawn
-  or ready failure, the dispatch refused three times. A spawn made here
-  is retired when the run ends before the dispatch.
-  A same-name retry checks the old dispatch once: ended results are saved;
-  unknown results with a closed turn permit reuse. While the result or
-  turn remains unresolved it returns member_busy with the old dispatchId.
-
-  The run's record is `<workspace>/run/workflow/<NAME>.json` (dispatch id,
-  status, body/reason); `hive kill` of the member removes it. The task
-  text lands in `<workspace>/artifacts/tasks/<NAME>-<dispatchId>.md`, the
-  artifact of the envelope.
-
-Options:
-  --name <NAME>    Member name (stable; a live member of that name is reused)
-  --cli <CLI>      codex | grok (required for a spawn; a reused member keeps its own)
-  --model <MODEL>  Model for the member's CLI
-  --team <TEAM>    Team (default: the team in scope)
-  -h, --help       Show this message and exit.
 "#
         }
         ["worktree"] => {

@@ -246,14 +246,6 @@ pub fn ensure_hived(
             return Ok(None);
         }
         match stopped {
-            StopOutcome::Deferred => {
-                keep_old_generation(
-                    response.as_ref(),
-                    team,
-                    "it holds node operations and keeps serving until they finish",
-                )?;
-                return Ok(None);
-            }
             StopOutcome::TimedOut if response.is_some() => {
                 keep_old_generation(
                     response.as_ref(),
@@ -681,7 +673,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     FORCE_SHUTDOWN.store(false, Ordering::SeqCst);
     reopen_admission();
     let hived_started_at = now_iso();
-    let mut retirement_reason = "shutdown";
     let mut idle_notify: HashMap<String, IdleRecord> = HashMap::new();
     let mut notify_debug_state = NotifyDebugState::default();
     let mut code_reexec_state = ReexecState::default();
@@ -784,7 +775,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     // for all of them.
     loop {
         if !Path::new(workspace).is_dir() {
-            retirement_reason = "workspace removed";
             break;
         }
 
@@ -803,7 +793,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         if now - last_owner_check >= HIVED_OWNER_CHECK_SECONDS {
             last_owner_check = now;
             if let Some(foreign_pid) = foreign_owner_pid(workspace, &owner_token) {
-                retirement_reason = "hived replaced";
                 hooked_notify_debug_emit(
                     workspace,
                     "hived.retire_orphan",
@@ -820,7 +809,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         }
 
         let stale_hash = hooked_stale_disk_build_hash(&mut code_reexec_state, now);
-        flush_operations(workspace);
         if let Some(stale_hash) = stale_hash {
             // The next generation is told where the display was last
             // seen, never where this one was born.
@@ -917,7 +905,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
             // "missing": never retire on a read that might be wrong.
             if let Some(path) = crate::registry::entry_path(team) {
                 if !path.is_file() && track.location.is_none() {
-                    retirement_reason = "team removed";
                     break;
                 }
             }
@@ -947,7 +934,7 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
         });
 
         if !hooked_wait_tick(IDLE_NOTIFY_TICK_SECONDS) {
-            if finish_shutdown(workspace, Duration::from_secs(5)) {
+            if finish_shutdown(Duration::from_secs(5)) {
                 break;
             }
             continue;
@@ -1005,9 +992,6 @@ pub(crate) fn hived_loop(workspace: &str, team: &str, tmux_window: &str, tmux_wi
     close_admission();
     server.close();
     close_endpoint();
-    if !SHUTDOWN.load(Ordering::SeqCst) && Path::new(workspace).is_dir() {
-        interrupt_operations(workspace, retirement_reason);
-    }
     cleanup_socket_if_owner(workspace, &owner_token);
     if let Some(monitor) = track.monitor.as_ref() {
         monitor.stop();
@@ -1026,13 +1010,9 @@ fn now_epoch_seconds() -> i64 {
         .unwrap_or_default()
 }
 
-pub(super) fn drain_ready(workspace: &str) -> bool {
-    close_admission() && flush_operations(workspace)
-}
-
-/// Await only already accepted request handlers. A late node dispatch or a
-/// slow handler cancels graceful retirement; forced deletion has a deadline.
-pub(super) fn finish_shutdown(workspace: &str, timeout: Duration) -> bool {
+/// Await only already accepted request handlers. A slow handler cancels
+/// graceful retirement; forced deletion has a deadline.
+pub(super) fn finish_shutdown(timeout: Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     while requests_in_flight() && std::time::Instant::now() < deadline {
         // The accept worker refuses arrivals meanwhile; only the leases
@@ -1040,10 +1020,9 @@ pub(super) fn finish_shutdown(workspace: &str, timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
     if FORCE_SHUTDOWN.load(Ordering::SeqCst) {
-        interrupt_operations(workspace, "forced shutdown");
         return true;
     }
-    if requests_in_flight() || pending_operations(workspace) > 0 {
+    if requests_in_flight() {
         SHUTDOWN.store(false, Ordering::SeqCst);
         reopen_admission();
         return false;
@@ -1058,7 +1037,7 @@ pub fn stop_hived(workspace: &str) {
 }
 
 /// Ask the hived to retire gracefully: true when it is gone, false when it
-/// declined (a node result pending) or did not leave in time.
+/// did not leave in time.
 pub(crate) fn stop_hived_graceful(workspace: &str) -> bool {
     stop_hived_generation(workspace, None, false) == StopOutcome::Stopped
 }
@@ -1066,7 +1045,6 @@ pub(crate) fn stop_hived_graceful(workspace: &str) -> bool {
 #[derive(PartialEq, Eq)]
 enum StopOutcome {
     Stopped,
-    Deferred,
     TimedOut,
 }
 
@@ -1077,9 +1055,6 @@ fn stop_hived_generation(workspace: &str, expected: Option<Value>, force: bool) 
         request.insert("expectedHived".into(), expected);
     }
     let response = request_hived(workspace, &request, SOCKET_READY_TIMEOUT);
-    if response.as_ref().and_then(|r| r.get("draining")) == Some(&Value::Bool(true)) {
-        return StopOutcome::Deferred;
-    }
     if response.as_ref().and_then(|r| r.get("generationChanged")) == Some(&Value::Bool(true)) {
         return StopOutcome::Stopped;
     }

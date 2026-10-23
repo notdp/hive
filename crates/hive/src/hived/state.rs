@@ -161,7 +161,7 @@ impl RequestLease {
 pub(super) fn read_only_request(action: &str) -> bool {
     matches!(
         action,
-        "ping" | "doctor" | "team-runtime" | "runtime-snapshot" | "node-result" | "turn-open"
+        "ping" | "doctor" | "team-runtime" | "runtime-snapshot"
     )
 }
 
@@ -169,10 +169,7 @@ pub(super) fn read_only_request(action: &str) -> bool {
 /// them only after the hived admitted the request on the same connection,
 /// and the hived refuses them without that preflight.
 pub(crate) fn admission_required(action: &str) -> bool {
-    matches!(
-        action,
-        "send" | "node-dispatch" | "connect-codex" | "connect-grok" | "revive"
-    )
+    matches!(action, "send" | "connect-codex" | "connect-grok")
 }
 
 impl Drop for RequestLease {

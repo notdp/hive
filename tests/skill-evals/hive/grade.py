@@ -125,9 +125,6 @@ def check(rule, calls, final, run):
         return actual == rule["value"], f"{path}: actual={actual!r}"
     if kind == "final_fenced_command":
         return final_fenced_command(final, rule["command"])
-    if kind == "final_contains":
-        value = rule["value"].replace("{{RUN}}", str(run))
-        return value in final, f"final contains {value!r}: {value in final}"
     if kind == "no_artifact":
         return bool(selected) and all(parse_send(c['argv'])['artifact'] is None for c in selected), f"matching calls={len(selected)}"
     if kind == 'delivery_contains':

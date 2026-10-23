@@ -61,7 +61,6 @@ def prepare(name, run, skill, engine='claude'):
     control = fixture_path(run)
     control.parent.mkdir(parents=True, exist_ok=False)
     control.write_text(json.dumps(fixture, ensure_ascii=False, indent=2) + '\n')
-    shutil.copy2(ROOT / 'support' / 'checkpoint.py', control.parent / 'checkpoint.py')
     shutil.copy2(ROOT / 'support' / 'help.json', control.parent / 'help.json')
     for roster in [fixture['team'], *fixture.get('teams', {}).values()]:
         Path(roster['runtimeWorkspace'], 'artifacts/tasks').mkdir(parents=True, exist_ok=True)

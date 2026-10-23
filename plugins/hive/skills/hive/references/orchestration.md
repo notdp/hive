@@ -66,44 +66,6 @@ hive spawn review --cli codex --task <workspace>/artifacts/tasks/review.md
 
 **⑤ 集成验收**:所有任务 DONE 后你自己拉集成分支、跑测试、核验收标准,过了才向 human 汇报。终验不外包。
 
-**⑥ hive 节点进 Claude Code Workflow**:用 Workflow 工具编排时,节点可以是活的 hive 成员(可见 pane,human 可介入),Workflow 保留自己的进度树和 journal;循环、fan-out、barrier 由 Workflow 脚本表达,hive 只提供节点。
-
-开工:编排的 Claude session 里 `hive create <run>`,你以 `<run>.orch` 入册,session=team=run 名。hclaude 自动进入团窗口;桌面 Claude 在团窗口只有只读镜像,节点由 runner 自己 spawn,建团时窗口里还没有成员 pane。要让 human 看全场,先 `hive spawn <首节点名> -t <run> --cli codex|grok` 造出第一个节点成员(同名节点复用活成员),按 SKILL.md 入口一节在 Terminal 面板跑一次 `hive attach <run>`,再起 Workflow。
-
-节点用一条阻塞命令运行:`hive workflow run --team <run> --name <member> --cli codex|grok [--model]`,task 从 stdin 进,结果一行 JSON 从 stdout 出。
-
-成员收到的是没有 `from` 的信封(`<HIVE to=<run>.<member> artifact=<workspace>/artifacts/tasks/<member>-<nd-…>.md>`,首行 `task nd-…`),不需要回信,也不跑任何返回命令。`body` 是成员这一轮最后说的那段话,中途提问就以那个问题结束。runner 只等引擎自己报的这一轮结束:codex `turn/completed`,grok `session/prompt` 的响应。所以 task 要写明最后那段话该有什么(例如 commit sha、报告路径、verdict),不写「完成后回报」。
-
-节点只能用 codex 或 grok;hive 不提供 claude 节点。claude 节点用 Workflow 自己的子代理(`agent(...)` 不带 `agentType`)。
-
-JSON 字段:`status`、`name`、`pane`、`reused`、`dispatchId`(`nd-` 开头);这一轮结束了就有 `body`(可能为空串),`completed` 以外都有 `reason`。`status` 取值:
-
-- `completed`:引擎正常收口(codex `completed`,grok `end_turn`)。
-- `interrupted`:被打断(codex `interrupted`,grok `cancelled`),body 是打断前说到的。
-- `failed`:引擎以错误收口(codex `failed`,grok 出错响应、`max_tokens`、`refusal`…),`reason` 带引擎原话。
-- `no_result`:这一轮没在跑,也没人拿着它的结果(例如 hived 在派发后重启过);任务可能做了也可能没做,重派前先核副作用。
-- `unknown`:120 次结果轮询都没应答,等待者退出但执行未决;记录仍占用成员,同名重跑先按旧 dispatchId 问 hived 裁决。
-- `member_gone`:等待期间成员死了。
-- `member_busy`:没派发——上一跑 pending/unknown 仍未决且成员活着、名字被别的 runner 锁着、或成员 600 次轮询还在一轮里(runner 不往进行中的一轮里塞任务)。
-
-非 `completed` 也是节点返回值。由脚本决定重派、改任务还是升级 human,代理不重试、不解读。
-
-exit 1 = 任务没派发(team 不对、指定了 claude、spawn/ready 失败、hived 明确拒收三次),可直接重跑;`member_busy` 也是没派发,但 exit 0 + JSON;派出去的任务一定 exit 0 + 一行 JSON,turn 本身没有超时。
-
-派发请求已发出但应答没回来时,runner 不重发,因为任务可能已注入。记录留在 pending,照常向 hived 读结果。同名重跑先查旧 dispatchId:已结束的先存结果;turn 明确关闭的视为陈旧;仍在跑或问不到的返回 `member_busy`。记录在 `<workspace>/run/workflow/<member>.json`,`hive kill` 成员会删掉它;`no_result` 不说明任务有没有产生副作用。
-
-插件的 `hive-node` 代理把命令挂后台跑,循环等 exit 文件,完成后原样交回 JSON。单次 Bash 有十分钟上限,所以反复调用同一条等待命令,不能停在「待会再看」。prompt 第一行写命令,其余写 task:
-
-```js
-const result = await agent(`hive workflow run --team ${run} --name impl-auth --cli codex
-
-实现 auth 模块;交付 commit;最后一段话写 commit sha 和改动说明文件的路径。`, { agentType: 'hive-node', label: '⬡ impl-auth 「codex」', schema: ... })
-```
-
-代理定义里已固定 `model: haiku`。Workflow 面板 Model 列显示的是代理的模型,成员真身的 CLI/模型只能靠 label 体现:约定 `⬡ <name> 「<cli>」`,显式指定了模型时写进容器,如 `⬡ impl-auth 「codex · gpt-5.4」`。agent 定义是 session 启动时注册的,本 session 中途才装插件的话,把同样四步(mktemp 落任务文件、后台起命令、循环等 exit 文件、原样返回 JSON)内联进 prompt 也一样跑。
-
-成员生命周期归你:workflow 结束后成员还活着,同名节点再跑会复用活成员(带上下文);不要了 `hive kill <name>`。跑完 `hive delete <run> --down`(kill 全部成员 + 删 team + 杀 session),或留团供追问、拆时再清。
-
 ## git / 集成纪律
 
 单任务改动按 references/worktree.md 走。多个写码任务并行时,先建集成分支,**再 spawn 写码成员**——成员的 `hive worktree start` 才会 base 到它:

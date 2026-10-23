@@ -116,7 +116,7 @@ fn test_spawn_rejects_outside_tmux_without_a_target() {
 
 #[test]
 fn test_spawn_outside_tmux_with_target_pane_proceeds() {
-    // An external orchestrator (workflow proxy, desktop session) has no
+    // A caller outside tmux (a desktop session) has no
     // $TMUX and no member env markers, but a registry-known target pane
     // addresses the tmux server fine.
     let _guard = setup();
@@ -2317,13 +2317,13 @@ fn test_uuid4_shape() {
     assert!(matches!(sid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
 }
 
-/// A grok member's tracked turn goes out only on the identity a revive
-/// confirmed: with none, the dispatch is refused before any transport is
-/// asked; with one, the pool is asked on it and the handle rides its key
-/// — for a pane member and a headless one alike.
+/// A grok member's turn goes out only on the identity a revive confirmed:
+/// with none, the dispatch is refused before any transport is asked; with
+/// one, the pool is asked on its key — for a pane member and a headless
+/// one alike.
 #[test]
 fn test_grok_dispatch_needs_a_revive_confirmation_and_rides_its_key() {
-    use crate::adapters::grok_leader::{Confirmation, PromptId, RecordBinding};
+    use crate::adapters::grok_leader::{Confirmation, RecordBinding};
     let confirmation = Confirmation {
         key: "m-team.node".to_string(),
         binding: RecordBinding {
@@ -2338,10 +2338,7 @@ fn test_grok_dispatch_needs_a_revive_confirmation_and_rides_its_key() {
     for pane in ["%1", ""] {
         let _guard = testhook::install(Hook {
             cli_probe: Some("grok".to_string()),
-            grok_dispatch: Some(Ok(PromptId {
-                generation: 3,
-                rid: 9,
-            })),
+            grok_dispatch: Some(Ok(())),
             ..Hook::default()
         });
         let mut agent = testhook::fake_agent("node", "team", pane, "grok");
@@ -2349,16 +2346,7 @@ fn test_grok_dispatch_needs_a_revive_confirmation_and_rides_its_key() {
         let err = agent.dispatch_turn("task", None).unwrap_err();
         assert!(err.0.contains("not revived"), "{err}");
         assert!(hook(|h| h.grok_sent_key.clone()).is_empty());
-        assert_eq!(
-            agent.dispatch_turn("task", Some(&confirmation)),
-            Ok(TurnHandle::Grok {
-                key: "m-team.node".to_string(),
-                prompt_id: PromptId {
-                    generation: 3,
-                    rid: 9,
-                },
-            })
-        );
+        assert_eq!(agent.dispatch_turn("task", Some(&confirmation)), Ok(None));
         assert_eq!(
             hook(|h| h.grok_sent_key.clone()),
             vec![("m-team.node".to_string(), "task".to_string())]
@@ -2380,7 +2368,7 @@ fn test_codex_dispatch_preserves_unknown_for_pane_and_headless_members() {
         agent.session_id = Some("thread".to_string());
         assert_eq!(
             agent.dispatch_turn("task", None),
-            Ok(TurnHandle::Unknown("answer lost".to_string()))
+            Ok(Some("answer lost".to_string()))
         );
     }
 }

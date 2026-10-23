@@ -1,6 +1,6 @@
 ---
 name: hive
-description: Hive team 协作协议,唯一入口 /hive:hive [team](codex 上 $hive,grok 上 /hive)——无参=按处境建团或加入,带 team 名=加入该队(不存在则创建)。被 hive spawn 进 team、被 hive join 收编、收到 <HIVE> 消息、要给队友或别的 Claude session 发消息、或要发起多 agent 协作/建团派活时必读;覆盖成员一生(找到自己、收活、回报、被打回、退场)与编排(拆任务、spawn、派发、fix 循环、git 集成、Workflow 节点)。
+description: Hive team 协作协议,唯一入口 /hive:hive [team](codex 上 $hive,grok 上 /hive)——无参=按处境建团或加入,带 team 名=加入该队(不存在则创建)。被 hive spawn 进 team、被 hive join 收编、收到 <HIVE> 消息、要给队友或别的 Claude session 发消息、或要发起多 agent 协作/建团派活时必读;覆盖成员一生(找到自己、收活、回报、被打回、退场)与编排(拆任务、spawn、派发、fix 循环、git 集成)。
 ---
 
 # Hive 协作协议
@@ -44,8 +44,7 @@ review the spec
 ```
 
 - 正文只是摘要,里面的判断不是事实;`artifact` 才是任务全文:scope、交付物路径、验收标准、材料都在里面。先打开它和它引用的文件再动手——按摘要开工会做偏。
-- 有 `from`:队友消息。回信地址就是 `from` 原样照抄(可达性见「寻址」)。
-- 没有 `from`(`<HIVE to=… artifact=…>`,首行 `task nd-…`):`hive workflow run` 派的任务,没人等回信。**你这一轮最后说的那段话就是返回值**,runtime 直接从引擎读走——不 `hive send`、不找任务发送者、不回执、不另外验证送达。结论、交付物绝对路径、假设、遗留全写进最后那段话,写全。中途停下提问也算结束,问题就成了返回值,所以缺材料按最合理的假设做完并写明。期间到达的带 `from` 消息是普通队友通信,照常 `hive send` 回。
+- `from` 是回信地址,原样照抄(可达性见「寻址」)。
 - 需要行动的消息要回信:空闲时开新一轮,忙时在当前轮收尾前回。认可、结束等无需行动的消息不用回。
 - 只对 claude bg 成员(`hive spawn` 出来的):你忙时,消息折进当前这一轮,出现在某个工具结果旁。它没有独立的 turn,runtime 不会为它再唤醒你。
 - 只对 claude session 成员(桌面、joined):消息排队,你空闲时各开一轮,带 `The hive plugin sent a message:` 包装。偶尔仍是 `Another Claude session sent a message…` / `<cross-session-message>` 包装。这些都是宿主的消息卡片,信封本身不变。包装里的 "reply via SendMessage" 对 hive 地址无效,回 hive 永远用 `hive send`。有没有包装都要处理。

@@ -12,7 +12,6 @@ use std::rc::Rc;
 // ------------------------------------------------------------------
 
 type SpawnFn = Box<dyn Fn(usize, &SpawnCall) -> Agent>;
-type TeamRuntimeFn = Box<dyn Fn(&str, &str) -> Option<Map<String, Value>>>;
 type ProfileFn = Box<dyn Fn(&str) -> Option<String>>;
 
 #[derive(Default)]
@@ -20,7 +19,6 @@ pub struct Hook {
     pub spawn_calls: Vec<SpawnCall>,
     pub spawn_fn: Option<SpawnFn>,
     pub session_id: Option<String>,
-    pub team_runtime: Option<TeamRuntimeFn>,
     pub profile_for_pane: Option<ProfileFn>,
 }
 
@@ -1295,22 +1293,6 @@ fn test_team_status_payload_shape() {
     assert_eq!(claude.get("role").unwrap(), "agent");
 }
 
-fn team_with_pane_member(pane_id: &str) -> Team {
-    let mut team = Team {
-        name: "team-a".to_string(),
-        workspace: "/ws".to_string(),
-        ..Default::default()
-    };
-    team.agents.push(new_agent(
-        "worker", "team-a", pane_id, "claude", "", "", None,
-    ));
-    team
-}
-
-fn stub_team_runtime(response: Value) {
-    hook(|h| h.team_runtime = Some(Box::new(move |_, _| response.as_object().cloned())));
-}
-
 #[test]
 fn test_usable_runtime_rejects_error_envelope_and_empty_body() {
     assert!(usable_runtime(None).is_none());
@@ -1322,83 +1304,6 @@ fn test_usable_runtime_rejects_error_envelope_and_empty_body() {
         usable_runtime(ok.as_object().cloned()),
         ok.as_object().cloned()
     );
-}
-
-#[test]
-fn test_member_alive_hived_error_falls_back_to_pane_liveness() {
-    let (_tmp, _guard) = configure_hive_home(true, "%0");
-    stub_team_runtime(json!({"ok": false, "error": "load failed"}));
-
-    assert!(team_with_pane_member("%1").member_alive("worker"));
-    assert!(!team_with_pane_member("").member_alive("worker"));
-}
-
-#[test]
-fn test_member_alive_hived_answer_is_authoritative() {
-    let (_tmp, _guard) = configure_hive_home(true, "%0");
-    let team = team_with_pane_member("%1");
-
-    stub_team_runtime(json!({"ok": true, "members": {"worker": {"cliAlive": false}}}));
-    assert!(!team.member_alive("worker"));
-
-    stub_team_runtime(json!({"ok": true, "members": {"worker": {"cliAlive": true}}}));
-    assert!(team.member_alive("worker"));
-
-    stub_team_runtime(json!({"ok": true, "members": {}}));
-    assert!(!team.member_alive("worker"));
-}
-
-#[test]
-fn test_member_liveness_admits_a_retained_member_as_alive() {
-    let (_tmp, _guard) = configure_hive_home(true, "%0");
-    let team = team_with_pane_member("");
-
-    stub_team_runtime(
-        json!({"ok": true, "members": {"worker": {"cliAlive": false, "retained": true}}}),
-    );
-    assert_eq!(
-        team.member_liveness("worker"),
-        MemberLiveness {
-            alive: true,
-            retained: true,
-        }
-    );
-    assert!(team.member_alive("worker"));
-
-    stub_team_runtime(
-        json!({"ok": true, "members": {"worker": {"cliAlive": true, "retained": false}}}),
-    );
-    assert_eq!(
-        team.member_liveness("worker"),
-        MemberLiveness {
-            alive: true,
-            retained: false,
-        }
-    );
-
-    stub_team_runtime(json!({"ok": true, "members": {"worker": {"cliAlive": false}}}));
-    assert_eq!(team.member_liveness("worker"), MemberLiveness::default());
-    assert_eq!(team.member_liveness("nobody"), MemberLiveness::default());
-
-    // no usable hived answer: a pane stands in, and nothing is retained
-    stub_team_runtime(json!({"ok": false, "error": "load failed"}));
-    assert_eq!(
-        team_with_pane_member("%1").member_liveness("worker"),
-        MemberLiveness {
-            alive: true,
-            retained: false,
-        }
-    );
-}
-
-#[test]
-fn test_member_alive_no_hived_uses_pane_liveness() {
-    let (_tmp, _guard) = configure_hive_home(true, "%0");
-    // No hived answers: pin the seam instead of probing a real socket path.
-    hook(|h| h.team_runtime = Some(Box::new(|_, _| None)));
-
-    assert!(team_with_pane_member("%1").member_alive("worker"));
-    assert!(!team_with_pane_member("").member_alive("worker"));
 }
 
 /// The real `resolve_member_cli` ladder: the pane tag answers first, then
