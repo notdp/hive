@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.23.0
+
+### Features
+
+- Breaking: `hive workflow run` and the plugin's `hive-node` agent are gone, with the hived's node endpoints (`node-dispatch`, `node-result`, `turn-open`, `revive`) and the pending-node obligations that held a desk awake or a team out of the trash; Claude Code's own Workflow tool is the orchestrator, and a codex member is reached with `hive send`. The post-install acceptance rig now spawns and sends instead of running nodes (#260)
+
 ## 0.22.6
 
 ### Fixes
