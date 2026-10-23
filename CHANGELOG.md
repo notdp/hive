@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.22.6
+
+### Fixes
+
+- A desktop session's title badge and its grant of the team's workspace work again: a cold engine runs `session.start` before the desktop has connected its session tools, and the hooks module took that one failed call as a session without them and stopped trying for the rest of the process; a failure there now decides nothing, a retry follows five seconds later, and only a failure at a turn's end leaves a session (a terminal, a bg job) alone (#259)
+
 ## 0.22.5
 
 ### Fixes
