@@ -73,11 +73,17 @@ const locate = async ($: EngineInterface, sid: string): Promise<Endpoint | null>
 // through the desktop's own session tools (`$.mcp.call` needs no
 // permission), at session.start and at every turn's end, and only when
 // the membership changed since it last looked. Whether the session has
-// those tools is learned from the first call (a desktop session's
-// `session.start` names no surface): a session without them — a terminal,
-// a bg job — is left alone from then on.
+// those tools is learned from the calls (a desktop session's
+// `session.start` names no surface). A cold engine process runs
+// session.start before the desktop has connected them (the call throws
+// `no connected MCP tool`, measured on 2.1.308, connected about two seconds
+// later), so a failure there decides nothing: one retry follows a few
+// seconds later, and only a failure at a turn's end, when a desktop
+// session's tools have long answered, leaves the session alone from then
+// on — a terminal, a bg job.
 const BADGE_RE = /^\[[A-Za-z0-9_.-]+\] /
 const DESKTOP_MCP = 'ccd_session_mgmt'
+const START_RETRY_MS = 5000
 let desktopTools: boolean | null = null
 let badgeKey: string | null = null
 let desktopSession = ''
@@ -90,12 +96,13 @@ const mcpText = (r: any): string => {
   return typeof block?.text === 'string' ? block.text : ''
 }
 
-const syncBadge = async ($: EngineInterface, m: Membership | null) => {
+// `final`: a failed call means the session has no desktop tools.
+const syncBadge = async ($: EngineInterface, m: Membership | null, final: boolean) => {
   const key = m && m.member ? `${m.team}.${m.member}` : ''
   if (key === badgeKey) return
   let got
-  try { got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' }) } catch { desktopTools = false; return }
-  if (got.isError) { desktopTools = false; return }
+  try { got = await $.mcp.call(DESKTOP_MCP, 'get_session', { session_id: 'self' }) } catch { got = null }
+  if (!got || got.isError) { if (final) desktopTools = false; return }
   desktopTools = true
   let title = ''
   try {
@@ -141,17 +148,18 @@ const grantWorkspace = ($: EngineInterface, m: Membership | null) => {
   })().catch(() => undefined)
 }
 
-const syncDesktop = async ($: EngineInterface) => {
+const syncDesktop = async ($: EngineInterface, final: boolean) => {
   if (desktopTools === false || syncing) return
   syncing = true
   try {
     if (!sessionId) sessionId = await $.session.id()
     const m = await membership($, sessionId)
-    await syncBadge($, m)
+    await syncBadge($, m, final)
     grantWorkspace($, m)
   } finally {
     syncing = false
   }
+  pollDesktop($)
 }
 
 // A desktop session follows the roster within seconds, not at its next
@@ -160,7 +168,7 @@ const syncDesktop = async ($: EngineInterface) => {
 // title and the grant touched only when the membership changed.
 const pollDesktop = ($: EngineInterface) => {
   if (badgePoll || desktopTools !== true) return
-  badgePoll = $.clock.every(BADGE_POLL_MS, () => { void syncDesktop($).catch(() => undefined) })
+  badgePoll = $.clock.every(BADGE_POLL_MS, () => { void syncDesktop($, false).catch(() => undefined) })
 }
 
 type Sent = { status: number; unregistered: boolean }
@@ -234,8 +242,10 @@ const bounded = ($: EngineInterface, work: Promise<void>, ms = POST_BUDGET_MS) =
 export const register: Register = (on) => {
   on('session.start', async ($, e, next) => {
     await bounded($, report($, 'session.start', { cwd: e.cwd, surface: e.surface, isInteractive: e.isInteractive }))
-    await bounded($, syncDesktop($).catch(() => undefined))
-    pollDesktop($)
+    await bounded($, syncDesktop($, false).catch(() => undefined))
+    if (desktopTools === null) {
+      void $.clock.sleep(START_RETRY_MS).then(() => syncDesktop($, false)).catch(() => undefined)
+    }
     return next(e)
   })
   on('turn.start', async ($, e, next) => {
@@ -247,8 +257,7 @@ export const register: Register = (on) => {
       turnId: e.turnId, reason: e.reason, isAborted: e.isAborted, durationMs: e.durationMs,
       agentId: e.agentId ?? null, usage: e.usage ?? null,
     }))
-    await bounded($, syncDesktop($).catch(() => undefined))
-    pollDesktop($)
+    await bounded($, syncDesktop($, true).catch(() => undefined))
     return next(e)
   })
   // The engine leaving (exit, /clear, resume, logout, a signal; a kill -9

@@ -1212,9 +1212,14 @@ reads the session's title through those tools (`$.mcp.call` to
 names the session. So a badge appears within seconds of the session
 enrolling and disappears within seconds of `hive kill` or `hive delete`,
 with no turn of the session's own needed; nothing else renames a session. Whether the session has
-those tools is learned from the first call (a desktop session's
-`session.start` names no surface, so the surface is no gate); a terminal
-session or a bg job, whose call fails, is left alone from then on.
+those tools is learned from the calls (a desktop session's
+`session.start` names no surface, so the surface is no gate). A cold
+engine process runs `session.start` before the desktop has connected its
+tools — the call throws `no connected MCP tool`, and answers about two
+seconds later (measured on 2.1.308) — so a failure there decides nothing:
+the module tries once more five seconds later, and only a call that fails
+at a turn's end leaves the session alone from then on, as a terminal
+session or a bg job is.
 
 On the same look the module grants the team's workspace to a desktop
 session (`$.mcp.call` to `ccd_directory`'s `request_directory`), because
