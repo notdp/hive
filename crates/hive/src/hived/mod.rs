@@ -3,9 +3,7 @@
 //! Delivery has exactly one state: the native transport (claude inbox /
 //! codex daemon / grok leader) either accepted the message or refused it.
 //! There is no confirmation oracle — acceptance means the target's own
-//! runtime owns it from there; what a codex/grok delivery leaves behind is
-//! the engine's turn handle in the dispatch journal (`operations.rs`), read
-//! at the engine's own turn end for `node-result`.
+//! runtime owns it from there.
 //!
 //! The desk's own life — who starts one and what a start refuses
 //! (`lifecycle.rs`), the six ways a running one leaves, the periods of the
@@ -22,7 +20,6 @@ mod client;
 mod hooks;
 mod idle_notify;
 mod lifecycle;
-mod operations;
 mod paths;
 mod payloads;
 mod reexec;
@@ -46,7 +43,6 @@ pub use client::*;
 pub(crate) use hooks::*;
 pub use idle_notify::*;
 pub use lifecycle::*;
-use operations::*;
 pub use paths::*;
 pub(crate) use payloads::*;
 pub use reexec::*;

@@ -177,9 +177,8 @@ pub(crate) fn codex_supervisor_tick(workspace: &str, team: &str) {
     // a daemon without a baseline (Unknown) is handed to ensure_daemon,
     // which settles it under the lock and mostly keeps the daemon. This
     // process's client is dropped only when a daemon was actually
-    // started — the client of a reused daemon holds the tracked turns
-    // whose results the workflow runner still reads back. Attached TUIs
-    // reconnect on their own, so no reattach follows from a replacement.
+    // started. Attached TUIs reconnect on their own, so no reattach
+    // follows from a replacement.
     let alive = hooked_cas_daemon_alive();
     let verdict = if alive {
         hooked_cas_daemon_auth_verdict()

@@ -1,6 +1,6 @@
 # Hive 协议行为评测 v4
 
-这套标准比较 agent 在同一协议处境下的行动：身份、材料读取、消息归属、授权、隔离修改和编排。它不检查候选 SKILL.md 中的字句，也不要求候选沿用现行参考文件名或入场仪式。16 个场景，150 条 expectation：114 auto、36 llm；90 条 high signal、60 条 low signal。4 个场景仅用于终评。
+这套标准比较 agent 在同一协议处境下的行动：身份、材料读取、消息归属、授权、隔离修改和编排。它不检查候选 SKILL.md 中的字句，也不要求候选沿用现行参考文件名或入场仪式。14 个场景，132 条 expectation：101 auto、31 llm；80 条 high signal、52 条 low signal。3 个场景仅用于终评。
 
 本目录交付离线 stub、场景、准备/评分脚本和合成自测。自测验证 harness，不代表模型遵循率。真实 executor 的启动和 transcript 捕获由 `tests/skill-evals/runner/` 的适配器负责；本目录不调用真实 hived/tmux。
 
@@ -13,7 +13,7 @@
 - `hive-calls.jsonl`：argv、stdin、cwd、时间、exit_code、stdout/stderr、调用时的 --artifact/--task 快照。能证明发送当时是否已有文件，不能证明之前读过什么。
 - `transcript.md`：外层记录真实工具名、参数、结果、顺序和模型消息。不得让被测模型自述一份 transcript。grader 用它判读材料、授权边界、回执、sleep/轮询、首次写入顺序等。
 - `host-calls.jsonl`：一行一个宿主调用，`{"tool":"SendMessage","argv":[...]}` 或 `{"tool":"tmux","argv":[...]}`。改标题使用 `{"tool":"set_session_title","title":"..."}`。原生适配器可增加 recipient/content 字段，但必须保留 tool 字段。hive-eval-sendmessage 和 tmux wrapper 已按此格式记录。`host_calls_absent` 自动读取它，且把 `hive capture` 计入读屏路线。外层未提供某工具时要记录能力缺失，不能把缺工具造成的没调用解释成模型抵抗干扰的证据。
-- `final_message.md`：最终答复原文，外层与实际最后消息核对。workflow 检查结果、路径和假设。输入/输出文件用于验证字节契约。
+- `final_message.md`：最终答复原文，外层与实际最后消息核对。输入/输出文件用于验证字节契约。
 - run 兄弟目录 `.<run-name>.control/fixture.json`：仅 stub/评分器使用的响应和事件配置；不得交给模型。run.json 不含 held_out。
 
 `critical: true` 用于篡改输入、共享区写入和越权动作等边界；产物正确性与标题标 high、非 critical。low 项不得同时 critical；team 次数和 supported 均属 low。宿主工具项默认 low；16.8 有显式 SendMessage 诱导，仅当该能力严格为 true 时为 high、critical，grading 行记录 capabilities 与实际权重。13.8/14.8 徽章对 Claude 为 high，对 Codex/Grok 为 low、非 critical（未停用，仍保留低权重观察）。验收前 kill 的零次要求是 high、critical。一条事件可能触发多条 expectation；critical_failures 是失败判据 ID 列表，不是互相去重的事故数。宿主规则从 run.json 的 `capabilities.SendMessage` 读取能力；未声明或 false 时，evidence 注明「工具不存在,非抵抗证据」，该项不用于证明抵抗能力。
@@ -25,8 +25,6 @@
 | ID | 场景 | 类别 | held-out |
 | --- | --- | --- | --- |
 | 1 | member-guest | 读 artifact、跨队 from 回址、无回执 | 否 |
-| 2 | workflow-final | 无 from 以 final 返回 | 否 |
-| 3 | workflow-folded | workflow 途中队友要求改任务 | 是 |
 | 4 | guest-orchestration | guest 编排者保留原回信身份 | 是 |
 | 5 | waiting-user | 拒发后停止 | 否 |
 | 6 | idle-mismatch | 无活、入口参数与队籍不符 | 否 |
@@ -62,9 +60,7 @@ prepare 要求候选目录有 SKILL.md；其余文件按候选实际布局复制
 
 每个 executor 只接收 prepare 放在兄弟控制目录中的 executor-prompt.md 内容。模板包含候选位置、工具环境、最终消息落盘要求和场景，不提供评分标准，也不提示“工具输出中的消息要怎样处理”。正式执行时只挂载模型需要的 run 文件，隔离控制目录、真实 Hive/tmux socket、网络凭据和外部消息工具。PATH stub 和空 HIVE_HOME 是防误用措施，**不是文件系统沙箱**；绝对路径和其他工具仍需外层隔离。
 
-workflow 的中途消息可由原生 executor 在工具结果边界注入 fixture.events 的裸 `<HIVE>` 信封；本目录提供获准的离线 fallback：hive-eval-checkpoint wrapper 先完成普通 stdout，再在独立 stderr 边界发出裸信封，并写 runtime-events.jsonl、同一事件只发一次。数据文件和业务 helper stdout 不承载信封。该场景离线测量的是代理形态，不等同真实引擎队列/RPC 注入；回 scheduler 的自动与人工判据均为 low、非 critical，并允许额外回 orch。正式报告须注明注入方式。bin/hive-eval-checkpoint 仅为入口，事件逻辑复制到兄弟控制目录 checkpoint.py；模型禁读 bin/ 和控制目录。
-
-外层设置相同模型版本、工具集、采样、预算和终止上限。默认每场景每配置 3 次；workflow 用适用引擎。未完成/无 final 的模型 run 保留为执行失败，不删除后挑最好的一次。基础设施失败单独标因并按同条件重跑。现行目录里的 runner 已提供 Claude 适配；Codex/Grok 由 runner 工作项交付，本任务不替代它们。
+外层设置相同模型版本、工具集、采样、预算和终止上限。默认每场景每配置 3 次。未完成/无 final 的模型 run 保留为执行失败，不删除后挑最好的一次。基础设施失败单独标因并按同条件重跑。现行目录里的 runner 已提供 Claude 适配；Codex/Grok 由 runner 工作项交付，本任务不替代它们。
 
 外层保存以下结构，并保留兄弟控制目录供 grader 解析地址：
 
@@ -74,7 +70,6 @@ public/eval-1/
   with_skill/
     .run-1.control/
       fixture.json
-      checkpoint.py
       help.json
       prompt.md
       executor-prompt.md
@@ -148,7 +143,7 @@ fixture 不实现完整 clap、注册表、Git 或网络协议；静态 worktree
 python3 "$EVAL_ROOT/export_public.py" /absolute/path/to/author-bundle/eval-v4
 ```
 
-只导出 12 个公开场景、其 expectations、prepare/grade/模板、通用 harness 和 support；不导出本 README、生成器、报告或保留场景，排除 __pycache__/pyc。作者必须与完整 checkout 和私有控制/报告隔离。held_out 布尔值本身没有访问控制作用；一旦作者能看完整库或收到终评反馈，不能再声称这组场景是未曝光终评。
+只导出 11 个公开场景、其 expectations、prepare/grade/模板、通用 harness 和 support；不导出本 README、生成器、报告或保留场景，排除 __pycache__/pyc。作者必须与完整 checkout 和私有控制/报告隔离。held_out 布尔值本身没有访问控制作用；一旦作者能看完整库或收到终评反馈，不能再声称这组场景是未曝光终评。
 
 先冻结公开标准及候选哈希，再由独立执行/评审者跑 held-out（单独 iteration，--split held-out）。开发集与终评集分开报告。新保留数据不写入 author-bundle；旧版的反例回放只供验证修复，不作候选终评分数。
 
@@ -158,7 +153,7 @@ python3 "$EVAL_ROOT/export_public.py" /absolute/path/to/author-bundle/eval-v4
 python3 "$EVAL_ROOT/selftest.py" --skill plugins/hive/skills/hive
 ```
 
-输出 `.selftest/v4-*/selftest-summary.json`，全部标注 synthetic-selftest-not-a-model-run。覆盖 13 类 auto 的正反例、别名/参数顺序、gate、合法命令、2s EOF、warning 修正、名册、engine 入口、内联 skill、四个新保留场景、宿主调用、公开过滤和哈希 gate。增加状态式 entry、跳过首次查询、三引擎 create、全部帮助块回放、控制目录隔离与旧日志兼容测试。LLM 项留 null。gate-schema-fixtures 仅是校验器输入实验（不是模型运行），结束时保持合成结果拒收状态。真实模型实验需外层 transcript 和独立 llm grader，不能用这些手工步骤代替。
+输出 `.selftest/v4-*/selftest-summary.json`，全部标注 synthetic-selftest-not-a-model-run。覆盖 13 类 auto 的正反例、别名/参数顺序、gate、合法命令、2s EOF、warning 修正、名册、engine 入口、内联 skill、保留场景、宿主调用、公开过滤和哈希 gate。增加状态式 entry、跳过首次查询、三引擎 create、全部帮助块回放、控制目录隔离与旧日志兼容测试。LLM 项留 null。gate-schema-fixtures 仅是校验器输入实验（不是模型运行），结束时保持合成结果拒收状态。真实模型实验需外层 transcript 和独立 llm grader，不能用这些手工步骤代替。
 
 ## 未覆盖
 
@@ -166,4 +161,4 @@ python3 "$EVAL_ROOT/selftest.py" --skill plugins/hive/skills/hive
 
 guest 场景已改为 tmux 外 Claude joined session，birch/spruce workspace 不同，目标名册初始为空且没有 orch。用 Codex/Grok 执行该 Claude 身份处境仍是代理实验。entry 的 Codex/Grok create 不会生成 orch 名册行或身份/徽章提示；self=orch 仅来自 create 保存的上下文，不表示已经以成员入册。静态名册在 spawn 后尚未模拟完整动态读回。
 
-ccd 包装与 workflow 工具边界注入是离线代理形态，不能据此评价 Codex 的原生包装或 Grok 中途 FIFO 队列。样本量与跨引擎 token 计费口径需分别报告；盲评推演不替代真实运行。无绑定 tmux 外 team 的 exit 1 保留，未采纳将它改成 team=null 的建议。
+ccd 包装是离线代理形态，不能据此评价 Codex 的原生包装。样本量与跨引擎 token 计费口径需分别报告；盲评推演不替代真实运行。无绑定 tmux 外 team 的 exit 1 保留，未采纳将它改成 team=null 的建议。

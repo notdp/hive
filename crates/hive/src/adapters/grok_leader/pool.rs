@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use super::binding::binding_holds;
-use super::client::{GrokStdioClient, PromptResult, SessionRuntime};
+use super::client::{GrokStdioClient, SessionRuntime};
 use super::daemon::{kill_daemon_key, probe_socket, spawn_member_daemon};
 use super::keys::{
     member_from_key, member_key, read_pane_session, read_session_key, resolve_pane_key,
@@ -17,14 +17,6 @@ use super::{CANCEL_SENT, CONNECT_COOLDOWN, PROMPT_QUEUED};
 // --------------------------------------------------------------------------
 // per-key client pool (hived-side)
 // --------------------------------------------------------------------------
-
-/// A request id is unique only within one connection. These handles live
-/// in the hived process and must not be restored across daemon restarts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PromptId {
-    pub generation: u64,
-    pub rid: u64,
-}
 
 /// The identity a revival confirmed, handed to the caller that asked for
 /// it and checked again at the submission boundary: the member and the
@@ -45,19 +37,6 @@ pub struct Confirmation {
     pub session_id: String,
     pub socket_path: String,
     pub generation: u64,
-}
-
-/// What a revival left: whether it raised the leader (`false` for a member
-/// that was online — a no-op, not a failure), the session's state as the
-/// handshake's `session/load` replayed it, and the identity it confirmed.
-/// The state is a snapshot the caller's own gate reads for itself; nothing
-/// here says the turn is closed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Revival {
-    pub raised: bool,
-    pub input_state: String,
-    pub turn_open: Option<bool>,
-    pub confirmation: Confirmation,
 }
 
 /// Why a revival did not end with a client on the member's session. Told
@@ -98,11 +77,8 @@ pub trait LeaderClient: Send + Sync {
     fn prompt(&self, _text: &str) -> Result<bool> {
         unreachable!("prompt not expected on this client")
     }
-    fn prompt_tracked(&self, _text: &str) -> Result<u64> {
-        unreachable!("prompt_tracked not expected on this client")
-    }
-    fn prompt_result(&self, _rid: u64) -> Option<PromptResult> {
-        unreachable!("prompt_result not expected on this client")
+    fn prompt_submit(&self, _text: &str) -> Result<()> {
+        unreachable!("prompt_submit not expected on this client")
     }
     fn cancel(&self) -> Result<bool> {
         unreachable!("cancel not expected on this client")
@@ -112,9 +88,6 @@ pub trait LeaderClient: Send + Sync {
     }
     fn runtime(&self) -> Option<SessionRuntime> {
         unreachable!("runtime not expected on this client")
-    }
-    fn turn_open(&self) -> Option<bool> {
-        unreachable!("turn_open not expected on this client")
     }
 }
 
@@ -132,12 +105,8 @@ impl LeaderClient for GrokStdioClient {
         Ok(GrokStdioClient::prompt(self, text))
     }
 
-    fn prompt_tracked(&self, text: &str) -> Result<u64> {
-        GrokStdioClient::prompt_tracked(self, text).map_err(|e| anyhow::anyhow!(e))
-    }
-
-    fn prompt_result(&self, rid: u64) -> Option<PromptResult> {
-        GrokStdioClient::prompt_result(self, rid)
+    fn prompt_submit(&self, text: &str) -> Result<()> {
+        GrokStdioClient::prompt_submit(self, text).map_err(|e| anyhow::anyhow!(e))
     }
 
     fn cancel(&self) -> Result<bool> {
@@ -150,10 +119,6 @@ impl LeaderClient for GrokStdioClient {
 
     fn runtime(&self) -> Option<SessionRuntime> {
         GrokStdioClient::runtime(self)
-    }
-
-    fn turn_open(&self) -> Option<bool> {
-        GrokStdioClient::turn_open(self)
     }
 }
 
@@ -245,13 +210,6 @@ impl GrokClientPool {
         self.acting_client(key)?.runtime()
     }
 
-    /// The key's turn evidence: `None` with no client on the key (no
-    /// daemon, no session record), `Some(None)` from a client that has
-    /// seen no turn event, else the evidence.
-    pub fn turn_open_for_key(&self, key: &str) -> Option<Option<bool>> {
-        Some(self.acting_client(key)?.turn_open())
-    }
-
     /// Bring the stdio client online for a key (called at spawn time).
     pub fn connect_key(&self, key: &str) -> bool {
         self.acting_client(key).is_some()
@@ -286,36 +244,22 @@ impl GrokClientPool {
         }
     }
 
-    /// A workflow node's task as a tracked prompt on the identity a revive
-    /// confirmed: the connection and request ids let `prompt_result_for_key`
-    /// read the turn's outcome. `Err` covers an identity that is no longer
-    /// the key's, a leader gone, and a client rebound since.
+    /// A send as one prompt on the identity a revive confirmed, submitted
+    /// without waiting for the echo (`prompt_submit`). `Err` covers an
+    /// identity that is no longer the key's, a leader gone, and a client
+    /// rebound since.
     pub fn dispatch_confirmed(
         &self,
         confirmation: &Confirmation,
         text: &str,
-    ) -> Result<PromptId, String> {
+    ) -> Result<(), String> {
         let client = self.confirmed_client(confirmation).ok_or_else(|| {
             format!(
                 "no grok leader client on {} for the identity its revive confirmed",
                 confirmation.key
             )
         })?;
-        let rid = client.prompt_tracked(text).map_err(|e| e.to_string())?;
-        Ok(PromptId {
-            generation: client.generation(),
-            rid,
-        })
-    }
-
-    /// The outcome of a prompt `dispatch_confirmed` sent; None with no client
-    /// on the key or one that never sent it (reconnected since).
-    pub fn prompt_result_for_key(&self, key: &str, id: PromptId) -> Option<PromptResult> {
-        let client = self.acting_client(key)?;
-        if client.generation() != id.generation {
-            return None;
-        }
-        client.prompt_result(id.rid)
+        client.prompt_submit(text).map_err(|e| e.to_string())
     }
 
     /// Cancel the running turn over the key's leader.
@@ -463,8 +407,7 @@ impl GrokClientPool {
     /// Only for a member whose record still names it (`binding_holds`,
     /// checked here and now — a runtime's `retained` is a snapshot). A
     /// leader already listening is reused, so an online member is a
-    /// no-op that reports `raised: false`; otherwise the member daemon is
-    /// raised on the record's key. Either way the connect cooldown a cold
+    /// no-op; otherwise the member daemon is raised on the record's key. Either way the connect cooldown a cold
     /// runtime read may have left is cleared before the handshake, which
     /// `session/load`s the recorded session. No prompt goes out and no
     /// bus row is written: the caller's gate reads the loaded state next,
@@ -476,18 +419,15 @@ impl GrokClientPool {
     /// generation — which is the caller's alone: nothing in the pool
     /// remembers it, so a second revive on the key confirms for its own
     /// caller and cannot replace what this one confirmed.
-    pub fn revive_key(&self, key: &str) -> Result<Revival, ReviveFailure> {
+    pub fn revive_key(&self, key: &str) -> Result<Confirmation, ReviveFailure> {
         let binding = binding_holds(key).map_err(ReviveFailure::NotRetained)?;
-        let raised = if probe_socket(&socket_path_for_key(key)) {
-            false
-        } else {
-            if !spawn_member_daemon(&binding.team, &binding.member) {
-                return Err(ReviveFailure::LeaderStart(format!(
-                    "the leader for {key} did not come up"
-                )));
-            }
-            true
-        };
+        if !probe_socket(&socket_path_for_key(key))
+            && !spawn_member_daemon(&binding.team, &binding.member)
+        {
+            return Err(ReviveFailure::LeaderStart(format!(
+                "the leader for {key} did not come up"
+            )));
+        }
         self.state.lock().unwrap().cooldown.remove(key);
         let client = self.acting_client(key).ok_or_else(|| {
             ReviveFailure::Handshake(format!("no client came up on {key} after the handshake"))
@@ -495,20 +435,12 @@ impl GrokClientPool {
         let session_id = client.session_id().ok_or_else(|| {
             ReviveFailure::Handshake(format!("the client on {key} loaded no session"))
         })?;
-        Ok(Revival {
-            raised,
-            input_state: client
-                .runtime()
-                .map(|runtime| runtime.input_state)
-                .unwrap_or_else(|| "unknown".to_string()),
-            turn_open: client.turn_open(),
-            confirmation: Confirmation {
-                key: key.to_string(),
-                binding,
-                session_id,
-                socket_path: client.socket_path(),
-                generation: client.generation(),
-            },
+        Ok(Confirmation {
+            key: key.to_string(),
+            binding,
+            session_id,
+            socket_path: client.socket_path(),
+            generation: client.generation(),
         })
     }
 
@@ -578,10 +510,6 @@ pub fn runtime_for_key(key: &str) -> Option<SessionRuntime> {
     pool().runtime_for_key(key)
 }
 
-pub fn turn_open_for_key(key: &str) -> Option<Option<bool>> {
-    pool().turn_open_for_key(key)
-}
-
 pub fn connect_pane(pane: &str) -> bool {
     pool().connect_key(&resolve_pane_key(pane))
 }
@@ -594,12 +522,8 @@ pub fn send_to_key(key: &str, text: &str) -> Option<&'static str> {
     pool().send_to_key(key, text)
 }
 
-pub fn dispatch_confirmed(confirmation: &Confirmation, text: &str) -> Result<PromptId, String> {
+pub fn dispatch_confirmed(confirmation: &Confirmation, text: &str) -> Result<(), String> {
     pool().dispatch_confirmed(confirmation, text)
-}
-
-pub fn prompt_result_for_key(key: &str, id: PromptId) -> Option<PromptResult> {
-    pool().prompt_result_for_key(key, id)
 }
 
 pub fn interrupt_pane(pane: &str) -> Option<&'static str> {

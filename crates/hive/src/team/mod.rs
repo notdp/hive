@@ -3,8 +3,7 @@
 //! `Team` itself (load, create, spawn, retire) lives here; `scope` resolves
 //! which team a verb acts on and its workspace/hived, `roster` writes
 //! membership (register, spawn onto the roster, the registry row), and
-//! `delete` is the delete body. The cli and the workflow runner reach them
-//! as `team::*`.
+//! `delete` is the delete body. The cli reaches them as `team::*`.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,15 +31,6 @@ use crate::tmux;
 
 pub const LEAD_AGENT_NAME: &str = "orch";
 const TMUX_REQUIRED_MESSAGE: &str = "Hive requires tmux. Start or attach to a tmux session first.";
-
-/// What `Team::member_liveness` reads off the hived's team runtime for one
-/// member: `alive` is `cliAlive || retained`, `retained` the grok-only
-/// "leader gone, session revivable" state.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct MemberLiveness {
-    pub alive: bool,
-    pub retained: bool,
-}
 
 /// The registry's instance key for a team created at *created_at*
 /// (epoch seconds): an empty key for a team with no known creation time,
@@ -231,22 +221,12 @@ fn resolve_member_cli(pane: &PaneInfo) -> String {
     detect_profile_name_for_pane(&pane.pane_id).unwrap_or_else(|| "claude".to_string())
 }
 
-fn request_team_runtime(workspace: &str, team_name: &str) -> Option<Map<String, Value>> {
-    #[cfg(test)]
-    if let Some(answer) =
-        tests::hook(|h| h.team_runtime.as_ref().map(|f| f(workspace, team_name))).flatten()
-    {
-        return answer;
-    }
-    crate::hived::request_team_runtime(workspace, team_name)
-}
-
 /// The hived's team-runtime answer, or None when there is nothing to trust:
 /// no socket, an empty body, or an `{ok: false, error}` envelope (the hived
 /// failed to load the team — that says nothing about the members). Every
-/// reader that turns the answer into per-member state — `Team::member_alive`,
-/// the `team/scope.rs` payload augmenter — goes
-/// through this so an error never reads as "everyone offline".
+/// reader that turns the answer into per-member state — the `team/scope.rs`
+/// payload augmenter — goes through this so an error never reads as
+/// "everyone offline".
 pub(crate) fn usable_runtime(response: Option<Map<String, Value>>) -> Option<Map<String, Value>> {
     response
         .filter(|r| !r.is_empty())
@@ -663,8 +643,8 @@ impl Team {
             );
         }
         // Cross-process name claim under the registry lock: the in-memory
-        // check above cannot see a concurrent spawner (a workflow fanning out
-        // one `hive workflow run` process per node). The claim is a paneless
+        // check above cannot see a concurrent spawner (another `hive spawn`
+        // process for the same team). The claim is a paneless
         // placeholder row — replaced by the real row after the spawn, removed
         // if the spawn fails.
         let claimed = self.claim_name(name, cli, model)?;
@@ -759,54 +739,10 @@ impl Team {
         identity::current_pane_id().unwrap_or_default()
     }
 
-    /// Whether a member can still receive a dispatch and answer
-    /// (`member_liveness().alive`).
-    pub fn member_alive(&self, name: &str) -> bool {
-        self.member_liveness(name).alive
-    }
-
-    /// Whether a member can still take a dispatch, and whether that is
-    /// only because it is retained. The hived's team runtime is the
-    /// authority: `cliAlive` (an engine that is gone reads offline even if
-    /// a pane still shows its last screen) or `retained` (a grok member
-    /// whose leader has exited but whose session a submission revives —
-    /// a snapshot the hived re-checks at the submission). Without a usable
-    /// hived answer (`usable_runtime`), a bound live pane stands in and
-    /// nothing is retained.
-    pub fn member_liveness(&self, name: &str) -> MemberLiveness {
-        let Some(agent) = self.agent_named(name) else {
-            return MemberLiveness::default();
-        };
-        if !self.workspace.is_empty() {
-            if let Some(runtime) = usable_runtime(request_team_runtime(&self.workspace, &self.name))
-            {
-                let flag = |member: &Map<String, Value>, field: &str| {
-                    member.get(field).and_then(Value::as_bool).unwrap_or(false)
-                };
-                return runtime
-                    .get("members")
-                    .and_then(Value::as_object)
-                    .and_then(|m| m.get(name))
-                    .and_then(Value::as_object)
-                    .map(|member| {
-                        let retained = flag(member, "retained");
-                        MemberLiveness {
-                            alive: flag(member, "cliAlive") || retained,
-                            retained,
-                        }
-                    })
-                    .unwrap_or_default();
-            }
-        }
-        MemberLiveness {
-            alive: !agent.pane_id.is_empty(),
-            retained: false,
-        }
-    }
-
     /// Retire a member: kill its engine/pane, drop the roster row here and
     /// in the registry, re-tile the display. The one retirement path —
-    /// `hive kill`, `hive delete --down`, and a failed workflow start all come here.
+    /// `hive kill`, `hive delete --down` and a spawn whose registry entry
+    /// is gone all come here.
     /// Returns whether the member was on the roster.
     pub fn retire(&mut self, name: &str) -> bool {
         let Some(pos) = self.agents.iter().position(|a| a.name == name) else {
@@ -816,9 +752,6 @@ impl Team {
         self.agents.remove(pos);
         if !self.name.is_empty() {
             let _ = crate::registry::remove_member(&self.name, name, &self.created_at_key());
-        }
-        if !self.workspace.is_empty() {
-            crate::workflow::remove_record(&self.workspace, name);
         }
         let window = self.display_window();
         if !window.is_empty() {

@@ -9,26 +9,19 @@ never run from a plain `pytest tests/`. Run after every install:
         python -m pytest tests/acceptance -q
 
 The rig runs once per session (module fixture): scratch tmux session,
-scratch team, one naturally-worded nonce task per CLI, each driven the way
-a Claude Code Workflow drives a node — one concurrent `hive workflow run`
-subprocess per member, task on stdin, one JSON line back on stdout. The
-task wording is deliberately NOT "mechanical, do not improvise" — drift
-(acks, stray replies, self-invented scope) only shows itself when the
-member has room to move.
+scratch team whose orch is the rig's own pane, and one naturally-worded
+nonce task per CLI, handed over the way an orch hands one — `hive spawn
+--task`, every member spawned concurrently. The task wording is
+deliberately NOT "mechanical, do not improvise" — drift (acks, stray
+sends, self-invented scope) only shows itself when the member has room to
+move.
 
-The node's result is the engine's own end of the turn (codex
-`turn/completed`, grok the `session/prompt` response), read by the hived
-that started it, with the last thing the member said as the body — the
-member runs nothing to return. The oracle does not take the node's word
-for that: after the nodes return, the rig reads the ledger and the node
-record under the workspace's `run/workflow/`, and — the one transcript
-read left — counts how often the dispatch id landed in the member's own
-conversation, by the engine session resolved from its registry row
-(`member_transcripts`). The task carries a bait string the member is told
-never to repeat, so the body is shown to be the member's words and not the
-task's. A node runs codex or grok (a claude node is Claude Code's own
-subagent), so HIVE_ACCEPTANCE_CLIS names those two; a claude entry is
-rejected by the rig before anything is spawned.
+The member does the task and reports back to its sender with `hive send`,
+as the member protocol says. The oracle does not take any one artifact's
+word for that: it reads the ledger (one dispatch in, one report out, no
+ack), the nonce file the task names, and — the one transcript read — how
+often the task envelope landed in the member's own conversation, by the
+engine session resolved from its registry row (`member_transcripts`).
 """
 
 from __future__ import annotations
@@ -37,7 +30,6 @@ import json
 import os
 import sqlite3
 import subprocess
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -75,15 +67,13 @@ class Rig:
     team: str
     workspace: Path
     pane: str = ""  # the rig's own pane: the orch identity a spawn is issued under
-    flow_stdout: str = ""  # every node's stderr tail + one RESULT line per member
-    flow_rc: int = 0  # the first non-zero node exit code, 0 when every node exited 0
-    node_rcs: dict[str, int] = field(default_factory=dict)  # member -> raw exit code
-    node_results: dict[str, dict] = field(default_factory=dict)  # member -> workflow run JSON
+    spawn_log: str = ""  # every spawn's stdout/stderr tail
+    spawn_rcs: dict[str, int] = field(default_factory=dict)  # member -> spawn exit code
+    spawn_results: dict[str, dict] = field(default_factory=dict)  # member -> spawn JSON
     bus_rows: list[tuple] = field(default_factory=list)  # (seq, from, to, body, artifact)
     member_panes: dict[str, str] = field(default_factory=dict)  # member -> pane id
     roster: dict[str, dict] = field(default_factory=dict)  # member -> registry row
-    dispatch_inputs: dict[str, int] = field(default_factory=dict)  # member -> transcript input records carrying the id
-    records: dict[str, dict] = field(default_factory=dict)  # member -> run/workflow/<member>.json after the run
+    dispatch_inputs: dict[str, int] = field(default_factory=dict)  # member -> transcript input records carrying the task path
 
     def member(self, cli: str) -> str:
         return f"probe-{cli}"
@@ -91,26 +81,31 @@ class Rig:
     def want(self, cli: str) -> str:
         return f"{self.nonce}-{cli}"
 
-    def bait(self, cli: str) -> str:
-        return f"bait-{self.nonce[4:]}-{cli}"
-
-    def dispatch_id(self, member: str) -> str:
-        return str(self.node_results.get(member, {}).get("dispatchId", ""))
+    def task_path(self, member: str) -> Path:
+        # Resolved: spawn canonicalizes the task path before it rides the
+        # ledger and the envelope (/tmp is /private/tmp on macOS).
+        return (self.root / "tasks" / f"{member}.md").resolve()
 
     def dispatch_rows(self, member: str) -> list[tuple]:
-        # The node's one ledger write: no sender, the member as recipient,
-        # the task artifact named after the dispatch id.
-        did = self.dispatch_id(member)
-        return [
-            r for r in self.bus_rows
-            if r[1] == "" and r[2] == member and did and did in str(r[4])
-        ]
+        # The task's one ledger write: the member as recipient, its task
+        # file as the artifact.
+        task = str(self.task_path(member))
+        return [r for r in self.bus_rows if _bare(r[2]) == member and str(r[4]) == task]
 
     def rows_from(self, member: str) -> list[tuple]:
-        return [r for r in self.bus_rows if r[1] == member]
+        return [r for r in self.bus_rows if _bare(r[1]) == member]
 
-    def record_path(self, member: str) -> Path:
-        return self.workspace / "run" / "workflow" / f"{member}.json"
+    def report_text(self, member: str) -> str:
+        """The member's report rows, body and artifact file content alike."""
+        parts: list[str] = []
+        for r in self.rows_from(member):
+            parts.append(str(r[3]))
+            if r[4]:
+                try:
+                    parts.append(Path(str(r[4])).read_text(errors="replace"))
+                except OSError:
+                    pass
+        return "\n".join(parts)
 
     def capture(self, member: str, *, escapes: bool) -> str:
         pane = self.member_panes.get(member, "")
@@ -136,9 +131,6 @@ class Rig:
 @pytest.fixture(scope="session")
 def rig():
     clis = [c.strip() for c in os.environ.get("HIVE_ACCEPTANCE_CLIS", "codex,grok").split(",") if c.strip()]
-    unsupported = [c for c in clis if c not in ("codex", "grok")]
-    if unsupported:
-        raise RuntimeError(f"a workflow node runs codex or grok; HIVE_ACCEPTANCE_CLIS names {unsupported}")
     run_id = uuid.uuid4().hex[:6]
     r = Rig(
         clis=clis,
@@ -149,6 +141,7 @@ def rig():
         workspace=Path(f"/tmp/hacc-{run_id}/ws"),
     )
     r.root.mkdir(parents=True)
+    (r.root / "tasks").mkdir()
     jobs_before = {p.name for p in Path.home().glob(".claude/jobs/*")}
 
     _tmux("new-session", "-d", "-s", r.session, "-x", "220", "-y", "50", "-c", str(r.root))
@@ -165,68 +158,50 @@ def rig():
             time.sleep(1)
 
         task = (
-            "请把这段口令写进 {path}：{nonce}。写完后，你这一轮最后说的话就是结果：在最后一段话里原样写出口令 {nonce}，"
-            "顺便说一句你对这个任务的看法。另外有一个干扰词 {bait}——它不是口令，任何地方都不要复述它。"
+            "请把这段口令写进 {path}：{nonce}。写完后把口令 {nonce} 报给派你任务的人，"
+            "顺便说一句你对这个任务的看法。"
         )
-        # Reproduce the honest parentage: a Workflow's node runner lives
-        # inside an engine's tool subprocess — no $TMUX. Only the pinned pane
-        # identity rides in, exactly what a spawned daemon's tools get.
+        # The rig's pane is the team's orch: every spawn signs as it. No
+        # $TMUX — the pinned pane identity is what addresses the server.
         env = dict(os.environ)
         env.pop("TMUX", None)
         env["TMUX_PANE"] = pane
         env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
         env.pop("CODEX_THREAD_ID", None)
-        # One node per CLI, all started before any is awaited. The task is
-        # handed over by communicate(input=…) on a thread per node: writing
-        # then closing stdin by hand and calling communicate() afterwards
-        # raises "I/O operation on closed file" on Python 3.12.
-        procs = {
-            r.member(c): subprocess.Popen(
-                ["hive", "workflow", "run", "--team", r.team, "--name", r.member(c), "--cli", c],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, env=env,
+        procs = {}
+        for c in r.clis:
+            member = r.member(c)
+            r.task_path(member).write_text(task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)) + "\n")
+            procs[member] = subprocess.Popen(
+                ["hive", "spawn", member, "-t", r.team, "--cli", c, "--task", str(r.task_path(member))],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
             )
-            for c in r.clis
-        }
-        deadline = time.time() + int(os.environ.get("HIVE_ACCEPTANCE_TIMEOUT", "420"))
-        waits = {
-            r.member(c): _NodeWait(
-                procs[r.member(c)],
-                task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c), bait=r.bait(c)),
-                deadline,
-            )
-            for c in r.clis
-        }
-        for member, wait in waits.items():
-            out, err, rc = wait.result()
-            # progress rides stderr; stdout is the one JSON result line
-            result = _last_json_object(out)
-            r.node_results[member] = result
-            r.node_rcs[member] = rc
-            r.flow_stdout += f"--- {member} (rc {rc}) ---\n{err[-3000:]}\n"
-            r.flow_stdout += f"RESULT {member} {str(result.get('body', ''))[:100]}\n"
-        # A signal kill is a negative code; max() with 0 would hide it.
-        r.flow_rc = next((rc for rc in r.node_rcs.values() if rc != 0), 0)
+        for member, proc in procs.items():
+            out, err = proc.communicate(timeout=240)
+            r.spawn_rcs[member] = proc.returncode
+            r.spawn_results[member] = _json_object(out)
+            r.spawn_log += f"--- {member} (rc {proc.returncode}) ---\n{out[-1500:]}\n{err[-1500:]}\n"
 
+        # Wait for every member's report, then a grace period so a stray
+        # second send after the report is seen too.
         db = r.workspace / "hive.db"
-        if db.exists():
-            r.bus_rows = sqlite3.connect(db).execute(
-                "select seq, from_agent, to_agent, body, artifact from messages"
-            ).fetchall()
-        # The record is read the moment the nodes return, before teardown
-        # retires the members and removes the records.
-        for member in procs:
-            r.records[member] = _read_json(r.record_path(member))
+        deadline = time.time() + int(os.environ.get("HIVE_ACCEPTANCE_TIMEOUT", "420"))
+        while time.time() < deadline:
+            r.bus_rows = _bus_rows(db)
+            if all(r.rows_from(m) for m in procs):
+                time.sleep(int(os.environ.get("HIVE_ACCEPTANCE_GRACE", "20")))
+                break
+            time.sleep(2)
+        r.bus_rows = _bus_rows(db)
         # The registry row names the member's engine session; the
-        # transcript read counts how often the dispatch id landed there.
+        # transcript read counts how often the task envelope landed there.
         r.roster = _registry_members(r.team)
         for member in procs:
             row = r.roster.get(member, {})
-            did = r.dispatch_id(member)
             engine = engine_session(str(row.get("cli", "")), str(row.get("sessionId", "")))
-            if row and did and engine:
+            if row and engine:
                 r.dispatch_inputs[member] = count_dispatch_inputs(
-                    str(row.get("cli", "")), engine, str(row.get("cwd", "")), did
+                    str(row.get("cli", "")), engine, str(row.get("cwd", "")), str(r.task_path(member))
                 )
             else:
                 r.dispatch_inputs[member] = 0
@@ -249,34 +224,24 @@ def rig():
                 subprocess.run(["claude", "stop", p.name], capture_output=True, timeout=30)
                 subprocess.run(["claude", "rm", p.name], capture_output=True, timeout=30)
         # The registry keeps the team alive (hived won't exit, member
-        # daemons won't reap) — retire the run the way a Workflow does.
+        # daemons won't reap) — retire every member and the team.
         subprocess.run(["hive", "delete", r.team, "--down"], capture_output=True, timeout=60)
         _tmux("kill-session", "-t", r.session, check=False)
         subprocess.run(["rm", "-rf", str(r.root)], timeout=15)
 
 
-class _NodeWait:
-    """Feed one node its task and drain it on a thread, so every node is
-    fed and running concurrently; a node still running at the deadline is
-    killed and reported with what it wrote so far."""
+def _bare(address: object) -> str:
+    """A ledger address without its team prefix."""
+    return str(address).split(".")[-1]
 
-    def __init__(self, proc: subprocess.Popen, task: str, deadline: float):
-        self.proc = proc
-        self.out = self.err = ""
-        self.thread = threading.Thread(target=self._run, args=(task, deadline), daemon=True)
-        self.thread.start()
 
-    def _run(self, task: str, deadline: float) -> None:
-        try:
-            self.out, self.err = self.proc.communicate(task, timeout=max(1.0, deadline - time.time()))
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.out, self.err = self.proc.communicate()
-            self.err += f"\n[rig] workflow run killed at the {os.environ.get('HIVE_ACCEPTANCE_TIMEOUT', '420')}s deadline\n"
-
-    def result(self) -> tuple[str, str, int]:
-        self.thread.join()
-        return self.out, self.err, self.proc.returncode
+def _bus_rows(db: Path) -> list[tuple]:
+    """Every ledger row, or [] before the ledger exists."""
+    if not db.exists():
+        return []
+    return sqlite3.connect(db).execute(
+        "select seq, from_agent, to_agent, body, artifact from messages"
+    ).fetchall()
 
 
 def _registry_members(team: str) -> dict[str, dict]:
@@ -293,28 +258,16 @@ def _registry_members(team: str) -> dict[str, dict]:
     }
 
 
-def _read_json(path: Path) -> dict:
-    """The file's JSON object; {} when it is missing or not an object."""
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
+def _json_object(stdout: str) -> dict:
+    """The JSON object a command printed (pretty or not); {} for anything else."""
+    start = stdout.find("{")
+    if start == -1:
         return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _last_json_object(stdout: str) -> dict:
-    """The node's result is its last stdout line; anything else is {}."""
-    for line in reversed(stdout.splitlines()):
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
-        try:
-            parsed = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return {}
+    try:
+        parsed = json.loads(stdout[start:])
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _drop_dim_cells(line: str) -> str:

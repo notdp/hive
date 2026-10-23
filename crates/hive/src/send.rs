@@ -1,8 +1,8 @@
 //! Send addressing and the hived send seam: which team owns the target of
 //! a `hive send` (a qualified `<group>.<name>` across windows, a bare name
 //! in the caller's team, a Claude-session guest's target), the long-body
-//! hint, and the request every dispatch — `hive send`, a spawn's `--task`,
-//! a `hive workflow run` task — hands the hived.
+//! hint, and the request every dispatch — `hive send`, a spawn's `--task`
+//! — hands the hived.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -76,15 +76,14 @@ fn admitted_request(
     }
 }
 
-/// Why a node dispatch has no seq. `Refused`: the hived answered `ok:false`
-/// (a transport refusal, an unknown member, the send gate) or the request
-/// never reached it — the task is definitely not with the member.
+/// Why a send has no seq. `Refused`: the hived answered `ok:false` (a
+/// transport refusal, an unknown member, the send gate) or the request
+/// never reached it — the message is definitely not with the member.
 /// `Unknown`: the request went out and no usable answer came back (a read
-/// timeout, a dropped connection, an empty or unparsable reply) — the
-/// hived may have injected the task, and holds its turn under the
-/// dispatch id if it did.
+/// timeout, a dropped connection, an empty or unparsable reply, or the
+/// engine's own `dispatchUnknown`) — the message may have been taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DispatchFailure {
+enum DispatchFailure {
     Refused(String),
     Unknown(String),
 }
@@ -97,30 +96,6 @@ impl fmt::Display for DispatchFailure {
             }
         }
     }
-}
-
-/// The dispatch of a `hive workflow run` task: the hived's node-dispatch action, which
-/// writes a senderless ledger row and injects a from-less envelope.
-pub(crate) fn request_node_dispatch(
-    workspace: &str,
-    team: &Team,
-    target_agent: &str,
-    body: &str,
-    artifact: &str,
-    dispatch_id: &str,
-) -> Result<Map<String, Value>, DispatchFailure> {
-    let answer = admitted_request(workspace, team, || {
-        crate::hived::request_node_dispatch(
-            workspace,
-            &team.name,
-            target_agent,
-            body,
-            artifact,
-            dispatch_id,
-        )
-    })
-    .map_err(|err| DispatchFailure::Refused(err.to_string()))?;
-    hived_answer(workspace, answer, "node dispatch")
 }
 
 fn hived_send_result(
@@ -421,16 +396,16 @@ mod tests {
         };
         // The hived said no: the task never left.
         assert_eq!(
-            hived_answer(&ws, Ok(refused("transport refused")), "node dispatch"),
+            hived_answer(&ws, Ok(refused("transport refused")), "send"),
             Err(DispatchFailure::Refused("transport refused".to_string()))
         );
         assert_eq!(
             hived_answer(
                 &ws,
                 Ok(Map::from_iter([("ok".to_string(), Value::Bool(false))])),
-                "node dispatch"
+                "send"
             ),
-            Err(DispatchFailure::Refused("node dispatch failed".to_string()))
+            Err(DispatchFailure::Refused("send failed".to_string()))
         );
         // The request never reached the hived: refused, with the
         // unavailable diagnosis.
@@ -438,7 +413,7 @@ mod tests {
             hived_answer(
                 &ws,
                 Err(RequestFailure::NotSent("connect refused".to_string())),
-                "node dispatch"
+                "send"
             ),
             Err(DispatchFailure::Refused("hived unavailable".to_string()))
         );
@@ -447,16 +422,16 @@ mod tests {
             hived_answer(
                 &ws,
                 Err(RequestFailure::AnswerLost("read timed out".to_string())),
-                "node dispatch"
+                "send"
             ),
             Err(DispatchFailure::Unknown(
-                "node dispatch: answer lost (read timed out)".to_string()
+                "send: answer lost (read timed out)".to_string()
             ))
         );
         assert_eq!(
-            hived_answer(&ws, Ok(Map::new()), "node dispatch"),
+            hived_answer(&ws, Ok(Map::new()), "send"),
             Err(DispatchFailure::Unknown(
-                "node dispatch: empty answer from the hived".to_string()
+                "send: empty answer from the hived".to_string()
             ))
         );
         // A success is handed on without its `ok`.
@@ -465,7 +440,7 @@ mod tests {
             ("seq".to_string(), Value::from(3)),
         ]);
         assert_eq!(
-            hived_answer(&ws, Ok(ok), "node dispatch"),
+            hived_answer(&ws, Ok(ok), "send"),
             Ok(Map::from_iter([("seq".to_string(), Value::from(3))]))
         );
         // Ordinary sends preserve ambiguity in the surfaced error.
@@ -483,7 +458,7 @@ mod tests {
         let err = hived_answer(
             &ws,
             Err(RequestFailure::NotAdmitted("hived is draining".into())),
-            "node dispatch",
+            "send",
         )
         .unwrap_err();
         assert!(
@@ -493,7 +468,7 @@ mod tests {
         let err = hived_answer(
             &ws,
             Err(RequestFailure::Incompatible("hived speaks api 5".into())),
-            "node dispatch",
+            "send",
         )
         .unwrap_err();
         assert!(

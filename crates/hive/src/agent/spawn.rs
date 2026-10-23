@@ -108,9 +108,9 @@ impl Agent {
                 .into_owned()
         };
         // Outside tmux, a concrete target pane still addresses the shared
-        // tmux server (targeted commands need no $TMUX) — that is how an
-        // external orchestrator (`hive workflow run --team`) spawns visible
-        // members. Only an un-addressable spawn has to be inside tmux.
+        // tmux server (targeted commands need no $TMUX) — that is how a
+        // caller outside tmux (`hive spawn -t`, a desktop session) spawns
+        // visible members. Only an un-addressable spawn has to be inside tmux.
         if !hooked_is_inside_tmux() && target_pane.is_empty() {
             bail!("{}", TMUX_REQUIRED_MESSAGE);
         }

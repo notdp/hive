@@ -7,9 +7,9 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use serde_json::{Map, Value};
 
-use crate::adapters::grok_leader::{Confirmation, PromptResult};
-use crate::agent::{Agent, DeliveryError, TurnHandle};
-use crate::message::{format_hive_envelope, format_node_envelope};
+use crate::adapters::grok_leader::Confirmation;
+use crate::agent::{Agent, DeliveryError};
+use crate::message::format_hive_envelope;
 use crate::team::Team;
 use crate::{bus, devlog};
 
@@ -44,50 +44,12 @@ fn revive_target(target: &Agent) -> Result<Option<Confirmation>> {
     }
     let key = crate::adapters::grok_leader::member_key(&target.team_name, &target.name);
     match hooked_gl_revive_key(&key) {
-        Ok(revival) => Ok(Some(revival.confirmation)),
+        Ok(confirmation) => Ok(Some(confirmation)),
         Err(failure) => bail!(
             "grok member '{}' could not be revived for this send ({failure})",
             target.name
         ),
     }
-}
-
-/// `revive`: the same revival a send runs before its gate, on its own —
-/// what `hive workflow run` asks for a retained member before it waits
-/// for the member's turn to close. No prompt, no dispatch, no bus row.
-/// `revived` says whether a leader was raised (an online member answers
-/// `revived: false` with `ok: true`); a failure answers `ok: false` with
-/// its reason.
-pub(crate) fn revive_payload(team_name: &str, agent_name: &str) -> Result<Map<String, Value>> {
-    let team = hooked_team_load(team_name)?;
-    let agent = team.get(agent_name)?;
-    if agent.cli != "grok" {
-        bail!(
-            "member '{agent_name}' runs {}; only a grok member is revived",
-            agent.cli
-        );
-    }
-    let key = crate::adapters::grok_leader::member_key(&agent.team_name, &agent.name);
-    let mut payload = Map::new();
-    payload.insert("agent".to_string(), Value::from(agent_name));
-    match hooked_gl_revive_key(&key) {
-        Ok(revival) => {
-            payload.insert("ok".to_string(), Value::Bool(true));
-            payload.insert("revived".to_string(), Value::Bool(revival.raised));
-            payload.insert("inputState".to_string(), Value::from(revival.input_state));
-            payload.insert(
-                "turnOpen".to_string(),
-                revival.turn_open.map(Value::Bool).unwrap_or(Value::Null),
-            );
-        }
-        Err(failure) => {
-            payload.insert("ok".to_string(), Value::Bool(false));
-            payload.insert("revived".to_string(), Value::Bool(false));
-            payload.insert("reason".to_string(), Value::from(failure.to_string()));
-            payload.insert("error".to_string(), Value::from(failure.to_string()));
-        }
-    }
-    Ok(payload)
 }
 
 /// Raise when the target agent is waiting on its human.
@@ -112,28 +74,20 @@ pub(crate) fn check_send_gate_impl(target: &Agent) -> Result<()> {
     bail!("target agent is waiting for a user answer; answer it in the target pane")
 }
 
-/// Who a send is from. A member (or guest) send carries its sender on the
-/// ledger row and in the envelope, and goes out as a plain send to a claude
-/// target (a codex or grok target takes it as a tracked turn as well); a
-/// `hive workflow run` dispatch has no sender at all — its row's
-/// `from_agent` is empty, its envelope has no `from` — and goes out as a
-/// tracked turn whose engine handle is kept under the dispatch id for
-/// `node-result`. The mode is explicit: an empty member name is never a node.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SendOrigin<'a> {
-    Member(&'a str),
-    Node { dispatch_id: &'a str },
-}
-
+/// A member (or guest) send: its sender on the ledger row and in the
+/// envelope, a plain send to a claude target, and one turn on a codex or
+/// grok target (`Agent::dispatch_turn`). A turn whose acceptance the engine
+/// never confirmed answers `dispatchUnknown` — the task may be with the
+/// member, so the caller must not send it again.
 pub(crate) fn send_payload(
     workspace: &str,
     team_name: &str,
-    origin: SendOrigin<'_>,
+    sender: &str,
     target_agent: &str,
     body: &str,
     artifact: &str,
 ) -> Result<Map<String, Value>> {
-    let (team, target) = hooked_resolve_live_agent(team_name, target_agent)?;
+    let (_, target) = hooked_resolve_live_agent(team_name, target_agent)?;
 
     // A grok target's session is loaded here, before the gate, so the gate
     // reads the state the load replayed, not a cold unknown; the dispatch
@@ -143,47 +97,8 @@ pub(crate) fn send_payload(
     // Side effect only: errors if target is waiting for a user answer.
     hooked_check_send_gate(&target)?;
 
-    let from_agent = match origin {
-        SendOrigin::Member(sender) => sender,
-        SendOrigin::Node { .. } => "",
-    };
-    let dispatch_id = match origin {
-        SendOrigin::Node { dispatch_id } => dispatch_id.to_string(),
-        SendOrigin::Member(_) => format!("send-{}", crate::agent::uuid4()),
-    };
-    let operation = match prepare_operation(
-        workspace,
-        team_name,
-        &team.created_at_key(),
-        &dispatch_id,
-        target_agent,
-        if matches!(origin, SendOrigin::Node { .. }) {
-            "node"
-        } else {
-            "send"
-        },
-    ) {
-        Ok(path) => path,
-        Err(error) if error.is::<ExistingOperation>() => {
-            let mut answer = Map::new();
-            answer.insert("ok".into(), Value::Bool(true));
-            answer.insert("dispatchUnknown".into(), Value::from(error.to_string()));
-            answer.insert("dispatchId".into(), Value::from(dispatch_id));
-            return Ok(answer);
-        }
-        Err(error) => return Err(error),
-    };
-    let seq = match bus::write_send_event(workspace, from_agent, target_agent, body, artifact) {
-        Ok(seq) => seq,
-        Err(error) => {
-            operation_terminal(&operation, err_response(&error))?;
-            return Err(error);
-        }
-    };
-    let envelope = match origin {
-        SendOrigin::Member(sender) => format_hive_envelope(sender, target_agent, body, artifact),
-        SendOrigin::Node { .. } => format_node_envelope(target_agent, body, artifact),
-    };
+    let seq = bus::write_send_event(workspace, sender, target_agent, body, artifact)?;
+    let envelope = format_hive_envelope(sender, target_agent, body, artifact);
 
     let mut payload = Map::new();
     payload.insert("ok".to_string(), Value::Bool(true));
@@ -199,55 +114,22 @@ pub(crate) fn send_payload(
         refused.insert("seq".to_string(), Value::from(seq));
         refused
     };
-    let handle = match origin {
-        SendOrigin::Member(sender) if target.cli != "codex" && target.cli != "grok" => {
-            let sender_label = if sender.contains('.') {
-                sender.to_string()
-            } else {
-                format!("{team_name}.{sender}")
-            };
-            match hooked_agent_send(&target, &envelope, &sender_label) {
-                Ok(transport) => {
-                    let mut result = payload.clone();
-                    result.insert("state".into(), Value::from("ended"));
-                    result.insert("status".into(), Value::from("transport_accepted"));
-                    result.insert("transport".into(), Value::from(transport));
-                    if let Err(error) = operation_terminal(&operation, result) {
-                        payload.insert("dispatchUnknown".into(), Value::from(error.to_string()));
-                    }
-                    None
-                }
-                Err(error) => {
-                    let result = refused(error);
-                    operation_terminal(&operation, result.clone())?;
-                    return Ok(result);
-                }
+    if target.cli != "codex" && target.cli != "grok" {
+        let sender_label = if sender.contains('.') {
+            sender.to_string()
+        } else {
+            format!("{team_name}.{sender}")
+        };
+        if let Err(error) = hooked_agent_send(&target, &envelope, &sender_label) {
+            return Ok(refused(error));
+        }
+    } else {
+        match hooked_agent_dispatch_turn(&target, &envelope, confirmation.as_ref()) {
+            Ok(Some(reason)) => {
+                payload.insert("dispatchUnknown".into(), Value::from(reason));
             }
-        }
-        _ => match hooked_agent_dispatch_turn(&target, &envelope, confirmation.as_ref()) {
-            Ok(handle) => Some(handle),
-            Err(error) => {
-                let result = refused(error);
-                operation_terminal(&operation, result.clone())?;
-                return Ok(result);
-            }
-        },
-    };
-    payload.insert("dispatchId".into(), Value::from(dispatch_id.clone()));
-    if let Some(handle) = handle {
-        if let TurnHandle::Unknown(reason) = &handle {
-            payload.insert("dispatchUnknown".into(), Value::from(reason.as_str()));
-        }
-        if let TurnHandle::Untracked(reason) = &handle {
-            payload.insert("untracked".into(), Value::from(reason.as_str()));
-        }
-        if let Err(error) = operation_handle(&operation, handle.clone()) {
-            payload.insert(
-                "dispatchUnknown".into(),
-                Value::from(format!(
-                    "engine accepted; handle persistence failed: {error}; do not resend"
-                )),
-            );
+            Ok(None) => {}
+            Err(error) => return Ok(refused(error)),
         }
     }
     // Accepted for a pane member: unread on the status bar until the
@@ -263,80 +145,6 @@ pub(crate) fn send_payload(
         payload.insert("artifact".to_string(), Value::from(artifact));
     }
     Ok(payload)
-}
-
-/// Read one native turn from the client that started it. Journal recovery
-/// and the distinction between absent and ambiguous live in operations.rs.
-pub(super) fn turn_result_payload(
-    dispatch_id: &str,
-    handle: Option<TurnHandle>,
-) -> Map<String, Value> {
-    let mut payload = Map::new();
-    payload.insert("ok".to_string(), Value::Bool(true));
-    payload.insert("dispatchId".to_string(), Value::from(dispatch_id));
-    let unknown = |mut payload: Map<String, Value>, reason: String| {
-        payload.insert("state".to_string(), Value::from("unknown"));
-        payload.insert("reason".to_string(), Value::from(reason));
-        payload
-    };
-    let ended =
-        |mut payload: Map<String, Value>, status: String, text: String, error: Option<String>| {
-            payload.insert("state".to_string(), Value::from("ended"));
-            payload.insert("status".to_string(), Value::from(status));
-            payload.insert("text".to_string(), Value::from(text));
-            payload.insert(
-                "error".to_string(),
-                error.map(Value::from).unwrap_or(Value::Null),
-            );
-            payload
-        };
-    let running = |mut payload: Map<String, Value>| {
-        payload.insert("state".to_string(), Value::from("running"));
-        payload
-    };
-    match handle {
-        None => unknown(
-            payload,
-            format!("this hived holds no turn for dispatch {dispatch_id}"),
-        ),
-        Some(TurnHandle::Unknown(reason)) => unknown(
-            payload,
-            format!("the engine may have taken the task but its answer was lost ({reason})"),
-        ),
-        Some(TurnHandle::Untracked(reason)) => unknown(
-            payload,
-            format!("the engine took the task but handed back no turn id ({reason})"),
-        ),
-        Some(TurnHandle::Codex { thread_id, turn_id }) => match hooked_cas_turn_result(&turn_id) {
-            None => unknown(
-                payload,
-                format!("the codex client that started turn {turn_id} on {thread_id} is gone"),
-            ),
-            Some(result) => match result.status.clone() {
-                None => running(payload),
-                Some(status) => {
-                    let text = result.final_text();
-                    ended(payload, status, text, result.error)
-                }
-            },
-        },
-        Some(TurnHandle::Grok { key, prompt_id }) => match hooked_gl_prompt_result(&key, prompt_id)
-        {
-            None => unknown(
-                payload,
-                format!(
-                    "the grok client that sent prompt {} on {key} (generation {}) is gone",
-                    prompt_id.rid, prompt_id.generation
-                ),
-            ),
-            Some(PromptResult::Running) => running(payload),
-            Some(PromptResult::Ended {
-                stop_reason,
-                text,
-                error,
-            }) => ended(payload, stop_reason, text, error),
-        },
-    }
 }
 
 pub(crate) fn doctor_payload(

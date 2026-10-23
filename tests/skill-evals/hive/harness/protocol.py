@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 # cli/mod.rs::KNOWN_COMMANDS. This is an executable CLI inventory, not skill prose.
-KNOWN_COMMANDS = set('fork join create delete spawn config inject compact team layout mirror workflow pr view attach ls send doctor capture interrupt kill cvim vim vfork hfork notify plugin codex claude grok ccd resume-hint shell-init update uninstall worktree'.split())
+KNOWN_COMMANDS = set('fork join create delete spawn config inject compact team layout mirror pr view attach ls send doctor capture interrupt kill cvim vim vfork hfork notify plugin codex claude grok ccd resume-hint shell-init update uninstall worktree'.split())
 VALUE_FLAGS = {'--artifact', '--task', '--cli', '--model', '-m', '--team', '-t',
                '--base', '--cwd', '--workspace', '-w', '--skill', '--desc', '-d'}
 

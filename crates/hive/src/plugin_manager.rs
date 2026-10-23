@@ -4,7 +4,7 @@
 //! Two source trees are embedded at compile time via `include_str!`:
 //! `crates/hive/assets/marketplace/` (the two marketplace manifests) and
 //! the repo-level `plugins/hive/` (the plugin payload: its two manifests,
-//! the skill with its references, and the `hive-node` agent).
+//! the skill with its references, and the claude hooks module).
 
 use std::path::{Path, PathBuf};
 
@@ -49,11 +49,6 @@ const PAYLOAD: &[(&str, &str, bool)] = &[
     (
         "skills/hive/references/worktree.md",
         include_str!("../../../plugins/hive/skills/hive/references/worktree.md"),
-        false,
-    ),
-    (
-        "agents/hive-node.md",
-        include_str!("../../../plugins/hive/agents/hive-node.md"),
         false,
     ),
     (

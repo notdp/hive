@@ -149,11 +149,7 @@ impl SleepState {
         let absent = absent_display(snap, location);
         let used = self.usage != usage;
         self.usage = usage;
-        if working
-            || used
-            || pending_operations(workspace) != 0
-            || idle_owned_grok_keys(team).is_none()
-        {
+        if working || used || idle_owned_grok_keys(team).is_none() {
             self.since = None;
             return false;
         }
@@ -230,7 +226,7 @@ impl SleepState {
             }
             state.arrivals
         };
-        if !finish_shutdown(workspace, Duration::from_secs(5)) {
+        if !finish_shutdown(Duration::from_secs(5)) {
             reopen_admission();
             return None;
         }
@@ -239,10 +235,6 @@ impl SleepState {
             reopen_admission();
             return None;
         };
-        if pending_operations(workspace) != 0 {
-            reopen_admission();
-            return None;
-        }
         // A starter holding the lock is mid-ensure: it finds this desk
         // up, or replaces it. Either way this attempt is off.
         let Some(lock_fd) = hooked_try_acquire_reexec_lock(workspace) else {

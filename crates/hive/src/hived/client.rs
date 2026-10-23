@@ -20,8 +20,8 @@ use super::*;
 /// binary; the payload was withheld. Not retried.
 /// `AnswerLost`: the request went out whole and the answer did not come
 /// back (read failed or timed out, empty, unparsable), so the hived may
-/// have served it. A caller with a side effect on the line (a node
-/// dispatch) must not take `AnswerLost` for a refusal.
+/// have served it. A caller with a side effect on the line (a send)
+/// must not take `AnswerLost` for a refusal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RequestFailure {
     /// No socket, or a socket file nobody listens on (a hived that died
@@ -244,26 +244,6 @@ pub fn request_connect_grok(workspace: &str, pane: &str) -> Option<Map<String, V
     request_admitted(workspace, &payload, 3.0).ok()
 }
 
-/// Ask the hived to revive a grok member (`revive`): raise its leader when
-/// it has exited and load its recorded session, or do nothing for one
-/// online. Admitted like a send — it may start a process — but sends no
-/// prompt. The answer's `ok` is the revival; `revived` says whether a
-/// leader was raised; a failure carries `reason`.
-pub(crate) fn request_revive(
-    workspace: &str,
-    team: &str,
-    agent: &str,
-) -> Result<Map<String, Value>, RequestFailure> {
-    let mut payload = action_payload("revive");
-    payload.insert("team".to_string(), Value::from(team));
-    payload.insert("agent".to_string(), Value::from(agent));
-    request_admitted(
-        workspace,
-        &payload,
-        crate::adapters::grok_leader::SUBMIT_TIMEOUT + REQUEST_SLACK,
-    )
-}
-
 /// What a ping answer says about the hived on the workspace socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum HivedIdentity {
@@ -337,27 +317,6 @@ pub(crate) fn request_send(
     request_admitted(workspace, &payload, timeout)
 }
 
-/// A `hive workflow run` dispatch: the same transport as a send, no sender.
-/// The failure kind is kept: a dispatch whose answer was lost may have
-/// been injected, and the node must not repeat it.
-pub(crate) fn request_node_dispatch(
-    workspace: &str,
-    team: &str,
-    target_agent: &str,
-    body: &str,
-    artifact: &str,
-    dispatch_id: &str,
-) -> Result<Map<String, Value>, RequestFailure> {
-    let timeout = send_request_timeout();
-    let mut payload = action_payload("node-dispatch");
-    payload.insert("team".to_string(), Value::from(team));
-    payload.insert("dispatchId".to_string(), Value::from(dispatch_id));
-    payload.insert("targetAgent".to_string(), Value::from(target_agent));
-    payload.insert("body".to_string(), Value::from(body));
-    payload.insert("artifact".to_string(), Value::from(artifact));
-    request_admitted(workspace, &payload, timeout)
-}
-
 pub fn request_doctor(
     workspace: &str,
     team: &str,
@@ -386,38 +345,6 @@ pub(crate) fn request_team_runtime_answer(
 ) -> Result<Map<String, Value>, RequestFailure> {
     let mut payload = action_payload("team-runtime");
     payload.insert("team".to_string(), Value::from(team));
-    request_hived_answer(workspace, &payload, SOCKET_READY_TIMEOUT)
-}
-
-/// Ask the hived whether a member has a turn open (`turn-open`): the
-/// answer's `open` is a bool, or null when the hived holds no such state
-/// for the member.
-pub fn request_turn_open(workspace: &str, team: &str, agent: &str) -> Option<Map<String, Value>> {
-    let mut payload = action_payload("turn-open");
-    payload.insert("team".to_string(), Value::from(team));
-    payload.insert("agent".to_string(), Value::from(agent));
-    request_hived(workspace, &payload, SOCKET_READY_TIMEOUT)
-}
-
-/// Ask the hived what became of a node dispatch (`node-result`): the
-/// answer's `state` is `running`, `ended` (with `status`, `text`, `error`)
-/// or `unknown` (with `reason`).
-pub fn request_node_result(workspace: &str, dispatch_id: &str) -> Option<Map<String, Value>> {
-    request_node_result_answer(workspace, dispatch_id).ok()
-}
-
-/// `request_node_result` keeping the failure apart. The read-only question
-/// has no side effect to lose, and one of its failures is recoverable:
-/// `NoListener` says no desk answers, and a desk that retired after the
-/// turn ended left the result in its journal, so the caller may start the
-/// next generation and ask it again. Every other failure is a desk that
-/// did answer, or one this hive must not touch.
-pub(crate) fn request_node_result_answer(
-    workspace: &str,
-    dispatch_id: &str,
-) -> Result<Map<String, Value>, RequestFailure> {
-    let mut payload = action_payload("node-result");
-    payload.insert("dispatchId".to_string(), Value::from(dispatch_id));
     request_hived_answer(workspace, &payload, SOCKET_READY_TIMEOUT)
 }
 

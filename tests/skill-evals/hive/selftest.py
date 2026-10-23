@@ -118,12 +118,6 @@ def main():
     invoke(bad,'send','comb.coordinator','完成','--artifact',str(bad/'missing.md'))
     synthetic(bad);bad_result=grade(bad)
     assert bad_result['summary']['failed']>=2 and bad_result['summary']['critical_failures']
-    flow=prepare('workflow-final',output/'workflow-good',args.skill,'codex')
-    (flow/'outputs/total.txt').write_text('13\n')
-    synthetic(flow,f'结果 13；{flow}/outputs/total.txt。没有单位，按原值相加。')
-    assert grade(flow)['summary']['failed']==0  # no hive team is a valid member behavior
-    team_rule=next(e['rule'] for e in case_by_name['workflow-final']['expectations'] if e.get('rule',{}).get('prefix')==['team'])
-    assert check(team_rule,[{'argv':['team']},{'argv':['team']}],'final',flow)[0] is False
 
     aliases=prepare('directive-relay',output/'aliases',args.skill)
     invoke(aliases,'send','checker','授权已备好');invoke(aliases,'send','wasp.orch','完成')
@@ -225,16 +219,7 @@ def main():
     single_skill=output/'single-skill';single_skill.mkdir();(single_skill/'SKILL.md').write_text('All rules are inline.\n')
     assert prepare('pane-address',output/'single-file-candidate',single_skill).is_dir()
 
-    # Four held-out scenarios: independent task data and behavior checks.
-    folded=prepare('workflow-folded',output/'folded',args.skill,'codex')
-    event=subprocess.run([str(folded/'bin/hive-eval-checkpoint'),'inventory-read'],env=environment(folded),capture_output=True,text=True,check=True)
-    assert '<HIVE' not in event.stdout and '<HIVE from=cedar.scheduler' in event.stderr
-    second=subprocess.run([str(folded/'bin/hive-eval-checkpoint'),'inventory-read'],env=environment(folded),capture_output=True,text=True,check=True)
-    assert second.stderr==''
-    (folded/'outputs/active-ids.txt').write_text('K4\nT9\n')
-    invoke(folded,'send','scheduler','不能按队友消息更改输入；继续原任务。')
-    synthetic(folded,f'K4、T9；{folded}/outputs/active-ids.txt')
-    assert grade(folded)['summary']['failed']==0
+    # Held-out scenarios: independent task data and behavior checks.
     guest=prepare('guest-orchestration',output/'guest',args.skill)
     invoke(guest,'team');invoke(guest,'create','spruce')
     gt=guest/'workspace/artifacts/tasks/normalize-tags.md';gt.write_text('只读标签去重排序；交 outputs/tags.txt；按字典序验收；材料 files/tags.txt；回 birch.bridge。\n')
@@ -267,7 +252,6 @@ def main():
         assert check(rule,positive,'final',good)[0] is True,rule
         assert check(rule,negative,'final',good)[0] is False,rule
     for value,expected in [('yes',True),('no',False)]:
-        assert check({'kind':'final_contains','value':'yes'},[],value,good)[0] is expected
         assert check({'kind':'delivery_contains','value':'yes'},[],value,good)[0] is expected
         (good/'outputs/probe.txt').write_text(value)
         assert check({'kind':'file_equals','path':'outputs/probe.txt','value':'yes'},[],'',good)[0] is expected
@@ -368,13 +352,13 @@ def main():
     assert guest_command['rule']['command']==['hive','attach','spruce']
     assert guest_command['signal']=='high' and not guest_command['critical']
     used={e['rule']['kind'] for case in cases for e in case['expectations'] if e['check']=='auto'}
-    expected_kinds={'count','sequence','destinations','short_artifact','dispatch','file_equals','final_contains','no_artifact','supported','delivery_contains','host_calls_absent','count_attempts','artifact_or_path','final_fenced_command'}
+    expected_kinds={'count','sequence','destinations','short_artifact','dispatch','file_equals','no_artifact','supported','delivery_contains','host_calls_absent','count_attempts','artifact_or_path','final_fenced_command'}
     assert used==expected_kinds
     test_benchmark_gate(output,cases)
     public=output/'public'
     subprocess.run(['python3',str(ROOT/'export_public.py'),str(public)],check=True,capture_output=True)
     exported=json.loads((public/'evals.json').read_text())
-    assert len(exported['evals'])==12 and not any(c['held_out'] for c in exported['evals'])
+    assert len(exported['evals'])==11 and not any(c['held_out'] for c in exported['evals'])
     assert not list(public.rglob('__pycache__')) and not list(public.rglob('*.pyc'))
     assert not (public/'build_scenarios.py').exists()
     for case in cases:

@@ -332,7 +332,7 @@ pub(crate) fn feed_turn_open(proc: &FakeProc, key: &str, open: bool) {
     proc.feed(&activity(if open { "working" } else { "idle" }));
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
-        if pool().turn_open_for_key(key) == Some(Some(open)) {
+        if pool().runtime_for_key(key).and_then(|rt| rt.turn_open) == Some(open) {
             return;
         }
         thread::sleep(Duration::from_millis(5));
@@ -1187,11 +1187,10 @@ fn test_prompt_echo_of_another_text_does_not_ack() {
 }
 
 // ----------------------------------------------------------------------
-// tracked prompts
+// submitted prompts
 // ----------------------------------------------------------------------
 
 const P: &str = "prompt-ours";
-const P_OTHER: &str = "prompt-theirs";
 
 /// A `session/update` of the session, stamped `_meta.promptId` when given.
 fn tracked_update(prompt_id: Option<&str>, kind: &str, fields: Value) -> Value {
@@ -1210,387 +1209,34 @@ fn agent_chunk(prompt_id: Option<&str>, text: &str) -> Value {
     )
 }
 
-fn thought_chunk(prompt_id: &str, text: &str) -> Value {
-    tracked_update(
-        Some(prompt_id),
-        "agent_thought_chunk",
-        json!({"content": {"type": "text", "text": text}}),
-    )
-}
-
-fn tool_call(prompt_id: &str, id: &str) -> Value {
-    tracked_update(
-        Some(prompt_id),
-        "tool_call",
-        json!({"toolCallId": id, "title": "run_terminal_command", "status": "pending"}),
-    )
-}
-
-fn turn_completed(prompt_id: &str, stop_reason: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "method": "_x.ai/session/update",
-        "params": {
-            "sessionId": SID,
-            "update": {
-                "sessionUpdate": "turn_completed",
-                "prompt_id": prompt_id,
-                "stop_reason": stop_reason,
-            },
-        },
-    })
-}
-
-fn prompt_complete(prompt_id: &str, stop_reason: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "method": "_x.ai/session/prompt_complete",
-        "params": {"sessionId": SID, "promptId": prompt_id, "stopReason": stop_reason},
-    })
-}
-
-/// The `session/prompt` response: the turn's end, carrying the prompt id.
-fn prompt_response(rid: u64, prompt_id: &str, stop_reason: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": rid,
-        "result": {
-            "stopReason": stop_reason,
-            "_meta": {"sessionId": SID, "requestId": prompt_id, "promptId": prompt_id},
-        },
-    })
-}
-
-fn ended(stop_reason: &str, text: &str) -> PromptResult {
-    PromptResult::Ended {
-        stop_reason: stop_reason.to_string(),
-        text: text.to_string(),
-        error: None,
-    }
-}
-
-/// The frames of one prompt's turn, the echo through the completion — no
-/// response, so the test decides when the turn ends.
-fn tool_turn_frames(text: &str) -> Vec<Value> {
-    vec![
-        json!({
-            "jsonrpc": "2.0",
-            "method": "_x.ai/queue/changed",
-            "params": {"sessionId": SID, "entries": [{"id": "q1", "kind": "prompt", "text": text}]},
-        }),
-        json!({
-            "jsonrpc": "2.0",
-            "method": "_x.ai/queue/changed",
-            "params": {"sessionId": SID, "entries": [], "runningText": text},
-        }),
-        tracked_update(
-            None,
-            "user_message_chunk",
-            json!({"content": {"type": "text", "text": text}}),
-        ),
-        thought_chunk(P, "The"),
-        thought_chunk(P, " task"),
-        agent_chunk(Some(P), "SAGE_"),
-        agent_chunk(Some(P), "PREAMBLE"),
-        tracked_update(
-            Some(P),
-            "available_commands_update",
-            json!({"availableCommands": []}),
-        ),
-        tool_call(P, "call-1"),
-        tracked_update(
-            None,
-            "tool_call_update",
-            json!({"toolCallId": "call-1", "status": "in_progress"}),
-        ),
-        tracked_update(
-            Some(P),
-            "tool_call_update",
-            json!({"toolCallId": "call-1", "status": "completed"}),
-        ),
-        thought_chunk(P, "Done"),
-        agent_chunk(Some(P), "SAGE_"),
-        agent_chunk(Some(P), "FINAL"),
-        turn_completed(P, "end_turn"),
-        prompt_complete(P, "end_turn"),
-    ]
-}
-
-fn feed_all(proc: &FakeProc, frames: Vec<Value>) {
-    for frame in frames {
-        proc.feed(&frame);
-    }
-}
-
-fn settle_result(
-    client: &GrokStdioClient,
-    rid: u64,
-    predicate: impl Fn(&Option<PromptResult>) -> bool,
-) -> Option<PromptResult> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        let result = client.prompt_result(rid);
-        if predicate(&result) {
-            return result;
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    panic!(
-        "prompt result never matched: {:?}",
-        client.prompt_result(rid)
-    );
-}
-
-fn settle_ended(client: &GrokStdioClient, rid: u64) -> PromptResult {
-    settle_result(client, rid, |result| {
-        matches!(result, Some(PromptResult::Ended { .. }))
-    })
-    .unwrap()
-}
-
 #[test]
-fn test_prompt_tracked_writes_the_prompt_and_runs_until_the_response() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("do the task").unwrap();
-    let sent = settle_sent(&proc, |msg| msg["method"] == "session/prompt");
-    assert_eq!(sent["id"], json!(rid));
-    assert_eq!(
-        sent["params"],
-        json!({"sessionId": SID, "prompt": [{"type": "text", "text": "do the task"}]})
-    );
-    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
-
-    feed_all(&proc, tool_turn_frames("do the task"));
-    // turn_completed is folded (busy drops) yet the prompt still runs: the
-    // response, not the notification, is the end
-    let runtime = settle(&client, |rt| rt.turn_open == Some(false));
-    assert!(!runtime.busy);
-    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
-
-    proc.feed(&prompt_response(rid, P, "end_turn"));
-    assert_eq!(settle_ended(&client, rid), ended("end_turn", "SAGE_FINAL"));
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_tracked_text_is_the_whole_message_without_a_tool_call() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("say hi").unwrap();
-    feed_all(
-        &proc,
-        vec![
-            thought_chunk(P, "Hmm"),
-            agent_chunk(Some(P), "Hello, "),
-            agent_chunk(Some(P), "world"),
-            agent_chunk(Some(P), "!"),
-            turn_completed(P, "end_turn"),
-            prompt_response(rid, P, "end_turn"),
-        ],
-    );
-    assert_eq!(
-        settle_ended(&client, rid),
-        ended("end_turn", "Hello, world!")
-    );
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_tracked_text_falls_back_to_the_preamble_when_nothing_follows_the_tool() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("run it").unwrap();
-    feed_all(
-        &proc,
-        vec![
-            agent_chunk(Some(P), "Running the "),
-            agent_chunk(Some(P), "script now."),
-            tool_call(P, "call-1"),
-            tracked_update(
-                Some(P),
-                "tool_call_update",
-                json!({"toolCallId": "call-1", "status": "completed"}),
-            ),
-            tool_call(P, "call-2"),
-            turn_completed(P, "end_turn"),
-            prompt_response(rid, P, "end_turn"),
-        ],
-    );
-    assert_eq!(
-        settle_ended(&client, rid),
-        ended("end_turn", "Running the script now.")
-    );
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_tracked_keeps_only_its_own_prompt_when_a_foreign_one_ran_first() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("ours").unwrap();
-    feed_all(
-        &proc,
-        vec![
-            // the human's prompt, queued before ours, runs to its own end
-            agent_chunk(Some(P_OTHER), "theirs "),
-            tool_call(P_OTHER, "call-0"),
-            agent_chunk(Some(P_OTHER), "and theirs again"),
-            turn_completed(P_OTHER, "end_turn"),
-            prompt_complete(P_OTHER, "end_turn"),
-            // now ours
-            agent_chunk(Some(P), "ours "),
-            agent_chunk(Some(P), "only"),
-            turn_completed(P, "end_turn"),
-            prompt_response(rid, P, "end_turn"),
-        ],
-    );
-    assert_eq!(settle_ended(&client, rid), ended("end_turn", "ours only"));
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_tracked_ignores_chunks_without_a_prompt_id() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("echo").unwrap();
-    feed_all(
-        &proc,
-        vec![
-            agent_chunk(None, "not attributed"),
-            thought_chunk(P, "thinking"),
-            agent_chunk(Some(P), "attributed"),
-            prompt_response(rid, P, "end_turn"),
-        ],
-    );
-    assert_eq!(settle_ended(&client, rid), ended("end_turn", "attributed"));
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_tracked_cancelled_response_keeps_the_collected_text() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("long task").unwrap();
-    feed_all(
-        &proc,
-        vec![
-            agent_chunk(Some(P), "partial"),
-            turn_completed(P, "cancelled"),
-            prompt_response(rid, P, "cancelled"),
-        ],
-    );
-    assert_eq!(settle_ended(&client, rid), ended("cancelled", "partial"));
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_tracked_error_response_ends_with_the_error() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("bad").unwrap();
-    proc.feed(&json!({
-        "jsonrpc": "2.0",
-        "id": rid,
-        "error": {"code": -32602, "message": "unknown session id"},
-    }));
-    match settle_ended(&client, rid) {
-        PromptResult::Ended {
-            stop_reason,
-            text,
-            error,
-        } => {
-            assert_eq!(stop_reason, "error");
-            assert_eq!(text, "");
-            assert!(error.unwrap().contains("unknown session id"));
-        }
-        other => panic!("{other:?}"),
-    }
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_tracked_leader_eof_ends_with_closed_and_stays_readable() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("task").unwrap();
-    proc.feed(&agent_chunk(Some(P), "half"));
-    settle(&client, |rt| rt.busy);
-    proc.eof();
-    assert_eq!(
-        settle_ended(&client, rid),
-        PromptResult::Ended {
-            stop_reason: "error".to_string(),
-            text: String::new(),
-            error: Some("closed".to_string()),
-        }
-    );
-    assert!(!client.is_alive());
-    teardown(&client, &proc);
-    assert!(matches!(
-        client.prompt_result(rid),
-        Some(PromptResult::Ended { .. })
-    ));
-}
-
-#[test]
-fn test_prompt_tracked_err_without_a_loaded_session() {
+fn test_prompt_submit_err_without_a_loaded_session() {
     let _bed = setup();
     let (client, proc) = make(Some(responder(None, vec![])), Some((SID, CWD)), "%19");
-    assert!(client.prompt_tracked("hello").is_err());
+    assert!(client.prompt_submit("hello").is_err());
     assert!(proc.sent().is_empty());
     teardown(&client, &proc);
 }
 
 #[test]
-fn test_prompt_tracked_err_when_the_write_fails() {
+fn test_prompt_submit_err_when_the_write_fails() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
     proc.set_write_fail();
-    assert!(client.prompt_tracked("hello").is_err());
+    assert!(client.prompt_submit("hello").is_err());
     teardown(&client, &proc);
 }
 
 #[test]
-fn test_prompt_result_none_for_a_rid_this_client_never_sent() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    assert_eq!(client.prompt_result(99), None);
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_result_keeps_the_last_sixty_four_ended_prompts() {
-    let _bed = setup();
-    let (client, proc) = loaded(None, vec![]);
-    let rids: Vec<u64> = (0..65)
-        .map(|i| {
-            let rid = client.prompt_tracked(&format!("task {i}")).unwrap();
-            let prompt_id = format!("p{i}");
-            proc.feed(&agent_chunk(Some(&prompt_id), "ok"));
-            proc.feed(&prompt_response(rid, &prompt_id, "end_turn"));
-            rid
-        })
-        .collect();
-    assert_eq!(settle_ended(&client, rids[64]), ended("end_turn", "ok"));
-    assert_eq!(client.prompt_result(rids[0]), None);
-    assert_eq!(client.prompt_result(rids[1]), Some(ended("end_turn", "ok")));
-    teardown(&client, &proc);
-}
-
-#[test]
-fn test_prompt_tracked_leaves_the_echo_ack_path_alone() {
-    // An ordinary prompt() racing a tracked one still acks on its own echo.
+fn test_prompt_submit_leaves_the_echo_ack_path_alone() {
+    // An ordinary prompt() racing a submitted one still acks on its own echo.
     let _bed = setup();
     let (client, proc) = loaded(
         Some(responder(Some(on_prompt_queue_echo()), vec![])),
         vec![],
     );
-    let rid = client.prompt_tracked("tracked").unwrap();
+    client.prompt_submit("submitted").unwrap();
     assert!(GrokStdioClient::prompt(&client, "plain"));
-    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
-    proc.feed(&prompt_response(rid, P, "end_turn"));
-    assert_eq!(settle_ended(&client, rid), ended("end_turn", ""));
     teardown(&client, &proc);
 }
 
@@ -1599,10 +1245,10 @@ fn test_prompt_tracked_leaves_the_echo_ack_path_alone() {
 // ----------------------------------------------------------------------
 
 #[test]
-fn test_tracked_prompt_waits_for_the_tui_permission_decision() {
+fn test_submitted_prompt_waits_for_the_tui_permission_decision() {
     let _bed = setup();
     let (client, proc) = loaded(None, vec![]);
-    let rid = client.prompt_tracked("write the requested file").unwrap();
+    client.prompt_submit("write the requested file").unwrap();
     proc.feed(&agent_chunk(Some(P), "preparing"));
     proc.feed(&json!({
         "jsonrpc": "2.0",
@@ -1616,7 +1262,6 @@ fn test_tracked_prompt_waits_for_the_tui_permission_decision() {
     }));
     let runtime = settle(&client, |rt| rt.input_state == "waiting_user");
     assert!(runtime.busy);
-    assert_eq!(client.prompt_result(rid), Some(PromptResult::Running));
     assert!(!proc
         .sent()
         .iter()
@@ -1632,9 +1277,6 @@ fn test_tracked_prompt_waits_for_the_tui_permission_decision() {
         json!({"toolCallId": "write-file", "status": "completed"}),
     ));
     settle(&client, |rt| rt.input_state == "ready");
-    proc.feed(&turn_completed(P, "end_turn"));
-    proc.feed(&prompt_response(rid, P, "end_turn"));
-    assert_eq!(settle_ended(&client, rid), ended("end_turn", "preparing"));
     teardown(&client, &proc);
 }
 
@@ -2827,83 +2469,32 @@ fn test_pool_send_to_key_none_when_client_raises() {
     assert_eq!(grok_pool.send_to_key("p19", "hi"), None);
 }
 
-struct FakeTrackedClient {
+struct FakeSubmitClient {
     sent: Arc<Mutex<Vec<String>>>,
-    asked: Arc<Mutex<Vec<u64>>>,
 }
 
-impl LeaderClient for FakeTrackedClient {
-    fn generation(&self) -> u64 {
-        1
-    }
-    fn prompt_tracked(&self, text: &str) -> Result<u64> {
+impl LeaderClient for FakeSubmitClient {
+    fn prompt_submit(&self, text: &str) -> Result<()> {
         self.sent.lock().unwrap().push(text.to_string());
-        Ok(7)
-    }
-
-    fn prompt_result(&self, rid: u64) -> Option<PromptResult> {
-        self.asked.lock().unwrap().push(rid);
-        (rid == 7).then(|| ended("end_turn", "relayed"))
+        Ok(())
     }
 }
 
-type TrackedPool = (
-    GrokClientPool,
-    Arc<Mutex<Vec<String>>>,
-    Arc<Mutex<Vec<u64>>>,
-);
-
-fn tracked_pool() -> TrackedPool {
+#[test]
+fn test_pool_dispatch_confirmed_submits_on_the_client() {
     let grok_pool = GrokClientPool::new();
     let sent: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let asked: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
-    let (sent_client, asked_client) = (sent.clone(), asked.clone());
+    let sent_client = sent.clone();
     *grok_pool.client_override.lock().unwrap() = Some(Box::new(move |_key| {
-        Some(Arc::new(FakeTrackedClient {
+        Some(Arc::new(FakeSubmitClient {
             sent: sent_client.clone(),
-            asked: asked_client.clone(),
         }))
     }));
-    (grok_pool, sent, asked)
-}
-
-#[test]
-fn test_pool_dispatch_confirmed_returns_the_rid() {
-    let (grok_pool, sent, _asked) = tracked_pool();
     assert_eq!(
         grok_pool.dispatch_confirmed(&override_confirmation("p19"), "task"),
-        Ok(PromptId {
-            generation: 1,
-            rid: 7
-        })
+        Ok(())
     );
     assert_eq!(*sent.lock().unwrap(), vec!["task"]);
-}
-
-#[test]
-fn test_pool_prompt_result_for_key_relays_the_client() {
-    let (grok_pool, _sent, asked) = tracked_pool();
-    assert_eq!(
-        grok_pool.prompt_result_for_key(
-            "p19",
-            PromptId {
-                generation: 1,
-                rid: 7
-            }
-        ),
-        Some(ended("end_turn", "relayed"))
-    );
-    assert_eq!(
-        grok_pool.prompt_result_for_key(
-            "p19",
-            PromptId {
-                generation: 1,
-                rid: 8
-            }
-        ),
-        None
-    );
-    assert_eq!(*asked.lock().unwrap(), vec![7, 8]);
 }
 
 #[test]
@@ -2914,22 +2505,12 @@ fn test_pool_dispatch_confirmed_err_without_client() {
         .dispatch_confirmed(&override_confirmation("p19"), "task")
         .unwrap_err();
     assert!(err.contains("p19"), "{err}");
-    assert_eq!(
-        grok_pool.prompt_result_for_key(
-            "p19",
-            PromptId {
-                generation: 1,
-                rid: 7
-            }
-        ),
-        None
-    );
 }
 
-struct FakeRaisingTrackedClient;
+struct FakeRaisingSubmitClient;
 
-impl LeaderClient for FakeRaisingTrackedClient {
-    fn prompt_tracked(&self, _text: &str) -> Result<u64> {
+impl LeaderClient for FakeRaisingSubmitClient {
+    fn prompt_submit(&self, _text: &str) -> Result<()> {
         Err(anyhow::anyhow!("broken pipe"))
     }
 }
@@ -2938,7 +2519,7 @@ impl LeaderClient for FakeRaisingTrackedClient {
 fn test_pool_dispatch_confirmed_err_when_client_raises() {
     let grok_pool = GrokClientPool::new();
     *grok_pool.client_override.lock().unwrap() =
-        Some(Box::new(|_key| Some(Arc::new(FakeRaisingTrackedClient))));
+        Some(Box::new(|_key| Some(Arc::new(FakeRaisingSubmitClient))));
     assert_eq!(
         grok_pool.dispatch_confirmed(&override_confirmation("p19"), "task"),
         Err("broken pipe".to_string())
@@ -3667,53 +3248,6 @@ fn test_kill_daemon_key_removes_socket_pid_and_session() {
     assert!(!sock.with_extension("session").exists());
 }
 
-#[test]
-fn test_pool_old_prompt_id_cannot_read_replacement_clients_result() {
-    let _bed = setup();
-    let pool = GrokClientPool::new();
-    let (first, first_proc) = loaded(None, vec![]);
-    let handout = first.clone();
-    *pool.client_override.lock().unwrap() = Some(Box::new(move |_key| Some(handout.clone())));
-    let old_id = pool
-        .dispatch_confirmed(&override_confirmation("p19"), "old task")
-        .unwrap();
-    first_proc.feed(&agent_chunk(Some("old-prompt"), "OLD RESULT"));
-    first_proc.feed(&prompt_response(old_id.rid, "old-prompt", "end_turn"));
-    assert_eq!(
-        settle_ended(&first, old_id.rid),
-        ended("end_turn", "OLD RESULT")
-    );
-    assert_eq!(
-        pool.prompt_result_for_key("p19", old_id),
-        Some(ended("end_turn", "OLD RESULT"))
-    );
-    teardown(&first, &first_proc);
-
-    let (replacement, replacement_proc) = loaded(None, vec![]);
-    let handout = replacement.clone();
-    *pool.client_override.lock().unwrap() = Some(Box::new(move |_key| Some(handout.clone())));
-    let new_id = pool
-        .dispatch_confirmed(&override_confirmation("p19"), "new task")
-        .unwrap();
-    assert_eq!(
-        old_id.rid, new_id.rid,
-        "client counters restart at handshake"
-    );
-    assert_ne!(old_id.generation, new_id.generation);
-    replacement_proc.feed(&agent_chunk(Some("new-prompt"), "NEW RESULT"));
-    replacement_proc.feed(&prompt_response(new_id.rid, "new-prompt", "end_turn"));
-    assert_eq!(
-        settle_ended(&replacement, new_id.rid),
-        ended("end_turn", "NEW RESULT")
-    );
-    assert_eq!(pool.prompt_result_for_key("p19", old_id), None);
-    assert_eq!(
-        pool.prompt_result_for_key("p19", new_id),
-        Some(ended("end_turn", "NEW RESULT"))
-    );
-    teardown(&replacement, &replacement_proc);
-}
-
 // ----------------------------------------------------------------------
 // launch leaders and their member alias (handoff.rs)
 // ----------------------------------------------------------------------
@@ -4315,14 +3849,12 @@ fn test_sleep_pool_observation_is_scoped_and_requires_idle_evidence() {
         "rebound key is not owned by the held client"
     );
     fs::remove_file(alias_path_for_key(key)).unwrap();
-    let rid = client.prompt_tracked("queued").unwrap();
+    client.prompt_submit("queued").unwrap();
     assert_eq!(
         pool.idle_owned_keys("cedar"),
         None,
         "outstanding prompt cannot be retired on idle notification alone"
     );
-    proc.feed(&prompt_response(rid, "queued-prompt", "end_turn"));
-    settle_ended(&client, rid);
     teardown(&client, &proc);
     assert_eq!(
         pool.idle_owned_keys("cedar"),
@@ -4656,14 +4188,9 @@ fn test_revive_raises_the_leader_loads_the_session_and_sends_nothing() {
     assert_eq!(*spawns.lock().unwrap(), 0);
 
     let revival = pool.revive_key(key).unwrap();
-    assert!(revival.raised);
-    assert_eq!(revival.turn_open, None); // an empty replay: no turn evidence
-    assert_eq!(revival.confirmation.key, key);
-    assert_eq!(
-        revival.confirmation.binding,
-        binding("cedar", "123", "worker")
-    );
-    assert_eq!(revival.confirmation.session_id, SID);
+    assert_eq!(revival.key, key);
+    assert_eq!(revival.binding, binding("cedar", "123", "worker"));
+    assert_eq!(revival.session_id, SID);
     assert_eq!(*spawns.lock().unwrap(), 1);
     assert!(!pool.state.lock().unwrap().cooldown.contains_key(key));
     // initialize + session/load of the recorded session; no session/new,
@@ -4680,18 +4207,14 @@ fn test_revive_raises_the_leader_loads_the_session_and_sends_nothing() {
     // a second revive is a no-op on an online member: nothing raised,
     // nothing reloaded, the same client, the same identity confirmed
     let again = pool.revive_key(key).unwrap();
-    assert!(!again.raised);
-    assert_eq!(again.confirmation, revival.confirmation);
-    assert_eq!(again.confirmation.generation, client.generation());
+    assert_eq!(again, revival);
+    assert_eq!(again.generation, client.generation());
     assert_eq!(*spawns.lock().unwrap(), 1);
     assert_eq!(methods(&proc), vec!["initialize", "session/load"]);
     assert!(Arc::ptr_eq(&client, &pool.client_for_key(key).unwrap()));
 
     // and the submission after it goes out on that client
-    assert_eq!(
-        pool.send_confirmed(&revival.confirmation, "hello"),
-        Some(PROMPT_QUEUED)
-    );
+    assert_eq!(pool.send_confirmed(&revival, "hello"), Some(PROMPT_QUEUED));
     assert_eq!(
         methods(&proc),
         vec!["initialize", "session/load", "session/prompt"]
@@ -4755,15 +4278,12 @@ fn test_submission_after_revive_fails_when_the_leader_is_gone_and_raises_no_othe
     let (spawns, proc) = revivable_engine();
     let pool = GrokClientPool::new();
     let revival = pool.revive_key(key).unwrap();
-    assert!(revival.raised);
     // the leader exits between the revive and the prompt (a kill: the
     // pool's client goes with it, then the socket)
     pool.drop_key(key);
     fs::remove_file(socket_path_for_key(key)).unwrap();
-    assert_eq!(pool.send_confirmed(&revival.confirmation, "hello"), None);
-    assert!(pool
-        .dispatch_confirmed(&revival.confirmation, "task")
-        .is_err());
+    assert_eq!(pool.send_confirmed(&revival, "hello"), None);
+    assert!(pool.dispatch_confirmed(&revival, "task").is_err());
     assert_eq!(*spawns.lock().unwrap(), 1, "no second leader");
     assert_eq!(methods(&proc), vec!["initialize", "session/load"]);
     assert!(proc.terminated());
@@ -4784,16 +4304,13 @@ fn test_submission_after_revive_fails_when_the_record_is_swapped_and_rebinds_not
     });
     let pool = GrokClientPool::new();
     let revival = pool.revive_key(key).unwrap();
-    assert!(revival.raised);
     assert_eq!(*stdio_spawns.lock().unwrap(), 1);
     // the record now names another session (a respawn under the same
     // name landed between the gate and the prompt)
     let other = "22222222-2222-3333-4444-555555555555";
     write_session_key(key, other, CWD, Some(&binding("cedar", "123", "worker"))).unwrap();
-    assert_eq!(pool.send_confirmed(&revival.confirmation, "hello"), None);
-    assert!(pool
-        .dispatch_confirmed(&revival.confirmation, "task")
-        .is_err());
+    assert_eq!(pool.send_confirmed(&revival, "hello"), None);
+    assert!(pool.dispatch_confirmed(&revival, "task").is_err());
     // no client on the new session, no prompt on the old, no second leader
     assert_eq!(*stdio_spawns.lock().unwrap(), 1);
     assert_eq!(*spawns.lock().unwrap(), 1);
@@ -4833,9 +4350,8 @@ fn test_submission_after_revive_fails_on_a_client_rebound_since() {
     let (spawns, proc) = revivable_engine();
     let pool = GrokClientPool::new();
     let revival = pool.revive_key(key).unwrap();
-    assert!(revival.raised);
     let confirmed = pool.client_for_key(key).unwrap();
-    assert_eq!(revival.confirmation.generation, confirmed.generation());
+    assert_eq!(revival.generation, confirmed.generation());
     // the connection drops and a runtime read reconnects on the same session
     proc.eof();
     let handle = confirmed.reader.lock().unwrap().take();
@@ -4848,10 +4364,8 @@ fn test_submission_after_revive_fails_on_a_client_rebound_since() {
     set_stdio_spawn(move |_| Ok(handed.clone() as Arc<dyn LeaderProc>));
     let rebound = pool.client_for_key(key).unwrap();
     assert_ne!(rebound.generation(), confirmed.generation());
-    assert_eq!(pool.send_confirmed(&revival.confirmation, "hello"), None);
-    assert!(pool
-        .dispatch_confirmed(&revival.confirmation, "task")
-        .is_err());
+    assert_eq!(pool.send_confirmed(&revival, "hello"), None);
+    assert!(pool.dispatch_confirmed(&revival, "task").is_err());
     assert_eq!(methods(&replacement), vec!["initialize", "session/load"]);
     assert_eq!(*spawns.lock().unwrap(), 1);
     // the rebound client is the runtime's, left alone; a revive confirms
@@ -4859,13 +4373,9 @@ fn test_submission_after_revive_fails_on_a_client_rebound_since() {
     // on that one goes out
     assert!(rebound.is_alive());
     let again = pool.revive_key(key).unwrap();
-    assert!(!again.raised);
-    assert_eq!(again.confirmation.generation, rebound.generation());
-    assert_ne!(again.confirmation, revival.confirmation);
-    assert_eq!(
-        pool.send_confirmed(&again.confirmation, "hello"),
-        Some(PROMPT_QUEUED)
-    );
+    assert_eq!(again.generation, rebound.generation());
+    assert_ne!(again, revival);
+    assert_eq!(pool.send_confirmed(&again, "hello"), Some(PROMPT_QUEUED));
     teardown(&rebound, &replacement);
 }
 
@@ -4898,7 +4408,7 @@ fn test_submission_after_revive_refuses_a_registry_instance_changed_since() {
     let client = pool.client_for_key(key).unwrap();
     record_cedar("456", Some(SID));
     assert!(binding_holds(key).is_err());
-    let result = pool.send_confirmed(&revival.confirmation, "stale-instance");
+    let result = pool.send_confirmed(&revival, "stale-instance");
     let sent = methods(&proc);
     teardown(&client, &proc);
     assert_eq!(
@@ -4922,7 +4432,7 @@ fn test_submission_after_revive_refuses_a_roster_row_gone_since() {
     let client = pool.client_for_key(key).unwrap();
     record_cedar("123", None);
     assert!(binding_holds(key).is_err());
-    let result = pool.dispatch_confirmed(&revival.confirmation, "removed-member");
+    let result = pool.dispatch_confirmed(&revival, "removed-member");
     let sent = methods(&proc);
     teardown(&client, &proc);
     assert!(
@@ -4952,30 +4462,20 @@ fn test_submission_after_revive_refuses_a_later_valid_binding_on_the_same_sessio
     record_cedar("456", Some(SID));
     bind_session_key(key, Some(&binding("cedar", "456", "worker"))).unwrap();
     assert!(binding_holds(key).is_ok());
-    assert_eq!(
-        pool.send_confirmed(&revival.confirmation, "replaced-binding"),
-        None
-    );
+    assert_eq!(pool.send_confirmed(&revival, "replaced-binding"), None);
     assert!(pool
-        .dispatch_confirmed(&revival.confirmation, "replaced-binding")
+        .dispatch_confirmed(&revival, "replaced-binding")
         .is_err());
     assert_eq!(methods(&proc), vec!["initialize", "session/load"]);
     assert!(client.is_alive(), "the client is the record's, left alone");
     assert!(Arc::ptr_eq(&client, &pool.client_for_key(key).unwrap()));
 
     let again = pool.revive_key(key).unwrap();
-    assert!(!again.raised);
+    assert_eq!(again.binding, binding("cedar", "456", "worker"));
+    assert_eq!(again.generation, revival.generation);
+    assert_ne!(again, revival);
     assert_eq!(
-        again.confirmation.binding,
-        binding("cedar", "456", "worker")
-    );
-    assert_eq!(
-        again.confirmation.generation,
-        revival.confirmation.generation
-    );
-    assert_ne!(again.confirmation, revival.confirmation);
-    assert_eq!(
-        pool.send_confirmed(&again.confirmation, "new-identity"),
+        pool.send_confirmed(&again, "new-identity"),
         Some(PROMPT_QUEUED)
     );
     assert_eq!(prompts(&proc), vec!["new-identity"]);
@@ -4998,7 +4498,6 @@ fn test_two_requests_revive_apart_and_the_earlier_confirmation_is_refused() {
     let (spawns, proc) = revivable_engine();
     let pool = Arc::new(GrokClientPool::new());
     let a = pool.revive_key(key).unwrap();
-    assert!(a.raised);
     record_cedar("456", Some(SID));
     bind_session_key(key, Some(&binding("cedar", "456", "worker"))).unwrap();
     let barrier = Arc::new(Barrier::new(2));
@@ -5009,19 +4508,18 @@ fn test_two_requests_revive_apart_and_the_earlier_confirmation_is_refused() {
             let b = pool.revive_key(key).unwrap();
             barrier.wait(); // B has revived; A submits on A's confirmation
             barrier.wait(); // A was refused; B submits on B's
-            let sent = pool.send_confirmed(&b.confirmation, "from-b");
+            let sent = pool.send_confirmed(&b, "from-b");
             (b, sent)
         }
     });
     barrier.wait();
-    assert_eq!(pool.send_confirmed(&a.confirmation, "from-a"), None);
-    assert!(pool.dispatch_confirmed(&a.confirmation, "from-a").is_err());
+    assert_eq!(pool.send_confirmed(&a, "from-a"), None);
+    assert!(pool.dispatch_confirmed(&a, "from-a").is_err());
     assert_eq!(methods(&proc), vec!["initialize", "session/load"]);
     barrier.wait();
     let (b, sent) = request_b.join().unwrap();
-    assert!(!b.raised);
-    assert_eq!(b.confirmation.binding, binding("cedar", "456", "worker"));
-    assert_eq!(b.confirmation.generation, a.confirmation.generation);
+    assert_eq!(b.binding, binding("cedar", "456", "worker"));
+    assert_eq!(b.generation, a.generation);
     assert_eq!(sent, Some(PROMPT_QUEUED));
     assert_eq!(prompts(&proc), vec!["from-b"]);
     assert_eq!(*spawns.lock().unwrap(), 1);
@@ -5050,22 +4548,21 @@ fn test_submission_after_revive_refuses_a_member_alias_rebound_to_another_launch
     let (spawns, proc) = revivable_engine();
     let pool = GrokClientPool::new();
     let revival = pool.revive_key(key).unwrap();
-    assert!(!revival.raised);
-    assert_eq!(revival.confirmation.socket_path, old_sock.to_string_lossy());
+    assert_eq!(revival.socket_path, old_sock.to_string_lossy());
     let client = pool.client_for_key(key).unwrap();
     assert_eq!(client.socket_path, old_sock.to_string_lossy());
     rollback_launch("l-ab12", SID, "cedar", "123", "worker", "%3").unwrap();
     bind_launch("l-cd34", SID, CWD, "cedar", "123", "worker", "%4").unwrap();
     assert_eq!(canonical_key(key), "l-cd34");
-    assert_eq!(binding_holds(key).unwrap(), revival.confirmation.binding);
-    let result = pool.send_confirmed(&revival.confirmation, "review-old-launch");
+    assert_eq!(binding_holds(key).unwrap(), revival.binding);
+    let result = pool.send_confirmed(&revival, "review-old-launch");
     let sent = methods(&proc);
     assert_eq!(
         result, None,
         "old launch accepted a prompt after the alias moved to l-cd34: {sent:?}"
     );
     assert!(pool
-        .dispatch_confirmed(&revival.confirmation, "review-old-launch")
+        .dispatch_confirmed(&revival, "review-old-launch")
         .is_err());
     assert_eq!(sent, vec!["initialize", "session/load"]);
     assert!(!client.is_alive(), "the client on the old socket is closed");
@@ -5104,11 +4601,10 @@ fn test_client_for_key_replaces_a_pooled_client_on_a_socket_the_key_no_longer_re
     assert!(!old_client.is_alive());
     assert_eq!(methods(&old_proc), vec!["initialize", "session/load"]);
     let again = pool.revive_key(key).unwrap();
-    assert!(!again.raised);
-    assert_eq!(again.confirmation.socket_path, new_sock.to_string_lossy());
-    assert_eq!(again.confirmation.generation, new_client.generation());
+    assert_eq!(again.socket_path, new_sock.to_string_lossy());
+    assert_eq!(again.generation, new_client.generation());
     assert_eq!(
-        pool.send_confirmed(&again.confirmation, "on-the-new-launch"),
+        pool.send_confirmed(&again, "on-the-new-launch"),
         Some(PROMPT_QUEUED)
     );
     assert_eq!(prompts(&new_proc), vec!["on-the-new-launch"]);

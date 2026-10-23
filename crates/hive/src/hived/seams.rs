@@ -14,12 +14,9 @@ use anyhow::Result;
 use serde_json::{Map, Value};
 
 use crate::adapters::claude_bg::PaneJob;
-use crate::adapters::codex_app_server::TurnResult;
-use crate::adapters::grok_leader::PromptId;
-use crate::adapters::grok_leader::PromptResult;
 use crate::adapters::grok_leader::SessionRecord;
-use crate::adapters::grok_leader::{Confirmation, Revival, ReviveFailure};
-use crate::agent::{Agent, DeliveryError, TurnHandle};
+use crate::adapters::grok_leader::{Confirmation, ReviveFailure};
+use crate::agent::{Agent, DeliveryError};
 use crate::team::Team;
 
 use super::*;
@@ -495,22 +492,6 @@ pub(super) fn hooked_cas_runtime_for_thread(
     crate::adapters::codex_app_server::runtime_for_thread(thread_id)
 }
 
-pub(super) fn hooked_cas_turn_open_for_thread(thread_id: &str) -> Option<bool> {
-    #[cfg(test)]
-    if let Some(f) = hookget(|h| h.cas_turn_open_for_thread.clone()).flatten() {
-        return f(thread_id);
-    }
-    crate::adapters::codex_app_server::turn_open_for_thread(thread_id)
-}
-
-pub(super) fn hooked_cas_turn_result(turn_id: &str) -> Option<TurnResult> {
-    #[cfg(test)]
-    if let Some(f) = hookget(|h| h.cas_turn_result.clone()).flatten() {
-        return f(turn_id);
-    }
-    crate::adapters::codex_app_server::turn_result(turn_id)
-}
-
 pub(super) fn hooked_cas_session_id_for_pane(pane: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.cas_session_id_for_pane.clone()).flatten() {
@@ -661,22 +642,6 @@ pub(super) fn hooked_gl_runtime_for_key(
     crate::adapters::grok_leader::runtime_for_key(key)
 }
 
-pub(super) fn hooked_gl_turn_open_for_key(key: &str) -> Option<Option<bool>> {
-    #[cfg(test)]
-    if let Some(f) = hookget(|h| h.gl_turn_open_for_key.clone()).flatten() {
-        return f(key);
-    }
-    crate::adapters::grok_leader::turn_open_for_key(key)
-}
-
-pub(super) fn hooked_gl_prompt_result(key: &str, rid: PromptId) -> Option<PromptResult> {
-    #[cfg(test)]
-    if let Some(f) = hookget(|h| h.gl_prompt_result.clone()).flatten() {
-        return f(key, rid);
-    }
-    crate::adapters::grok_leader::prompt_result_for_key(key, rid)
-}
-
 pub(super) fn hooked_gl_session_id_for_pane(pane: &str) -> Option<String> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.gl_session_id_for_pane.clone()).flatten() {
@@ -743,7 +708,7 @@ pub(super) fn hooked_gl_retained(key: &str) -> bool {
     crate::adapters::grok_leader::retained(key)
 }
 
-pub(super) fn hooked_gl_revive_key(key: &str) -> Result<Revival, ReviveFailure> {
+pub(super) fn hooked_gl_revive_key(key: &str) -> Result<Confirmation, ReviveFailure> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.gl_revive_key.clone()).flatten() {
         return f(key);
@@ -837,7 +802,7 @@ pub(super) fn hooked_agent_dispatch_turn(
     agent: &Agent,
     text: &str,
     confirmation: Option<&Confirmation>,
-) -> std::result::Result<TurnHandle, DeliveryError> {
+) -> std::result::Result<Option<String>, DeliveryError> {
     #[cfg(test)]
     if let Some(f) = hookget(|h| h.agent_dispatch_turn.clone()).flatten() {
         return f(agent, text, confirmation);

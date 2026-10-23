@@ -144,25 +144,7 @@ pub(crate) fn handle_request(
             let response = send_payload(
                 workspace,
                 &team_in_request(),
-                SendOrigin::Member(&sender),
-                &map_get_str(request, "targetAgent"),
-                &map_get_str(request, "body"),
-                &map_get_str(request, "artifact"),
-            )
-            .unwrap_or_else(err_response);
-            (response, true)
-        }
-        "node-dispatch" => {
-            let dispatch_id = map_get_str(request, "dispatchId");
-            if dispatch_id.is_empty() {
-                return (err_response("node-dispatch needs a dispatchId"), true);
-            }
-            let response = send_payload(
-                workspace,
-                &team_in_request(),
-                SendOrigin::Node {
-                    dispatch_id: &dispatch_id,
-                },
+                &sender,
                 &map_get_str(request, "targetAgent"),
                 &map_get_str(request, "body"),
                 &map_get_str(request, "artifact"),
@@ -192,34 +174,10 @@ pub(crate) fn handle_request(
             let response = runtime_snapshot_payload(&map_get_str(request, "pane"));
             (response, true)
         }
-        "node-result" => {
-            let dispatch_id = map_get_str(request, "dispatchId");
-            if dispatch_id.is_empty() {
-                return (err_response("node-result needs a dispatchId"), true);
-            }
-            (
-                durable_node_result(workspace, &team_in_request(), &dispatch_id),
-                true,
-            )
-        }
-        "turn-open" => {
-            let response = turn_open_payload(
-                workspace,
-                &team_in_request(),
-                &map_get_str(request, "agent"),
-            )
-            .unwrap_or_else(err_response);
-            (response, true)
-        }
         "connect-codex" => {
             let mut response = Map::new();
             response.insert("ok".to_string(), Value::Bool(true));
             response.insert("connected".to_string(), Value::Bool(hooked_cas_connect()));
-            (response, true)
-        }
-        "revive" => {
-            let response = revive_payload(&team_in_request(), &map_get_str(request, "agent"))
-                .unwrap_or_else(err_response);
             (response, true)
         }
         "connect-grok" => {
@@ -245,17 +203,6 @@ pub(crate) fn handle_request(
                     .get("force")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
-            let pending = pending_operations(workspace);
-            if !force && pending > 0 {
-                reopen_admission();
-                return (
-                    serde_json::json!({"ok":false,"draining":true,"pendingOperations":pending})
-                        .as_object()
-                        .unwrap()
-                        .clone(),
-                    true,
-                );
-            }
             FORCE_SHUTDOWN.store(force, Ordering::SeqCst);
             let mut response = Map::new();
             response.insert("ok".to_string(), Value::Bool(true));

@@ -6,7 +6,7 @@ use crate::adapters::grok_leader::Confirmation;
 
 use super::seams::*;
 use super::spawn::Agent;
-use super::support::{DeliveryError, TurnHandle};
+use super::support::DeliveryError;
 
 /// How long a kill waits for a pane's process to be gone before moving on
 /// to the engine behind it. A tmux pane teardown is milliseconds; this is
@@ -130,16 +130,11 @@ impl Agent {
         )))
     }
 
-    /// A workflow node's task as one tracked turn: the same native
-    /// transport as `send_from`, but the engine's own id for the turn comes
-    /// back, and the turn's end and text are read under it (codex
-    /// `turn/start` → `turn/completed` on the starting client; grok
-    /// `session/prompt` → its response). A workflow node runs codex or
-    /// grok: a claude member has no turn-end signal hive can read (a bg
-    /// job reports no turn end over any RPC), and Claude Code runs its own
-    /// subagents natively. `Err` is the task not with the member; an
-    /// engine that took it and handed back no id is `Untracked`. A lost
-    /// answer is `Unknown`, never a retryable delivery error.
+    /// A send to a codex or grok member as one turn (codex `turn/start`,
+    /// grok `session/prompt`), on the member's pane or, headless, on its
+    /// recorded thread. `Err` is the message not with the member;
+    /// `Ok(Some(reason))` is a request that went out with no usable answer
+    /// back — it may have been taken, so it is never retried.
     ///
     /// A grok member's turn goes out only on the identity the caller's
     /// revive confirmed (*confirmation*, `GrokClientPool::revive_key`):
@@ -151,12 +146,12 @@ impl Agent {
         &self,
         text: &str,
         confirmation: Option<&Confirmation>,
-    ) -> Result<TurnHandle, DeliveryError> {
+    ) -> Result<Option<String>, DeliveryError> {
         match self.cli.as_str() {
             "codex" | "grok" => {}
             other => {
                 return Err(DeliveryError(format!(
-                    "member '{}' runs {other}; a workflow node runs codex or grok",
+                    "member '{}' runs {other}; a turn goes to codex or grok",
                     self.name
                 )))
             }
@@ -189,9 +184,8 @@ impl Agent {
         }
         if self.cli == "codex" {
             return match hooked_codex_dispatch_to_pane(&self.pane_id, text) {
-                Ok((thread_id, turn_id)) => Ok(TurnHandle::Codex { thread_id, turn_id }),
-                Err(TurnStartFailure::Untracked(reason)) => Ok(TurnHandle::Untracked(reason)),
-                Err(TurnStartFailure::Unknown(reason)) => Ok(TurnHandle::Unknown(reason)),
+                Ok(()) => Ok(None),
+                Err(TurnStartFailure::Unknown(reason)) => Ok(Some(reason)),
                 Err(TurnStartFailure::Refused(reason)) => Err(DeliveryError(format!(
                     "codex pane {} did not accept the turn ({reason})",
                     self.pane_id
@@ -205,7 +199,7 @@ impl Agent {
         &self,
         text: &str,
         confirmation: Option<&Confirmation>,
-    ) -> Result<TurnHandle, DeliveryError> {
+    ) -> Result<Option<String>, DeliveryError> {
         if self.cli == "codex" {
             let thread_id = self.session_id.clone().unwrap_or_default();
             if thread_id.is_empty() {
@@ -215,9 +209,8 @@ impl Agent {
                 )));
             }
             return match hooked_codex_dispatch_to_thread(&thread_id, text) {
-                Ok(turn_id) => Ok(TurnHandle::Codex { thread_id, turn_id }),
-                Err(TurnStartFailure::Untracked(reason)) => Ok(TurnHandle::Untracked(reason)),
-                Err(TurnStartFailure::Unknown(reason)) => Ok(TurnHandle::Unknown(reason)),
+                Ok(()) => Ok(None),
+                Err(TurnStartFailure::Unknown(reason)) => Ok(Some(reason)),
                 Err(TurnStartFailure::Refused(reason)) => Err(DeliveryError(format!(
                     "codex member '{}' did not accept the turn ({reason})",
                     self.name
@@ -227,13 +220,12 @@ impl Agent {
         self.dispatch_grok(text, confirmation)
     }
 
-    /// The grok member's tracked prompt on the confirmed identity; the
-    /// handle's key is the confirmation's, the member's own.
+    /// The grok member's prompt on the confirmed identity.
     fn dispatch_grok(
         &self,
         text: &str,
         confirmation: Option<&Confirmation>,
-    ) -> Result<TurnHandle, DeliveryError> {
+    ) -> Result<Option<String>, DeliveryError> {
         let Some(confirmation) = confirmation else {
             return Err(DeliveryError(format!(
                 "grok member '{}' was not revived for this dispatch; \
@@ -242,10 +234,7 @@ impl Agent {
             )));
         };
         match hooked_grok_dispatch(confirmation, text) {
-            Ok(prompt_id) => Ok(TurnHandle::Grok {
-                key: confirmation.key.clone(),
-                prompt_id,
-            }),
+            Ok(_) => Ok(None),
             Err(reason) => Err(DeliveryError(format!(
                 "grok member '{}' did not accept the prompt ({reason})",
                 self.name

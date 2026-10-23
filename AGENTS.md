@@ -25,7 +25,7 @@ behavior is documented in the modules themselves.
   leaves the store — the trash reserves nothing — and `hive gc restore`
   brings an archive back as a new instance (a new `createdAt`). Cold means
   positively seen idle: no window, no engine alive, no hived answering
-  with a busy or alive member, no unfinished node operation; tmux or a
+  with a busy or alive member; tmux or a
   ledger not answering, an unreadable record, an engine the collector
   cannot ask — each blocks, never counts as idle. The cold clock is
   `gc.coldSince` on the entry, cleared by any use (`Team::load` under a
@@ -89,9 +89,9 @@ behavior is documented in the modules themselves.
   identity by itself. The who-am-I ladder still matches an existing session
   id first, and synchronous succession needs neither tmux nor a hived.
 - `cli/` is one module per domain of verbs (`team`, `member`, `attach`,
-  `fork`, `workflow`, `launch`, `setup`, `update`, `uninstall`, `worktree`,
-  `gc`, `ps`) that parse, print and exit; the logic they call lives in the
-  crate and is what the workflow runner reaches for too: `team/` (`scope`
+  `fork`, `launch`, `setup`, `update`, `uninstall`, `worktree`, `gc`, `ps`)
+  that parse, print and exit; the logic they call lives in the crate:
+  `team/` (`scope`
   for which team a verb acts on, `roster` for membership writes,
   `delete`), `naming.rs` (the name
   pools and the uniqueness claim), `send.rs` (send addressing and the
@@ -103,35 +103,10 @@ behavior is documented in the modules themselves.
   production code the subsystem's only call out is `crate::settings` on the
   `view.theme` key, with no registry, bus, or hived access. Keep it that way;
   the viewer must stay usable against a transcript file alone.
-- Orchestration is not hive's: `hive workflow run` is one node as one
-  blocking command (`--team`, `--name`, `--cli codex|grok`, `--model`;
-  the task on stdin, the result as one JSON line on stdout), and a Claude
-  Code Workflow drives those nodes through the plugin's `hive-node` agent,
-  which is only a relay for the command. A node has no reply address: the
-  dispatch envelope carries no `from` (its ledger row has an empty
-  `from_agent`), the member is never asked to send anything back and runs
-  nothing to return. The task is one turn, dispatched as a tracked turn
-  (`Agent::dispatch_turn`: codex `turn/start`, grok `session/prompt`) whose
-  engine handle the hived holds under the dispatch id (`nd-<12 hex>`, also
-  in the task artifact path and the first body line); the engine's own
-  turn-end signal (codex `turn/completed` on the client that started the
-  turn, grok the `session/prompt` response) is the result's boundary — a
-  grok member hive spawned runs always-approve (`_meta.yoloMode` at mint
-  and load, `--always-approve` on its pane TUI; a human's own `hgrok`
-  keeps its prompts), because a headless member has nobody to answer a
-  tool prompt and hive never answers one for a human — the
-  member's last message of the turn its text, and the runner reads both
-  back through the hived's `node-result`. Nothing reads the engine's
-  transcript. A claude node is Claude Code's own subagent, not hive's: a
-  claude bg job reports no turn end over any RPC, and the runner refuses
-  a claude member before spawning. Each run is recorded at
-  `<workspace>/run/workflow/<name>.json` under the flock
-  `<workspace>/run/workflow/<name>.lock`, written `pending` before the bus
-  write so exit 1 always means "not dispatched"; a pending record whose
-  member is alive is `member_busy`, one whose member is dead is replaced,
-  and `hive kill` removes it. A same-name node reuses a live member; the
-  run's team comes from `hive create <run>` and goes with
-  `hive delete <run> --down`.
+- A grok member hive spawned runs always-approve (`_meta.yoloMode` at mint
+  and load, `--always-approve` on its pane TUI; a human's own `hgrok` keeps
+  its prompts): a member hive spawned has nobody at its TUI to answer a
+  tool prompt, and hive never answers one for a human.
 - Embedded assets (the cvim toolkit) materialize under
   `$HIVE_HOME/core_assets/` heal-on-drift at first use: any on-disk copy that
   differs from the embedded bytes is rewritten. Editing a materialized asset
@@ -182,8 +157,7 @@ Design truth lives in these docs, one question each:
 
 - `docs/runtime-model.md` — what hive knows about an engine: team identity
   (registry vs tmux display), the runtime fields and their per-CLI native
-  sources, send addressing, the workflow node dispatch and its explicit
-  return, active-turn fork routing. Runtime-field semantics belong there;
+  sources, send addressing, active-turn fork routing. Runtime-field semantics belong there;
   keep them in sync with the code that computes them.
 - `docs/transcript-view.md` — what a reader sees on screen: the JSONL →
   `DisplayBlock` parse model, the TUI's chrome and interaction layer, theme
@@ -211,12 +185,11 @@ Design truth lives in these docs, one question each:
 - `python -m pytest tests/e2e -q` — black-box tmux flows against
   `target/debug/hive` (`cargo build` first, or point `HIVE_E2E_BIN` elsewhere).
 - `HIVE_ACCEPTANCE=1 HIVE_ACCEPTANCE_CLIS=codex,grok python -m pytest tests/acceptance -q`
-  — post-install live acceptance: one real node per CLI, spawned through the
-  installed `hive`. It asserts what unit suites structurally cannot see (the
-  node's result against the record and the dispatch landing
-  once in its transcript, absence of acks and replies, pane color as tmux
-  actually renders it, picker residue, nonce causality) plus a
-  headless-claude semantic coroner. Run it
+  — post-install live acceptance: one real member per CLI, spawned with its
+  task through the installed `hive`. It asserts what unit suites
+  structurally cannot see (the task landing once in its transcript, one
+  report back and no ack, pane color as tmux actually renders it, picker
+  residue, nonce causality) plus a headless-claude semantic coroner. Run it
   after every live install; it is skipped everywhere else.
 - Plugin/skill materialization and hived behavior that must exercise new
   source code need an isolated dev lane: disposable `HIVE_HOME`,
