@@ -47,6 +47,7 @@ if [ "${{FAIL_CODEX_PLUGIN:-}}" = 1 ] && [ "{cli} $*" = 'codex plugin add hive@h
     exit 1
 fi
 ''')
+    script(stub_bin / "tmux", 'echo "${TMUX_STUB_VERSION-tmux 3.5a}"')
     installer = tmp_path / "installer.sh"
     script(installer, '''
 mkdir -p "$STUB_BIN" "$XDG_CONFIG_HOME/hive"
@@ -77,6 +78,17 @@ def assert_setup(env):
     assert rows[2] == "claude plugin update hive@hive --yes"
     assert rows[3].startswith("codex plugin marketplace add ")
     assert rows[4] == "codex plugin add hive@hive"
+
+
+@pytest.mark.parametrize("version", ["tmux 3.4", "tmux 3.3a", "tmux 2.9", ""])
+def test_install_refuses_a_tmux_older_than_3_5_before_downloading(installation, version):
+    env, _installer = installation
+    env["TMUX_STUB_VERSION"] = version
+    result = install(env)
+    assert result.returncode == 1
+    assert "3.5" in result.stderr
+    assert not (Path(env["STUB_BIN"]) / "hive").exists()
+    assert calls(env) == []
 
 
 @pytest.mark.parametrize("mode", ["default", "cargo", "hive", "dist", "unmanaged", "unmanaged-cargo", "unmanaged-default"])

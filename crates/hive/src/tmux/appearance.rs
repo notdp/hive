@@ -6,13 +6,10 @@
 //! terminal the colours it answered tmux at attach. The hived's control
 //! client attaches first when the team is built headless, so a terminal
 //! arriving later would sit behind it and the pane would hear black.
-//! On tmux before 3.5 the monitor re-attaches its control client behind
-//! the terminals whenever a client event leaves it ahead of one
-//! (`control_mode.rs`), and the pane hears a terminal's real background.
-//! On tmux 3.5+ Hive supplies per-pane answers through
-//! `refresh-client -r`, which override any client while a control client
-//! exists on the server, and which also cover the time before any terminal
-//! attached.
+//! Hive supplies per-pane answers through `refresh-client -r` (tmux 3.5,
+//! the oldest hive supports), which override any client while a control
+//! client exists on the server, and which also cover the time before any
+//! terminal attached.
 //!
 //! Explicit `HIVE_VIEW_THEME` / `view.theme` wins. Auto uses the first
 //! non-control client in this session with a known `client_theme`, then the
@@ -39,9 +36,6 @@ use crate::view_theme::{
     parse_appearance_var, parse_colorfgbg, resolve_pref, Appearance, ThemePref,
 };
 
-/// The first tmux release with `refresh-client -r`.
-pub const PANE_COLOUR_REPORT_SINCE: (u32, u32) = (3, 5);
-
 /// `tmux -V` as (major, minor); None when tmux is missing or the string
 /// is not one tmux prints (`tmux 3.4`, `tmux 3.7c`, `tmux next-3.8`).
 pub fn version() -> Option<(u32, u32)> {
@@ -57,8 +51,10 @@ pub(crate) fn parse_version(output: &str) -> Option<(u32, u32)> {
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
-/// The oldest tmux hive supports, the oldest its suite runs against.
-pub const TMUX_MIN_VERSION: (u32, u32) = (3, 4);
+/// The oldest tmux hive supports, the oldest its suite runs against: the
+/// first with `refresh-client -r`, which is what tells a pane its
+/// terminal's background before any terminal attached.
+pub const TMUX_MIN_VERSION: (u32, u32) = (3, 5);
 
 /// The tmux this server runs, as `3.3`, when it is older than hive
 /// supports; None otherwise or with no tmux.
@@ -227,11 +223,6 @@ pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
             _ => Vec::new(),
         }
     };
-    // Before 3.5 there is no report to store; the terminal answers once the
-    // hived's control client has moved behind it.
-    if version().is_none_or(|v| v < PANE_COLOUR_REPORT_SINCE) {
-        return;
-    }
     let clients = list("list-clients", &[], "#{client_name}");
     let Some(client) = clients.iter().find(|name| !name.is_empty()) else {
         return;
@@ -407,10 +398,10 @@ mod tests {
     }
 
     #[test]
-    fn test_stale_names_only_a_tmux_older_than_3_4() {
-        assert_eq!(stale((3, 3)), Some("3.3".to_string()));
+    fn test_stale_names_only_a_tmux_older_than_3_5() {
+        assert_eq!(stale((3, 4)), Some("3.4".to_string()));
         assert_eq!(stale((2, 9)), Some("2.9".to_string()));
-        assert_eq!(stale((3, 4)), None);
+        assert_eq!(stale((3, 5)), None);
         assert_eq!(stale((3, 7)), None);
         assert_eq!(stale((3, 10)), None);
         assert_eq!(stale((4, 0)), None);

@@ -371,20 +371,14 @@ The hived's control client also decides each pane's OSC 10/11 colour
 answers. tmux answers a pane with a default background from the first
 client in its client list attached to a session holding the window; a
 control client carries black, a terminal the colours it answered tmux at
-attach. On tmux 3.5+ the hived reports each pane's answer itself
-(`tmux/appearance.rs`, `refresh-client -r`). A stored report takes
-precedence over pane style and over every client while any control client
-exists on the server; it is not owned by the client that wrote it. tmux 3.4
-has no report: when a client event (the control client's own attach, or
-any client attaching, switching or leaving) leaves the hived's control
-client ahead of a terminal in the team session's `list-clients` order (the
-control client known by its pid), the monitor ends that attach and
-attaches again at once, outside the restart backoff, so a terminal leads
-the list and panes hear its real background. An
-engine that asked before any terminal attached was told black. Below 3.4
-`hive create`, `hive attach`, `hive doctor` and `hive plugin setup` warn,
-and the team session's `@hive-tmux-stale` puts the version on the status
-bar.
+attach. The hived reports each pane's answer itself
+(`tmux/appearance.rs`, `refresh-client -r`, which is why tmux 3.5 is the
+floor). A stored report takes precedence over pane style and over every
+client while any control client exists on the server; it is not owned by
+the client that wrote it, and it answers an engine that asks before any
+terminal attached. `install.sh` refuses a tmux below 3.5; `hive create`,
+`hive attach`, `hive doctor` and `hive plugin setup` warn, and the team
+session's `@hive-tmux-stale` puts the version on the status bar.
 
 Reports resolve `HIVE_VIEW_THEME`, then `view.theme`. Auto/system keeps its
 existing meaning: an env value of auto bypasses a fixed config preference.
