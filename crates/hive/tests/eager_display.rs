@@ -1058,9 +1058,11 @@ fn test_create_with_a_claude_creator_installs_the_bar_and_mirror_off_on_round_tr
     assert!(line.contains(&format!(" {} ", rig.team)), "{line}");
     assert!(line.contains(" ▾ orch "), "{line}");
     // A tmux older than hive supports names itself on the bar.
+    let (major, minor) = hive::tmux::TMUX_MIN_VERSION;
+    let floor = format!("< {major}.{minor}");
     match hive::tmux::stale_version() {
-        Some(version) => assert!(line.contains(&format!("tmux {version} < 3.4")), "{line}"),
-        None => assert!(!line.contains("< 3.4"), "{line}"),
+        Some(version) => assert!(line.contains(&format!("tmux {version} {floor}")), "{line}"),
+        None => assert!(!line.contains(&floor), "{line}"),
     }
     assert!(!line.contains(" ▴ orch "), "{line}");
 
@@ -1299,16 +1301,12 @@ fn test_status_bar_reflects_pane_options_tmux_renders() {
 }
 
 /// The hived's control client is what tmux answers a pane's OSC 11 query
-/// from; on tmux 3.5+ the hived hands it hive's own appearance for every
-/// pane of the team session, so an engine asking gets the configured
-/// light background, not the control client's uninitialised black.
+/// from; the hived hands it hive's own appearance for every pane of the
+/// team session, so an engine asking gets the configured light background,
+/// not the control client's uninitialised black.
 #[test]
 fn test_create_outside_tmux_tells_team_panes_their_background_colour() {
     let rig = Rig::new("osc");
-    if hive::tmux::version().is_none_or(|v| v < hive::tmux::PANE_COLOUR_REPORT_SINCE) {
-        eprintln!("tmux without refresh-client -r: nothing to report through");
-        return;
-    }
     let window_id = rig.create_outside_tmux();
     wait_for_control_client(&rig);
     let pane = rig.panes(&window_id)[0].0.clone();
@@ -1321,83 +1319,18 @@ fn test_create_outside_tmux_tells_team_panes_their_background_colour() {
 }
 
 /// A terminal attaching to a team session the hived's control client
-/// already sits on: on tmux before 3.5 the control client re-attaches
-/// behind it, so a pane asking hears the terminal's own background; on
-/// 3.5+ hive's report answers (the rig's light), whatever the terminal is.
+/// already sits on: hive's report answers a pane asking (the rig's light),
+/// whatever the terminal's own background is.
 #[test]
 fn test_a_terminal_attaching_after_the_hived_answers_the_panes_colour_queries() {
     let rig = Rig::new("oscterm");
     let window_id = rig.create_outside_tmux();
     wait_for_control_client(&rig);
     let _terminal = rig.attach_client_with_background("2222/4444/6666");
-    let reports = hive::tmux::version().is_some_and(|v| v >= hive::tmux::PANE_COLOUR_REPORT_SINCE);
-    if !reports {
-        wait_until("the control client to move behind the terminal", || {
-            rig.tmux_ok(&["list-clients", "-F", "#{client_control_mode}"])
-                .lines()
-                .collect::<Vec<_>>()
-                == ["0", "1"]
-        });
-    }
     let pane = rig.panes(&window_id)[0].0.clone();
     let reply = pane_background(&rig, &pane);
-    let expected = if reports {
-        "]11;rgb:ffff/ffff/ffff"
-    } else {
-        "]11;rgb:2222/4444/6666"
-    };
     assert!(
-        reply.contains(expected),
-        "pane was told its background is {reply:?}"
-    );
-    rig.delete();
-}
-
-/// The terminal ahead of the hived's control client leaving: on tmux
-/// before 3.5 the control client, now first, re-attaches behind the
-/// terminal still attached, so a pane hears that terminal's background;
-/// on 3.5+ hive's report answers (the rig's light).
-#[test]
-fn test_the_leading_terminal_leaving_hands_the_panes_colour_to_the_next_terminal() {
-    let rig = Rig::new("oscleave");
-    let window_id = rig.create_outside_tmux();
-    wait_for_control_client(&rig);
-    let reports = hive::tmux::version().is_some_and(|v| v >= hive::tmux::PANE_COLOUR_REPORT_SINCE);
-    let order = || {
-        rig.tmux_ok(&["list-clients", "-F", "#{client_control_mode}"])
-            .lines()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
-    let mut first = rig.attach_client_with_background("1111/2222/3333");
-    if !reports {
-        wait_until(
-            "the control client to move behind the first terminal",
-            || order() == ["0", "1"],
-        );
-    }
-    let _second = rig.attach_client_with_background("2222/4444/6666");
-    if !reports {
-        // The first terminal leads: the control client stays put.
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        assert_eq!(order(), ["0", "1", "0"]);
-    }
-    first.hangup();
-    if !reports {
-        wait_until(
-            "the control client to move behind the second terminal",
-            || order() == ["0", "1"],
-        );
-    }
-    let pane = rig.panes(&window_id)[0].0.clone();
-    let reply = pane_background(&rig, &pane);
-    let expected = if reports {
-        "]11;rgb:ffff/ffff/ffff"
-    } else {
-        "]11;rgb:2222/4444/6666"
-    };
-    assert!(
-        reply.contains(expected),
+        reply.contains("]11;rgb:ffff/ffff/ffff"),
         "pane was told its background is {reply:?}"
     );
     rig.delete();
