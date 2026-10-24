@@ -9,9 +9,13 @@ never run from a plain `pytest tests/`. Run after every install:
         python -m pytest tests/acceptance -q
 
 The rig runs once per session (module fixture): scratch tmux session,
-scratch team whose orch is the rig's own pane, and one naturally-worded
-nonce task per CLI, handed over the way an orch hands one — `hive spawn
---task`, every member spawned concurrently. The task wording is
+scratch team whose orch is a claude engine with a real inbox — the e2e
+suite's stub `claude` (`tests/e2e/_stub_claude.py`) under the managed
+launcher in the rig's pane, so a member's report has someone to land on —
+and one naturally-worded nonce task per CLI, handed over the way an orch
+hands one — `hive spawn --task` from the orch engine's own tool context,
+every member spawned concurrently. A shell pane is no orch: nothing there
+receives a report. The task wording is
 deliberately NOT "mechanical, do not improvise" — drift (acks, stray
 sends, self-invented scope) only shows itself when the member has room to
 move.
@@ -19,16 +23,20 @@ move.
 The member does the task and reports back to its sender with `hive send`,
 as the member protocol says. The oracle does not take any one artifact's
 word for that: it reads the ledger (one dispatch in, one report out, no
-ack), the nonce file the task names, and — the one transcript read — how
-often the task envelope landed in the member's own conversation, by the
-engine session resolved from its registry row (`member_transcripts`).
+ack), the frames the orch engine's inbox received (the delivery), the
+nonce file the task names, and — the one transcript read — how often the
+task envelope landed in the member's own conversation, by the engine
+session resolved from its registry row (`member_transcripts`).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
+import signal
 import sqlite3
+import stat
 import subprocess
 import time
 import uuid
@@ -40,6 +48,8 @@ import pytest
 from member_transcripts import count_dispatch_inputs, engine_session
 
 pytestmark = pytest.mark.acceptance
+
+STUB_CLAUDE = Path(__file__).resolve().parents[1] / "e2e" / "_stub_claude.py"
 
 
 def pytest_collection_modifyitems(config, items):
@@ -66,7 +76,10 @@ class Rig:
     session: str
     team: str
     workspace: Path
-    pane: str = ""  # the rig's own pane: the orch identity a spawn is issued under
+    pane: str = ""  # the rig's own pane, where the orch engine runs
+    orch_cfg: Path = Path()  # the stub orch's CLAUDE_CONFIG_DIR
+    orch_job: str = ""  # the stub orch's job id
+    orch_env: dict[str, str] = field(default_factory=dict)  # the orch engine's tool context
     spawn_log: str = ""  # every spawn's stdout/stderr tail
     spawn_rcs: dict[str, int] = field(default_factory=dict)  # member -> spawn exit code
     spawn_results: dict[str, dict] = field(default_factory=dict)  # member -> spawn JSON
@@ -94,6 +107,14 @@ class Rig:
 
     def rows_from(self, member: str) -> list[tuple]:
         return [r for r in self.bus_rows if _bare(r[1]) == member]
+
+    def inbox_frames(self, member: str) -> list[dict]:
+        """Frames the orch engine's inbox received from *member*."""
+        journal = self.orch_cfg / "stub" / f"inbox-{self.orch_job}.jsonl"
+        if not journal.exists():
+            return []
+        frames = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+        return [f for f in frames if f.get("type") == "user" and f.get("from") == f"{self.team}.{member}"]
 
     def report_text(self, member: str) -> str:
         """The member's report rows, body and artifact file content alike."""
@@ -138,43 +159,68 @@ def rig():
         root=Path(f"/tmp/hacc-{run_id}"),  # short: the workspace carries a unix socket
         session=f"hive-acc-{run_id}",
         team=f"acc-{run_id}",
-        workspace=Path(f"/tmp/hacc-{run_id}/ws"),
+        workspace=Path(),
     )
     r.root.mkdir(parents=True)
     (r.root / "tasks").mkdir()
-    jobs_before = {p.name for p in Path.home().glob(".claude/jobs/*")}
+
+    bindir = r.root / "bin"
+    bindir.mkdir()
+    stub = bindir / "claude"
+    shutil.copy(STUB_CLAUDE, stub)
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    r.orch_cfg = r.root / "orch-claude"
 
     _tmux("new-session", "-d", "-s", r.session, "-x", "220", "-y", "50", "-c", str(r.root))
     pane = _tmux("display", "-t", f"{r.session}:", "-p", "#{pane_id}").strip()
     r.pane = pane
     try:
+        # The orch: the managed launcher in the rig's pane, with the stub
+        # answering as `claude` — a bg engine with an inbox socket.
         _tmux("send-keys", "-t", pane, "-l",
-              f"hive create {r.team} --workspace {r.workspace} && touch {r.root}/created")
+              f"export CLAUDE_CONFIG_DIR={r.orch_cfg} PATH={bindir}:$PATH && hive claude")
         _tmux("send-keys", "-t", pane, "Enter")
-        deadline = time.time() + 30
-        while not (r.root / "created").exists():
-            if time.time() > deadline:
-                raise RuntimeError("hive create never finished in the rig pane")
-            time.sleep(1)
+        r.orch_job = _wait_for(lambda: next(iter(_stub_jobs(r.orch_cfg)), {}).get("id", ""), 30,
+                               "the stub orch never minted a job")
+        engine = _wait_for(lambda: _stub_json(r.orch_cfg, f"engine-{r.orch_job}.json"), 30,
+                           "the stub orch engine never registered")
+
+        # Every orch verb runs the way the orch engine's tool subprocess
+        # does: outside any tmux client, its inbox socket the identity. The
+        # team's hived, started by create, inherits this context, so no
+        # real claude member is spawned into this team.
+        r.orch_env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith(("TMUX", "CLAUDE", "ANTHROPIC"))
+        }
+        if os.environ.get("TMUX_TMPDIR"):
+            r.orch_env["TMUX_TMPDIR"] = os.environ["TMUX_TMPDIR"]
+        r.orch_env.update({
+            "CLAUDE_CONFIG_DIR": str(r.orch_cfg),
+            "PATH": f"{bindir}:{os.environ['PATH']}",
+            "CLAUDE_CODE_MESSAGING_SOCKET": engine["socket"],
+        })
+        _wait_for(lambda: _orch_pane(r) == pane, 30, "hive never bound the stub orch to its pane")
+        # An orch's create keeps the workspace in the team's own directory.
+        created = subprocess.run(
+            ["hive", "create", r.team],
+            capture_output=True, text=True, timeout=120, env=r.orch_env,
+        )
+        if created.returncode != 0:
+            raise RuntimeError(f"hive create failed: {created.stdout[-500:]}{created.stderr[-500:]}")
+        r.workspace = Path(_json_object(created.stdout)["workspace"])
 
         task = (
             "请把这段口令写进 {path}：{nonce}。写完后把口令 {nonce} 报给派你任务的人，"
             "顺便说一句你对这个任务的看法。"
         )
-        # The rig's pane is the team's orch: every spawn signs as it. No
-        # $TMUX — the pinned pane identity is what addresses the server.
-        env = dict(os.environ)
-        env.pop("TMUX", None)
-        env["TMUX_PANE"] = pane
-        env.pop("CLAUDE_CODE_MESSAGING_SOCKET", None)
-        env.pop("CODEX_THREAD_ID", None)
         procs = {}
         for c in r.clis:
             member = r.member(c)
             r.task_path(member).write_text(task.format(path=f"{r.root}/{c}.txt", nonce=r.want(c)) + "\n")
             procs[member] = subprocess.Popen(
                 ["hive", "spawn", member, "-t", r.team, "--cli", c, "--task", str(r.task_path(member))],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=r.orch_env,
             )
         for member, proc in procs.items():
             out, err = proc.communicate(timeout=240)
@@ -205,29 +251,77 @@ def rig():
                 )
             else:
                 r.dispatch_inputs[member] = 0
-        for line in _tmux("list-panes", "-t", r.session, "-F",
-                          "#{pane_id} #{@hive-agent}", check=False).splitlines():
-            pid, _, name = line.strip().partition(" ")
-            if name:
+        # create moved the orch into the team's own session; the member
+        # panes are found by their team tag wherever they sit.
+        for line in _tmux("list-panes", "-a", "-F",
+                          "#{pane_id} #{@hive-team} #{@hive-agent}", check=False).splitlines():
+            pid, team, name = (line.strip().split(" ") + ["", ""])[:3]
+            if team == r.team and name:
                 r.member_panes[name] = pid
 
         yield r
     finally:
-        for p in Path.home().glob(".claude/jobs/*"):
-            if p.name in jobs_before:
-                continue
-            try:
-                state = json.loads((p / "state.json").read_text())
-            except (OSError, ValueError):
-                continue
-            if str(state.get("name", "")).startswith(f"{r.team}."):
-                subprocess.run(["claude", "stop", p.name], capture_output=True, timeout=30)
-                subprocess.run(["claude", "rm", p.name], capture_output=True, timeout=30)
         # The registry keeps the team alive (hived won't exit, member
-        # daemons won't reap) — retire every member and the team.
-        subprocess.run(["hive", "delete", r.team, "--down"], capture_output=True, timeout=60)
+        # daemons won't reap) — retire every member and the team, from the
+        # orch's context so its own job is stopped by the stub.
+        subprocess.run(["hive", "delete", r.team, "--down"], capture_output=True, timeout=60,
+                       env=r.orch_env or None)
+        for pid in _stub_pids(r.orch_cfg):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         _tmux("kill-session", "-t", r.session, check=False)
+        _tmux("kill-session", "-t", r.team, check=False)
         subprocess.run(["rm", "-rf", str(r.root)], timeout=15)
+
+
+def _wait_for(probe, timeout: float, failure: str):
+    """*probe*'s first truthy answer within *timeout* seconds."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        got = probe()
+        if got:
+            return got
+        time.sleep(0.5)
+    raise RuntimeError(failure)
+
+
+def _stub_jobs(cfg: Path) -> list[dict]:
+    ledger = cfg / "stub" / "jobs.json"
+    try:
+        return json.loads(ledger.read_text())
+    except (OSError, ValueError):
+        return []
+
+
+def _stub_json(cfg: Path, name: str) -> dict | None:
+    try:
+        return json.loads((cfg / "stub" / name).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _stub_pids(cfg: Path) -> list[int]:
+    """Every stub process: each invocation's own pid and each engine's."""
+    pids: list[int] = []
+    log = cfg / "stub" / "argv.jsonl"
+    if log.exists():
+        pids += [json.loads(line)["pid"] for line in log.read_text().splitlines() if line.strip()]
+    for engine in (cfg / "stub").glob("engine-*.json"):
+        try:
+            pids.append(int(json.loads(engine.read_text())["pid"]))
+        except (OSError, ValueError, KeyError):
+            pass
+    return [p for p in pids if p != os.getpid()]
+
+
+def _orch_pane(r: Rig) -> str:
+    """The pane `hive team` resolves the orch engine's tool context to."""
+    probe = subprocess.run(["hive", "team"], capture_output=True, text=True, timeout=30, env=r.orch_env)
+    if probe.returncode != 0:
+        return ""
+    return str(_json_object(probe.stdout).get("tmux", {}).get("currentPane", ""))
 
 
 def _bare(address: object) -> str:
