@@ -4,6 +4,16 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.24.0
+
+### Features
+
+- Breaking: tmux 3.5 is required. `install.sh` refuses an older or missing tmux before downloading anything, and the tmux 3.4 path is gone: on 3.4 nothing can tell a pane its background before a terminal attaches, so a member started first (codex asks once) drew dark on a light terminal; 3.5's `refresh-client -r` answers every pane from the start (#262)
+
+### Internal
+
+- The acceptance rig's orch is a stub claude engine with a real inbox instead of a shell pane, and each member's report must land in that inbox once, carrying its nonce; the claude hooks test runs in a team of its own (#261)
+
 ## 0.23.0
 
 ### Features
