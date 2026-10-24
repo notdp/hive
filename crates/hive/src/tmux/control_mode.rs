@@ -1,17 +1,8 @@
 //! tmux control-mode output parsing and the pane-activity monitor.
 //!
-//! The monitor's control client is also what tmux answers a pane's colour
-//! query from while it is the session's first client (`appearance.rs`).
-//! On tmux before 3.5, which has no colour report, the run ends whenever a
-//! client event (its own attach, a client attaching, switching or leaving
-//! anywhere on the server) leaves it ahead of a terminal in the team
-//! session's client list, and the monitor attaches again at once: a new
-//! client joins the tail of tmux's client list, so a terminal leads and
-//! panes hear its real background.
-//!
-//! ponytail: an engine that asked while no terminal was attached was told
-//! black, and asks only once; a terminal attached to another session that
-//! links the window is not looked at (the query is the team session's).
+//! The monitor's control client also carries the per-pane colour reports
+//! (`refresh-client -r`) tmux answers a pane's colour query from
+//! (`appearance.rs`).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -354,15 +345,6 @@ fn record_control_mode_output(inner: &MonitorInner, pane_id: &str, payload: &str
         .insert(pane_id.to_string(), Instant::now());
 }
 
-/// Why a run of the monitor ended.
-#[derive(Debug, PartialEq, Eq)]
-enum RunEnd {
-    /// The client went away, or `stop` asked it to.
-    Detached,
-    /// The control client led a terminal in the session: attach again now.
-    YieldedToTerminal,
-}
-
 /// The delay before the next attach: `CONTROL_MODE_RESTART_DELAY` after a
 /// run that stayed attached (or for the first retry), otherwise double the
 /// previous delay up to `CONTROL_MODE_MAX_RESTART_DELAY`.
@@ -593,14 +575,9 @@ fn monitor_run_loop(inner: Arc<MonitorInner>, session_target: String) {
     while !inner.stop.load(Ordering::SeqCst) {
         let started = Instant::now();
         // Best-effort monitor: fall back to retry rather than crashing hived.
-        let end = monitor_run_once(&inner, &session_target);
+        let _ = monitor_run_once(&inner, &session_target);
         if inner.stop.load(Ordering::SeqCst) {
             break;
-        }
-        if matches!(end, Ok(RunEnd::YieldedToTerminal)) {
-            // A deliberate end of an attach that worked, not a failure.
-            delay = None;
-            continue;
         }
         let next = next_restart_delay(delay, started.elapsed().as_secs_f64());
         delay = Some(next);
@@ -716,55 +693,6 @@ fn write_control_command(master: RawFd, mut bytes: &[u8]) -> std::io::Result<()>
     Ok(())
 }
 
-/// Whether the client with *own_pid* comes before the first terminal
-/// (non-control client) in *clients*, `list-clients` lines of
-/// `#{client_pid}\t#{client_control_mode}` in tmux's own order. False
-/// when it is not listed or no terminal is.
-fn control_client_leads_terminals(clients: &str, own_pid: u32) -> bool {
-    let mut ours_seen = false;
-    for line in clients.lines() {
-        let Some((pid, control)) = line.split_once('\t') else {
-            continue;
-        };
-        if pid.parse() == Ok(own_pid) {
-            ours_seen = true;
-        } else if control == "0" {
-            return ours_seen;
-        }
-    }
-    false
-}
-
-/// `control_client_leads_terminals` over the session's clients as tmux
-/// lists them now; false when the query fails.
-fn session_control_client_leads(session_target: &str, own_pid: u32) -> bool {
-    let args = [
-        "list-clients",
-        "-t",
-        session_target,
-        "-F",
-        "#{client_pid}\t#{client_control_mode}",
-    ];
-    match super::run::run(&args, false, 1) {
-        Ok(r) if r.returncode == 0 => control_client_leads_terminals(&r.stdout, own_pid),
-        _ => false,
-    }
-}
-
-/// Whether *line* may have changed which client leads the team session's
-/// client list: this client's own attach (`%session-changed`), or any
-/// client attaching, switching or leaving — one ahead of ours leaving, or
-/// switching away, puts ours first.
-fn client_order_may_change(line: &str) -> bool {
-    [
-        "%session-changed ",
-        "%client-session-changed ",
-        "%client-detached ",
-    ]
-    .iter()
-    .any(|prefix| line.starts_with(prefix))
-}
-
 fn colour_client_changed(line: &str, session_target: &str, clients: &[String]) -> bool {
     if let Some(detached) = line.strip_prefix("%client-detached ") {
         return clients.iter().any(|client| client == detached);
@@ -792,7 +720,7 @@ fn colour_client_changed(line: &str, session_target: &str, clients: &[String]) -
 /// created from an agent's tool shell — is then reported as the terminal,
 /// and codex refuses to draw. The client presents the terminal the panes
 /// are given: the server's `default-terminal`.
-fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Result<RunEnd> {
+fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Result<()> {
     let (master, slave) = monitor_openpty()?;
     let mut cmd = Command::new("tmux");
     cmd.args(["-C", "attach", "-t", session_target]);
@@ -835,27 +763,19 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
     };
     *inner.master_fd.lock().unwrap() = Some(master);
     record_control_client(&inner.workspace, session_target, child.id() as i32);
-    let version = super::version();
-    let supports_colours = version.is_some_and(|v| v >= super::PANE_COLOUR_REPORT_SINCE);
-    // Checked on client events only, this run's own attach among them.
-    let yields_to_terminals = version.is_some_and(|v| v < super::PANE_COLOUR_REPORT_SINCE);
     let mut colour_reports = PaneColourReports::default();
-    let mut panes_dirty = true;
-    if supports_colours {
-        panes_dirty = !report_session_pane_colours(
-            master,
-            session_target,
-            &inner.workspace,
-            &mut colour_reports,
-            true,
-        );
-    }
+    let mut panes_dirty = !report_session_pane_colours(
+        master,
+        session_target,
+        &inner.workspace,
+        &mut colour_reports,
+        true,
+    );
     let mut colour_sampling = ColourSampling {
         last_sample: Instant::now(),
         last_client_event: None,
     };
 
-    let mut end = RunEnd::Detached;
     let mut buffer: Vec<u8> = Vec::new();
     while !inner.stop.load(Ordering::SeqCst) {
         if let Ok(Some(_)) = child.try_wait() {
@@ -877,14 +797,12 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
         }
         let mut refresh_panes = false;
         let mut refresh_clients = false;
-        let mut client_order_changed = false;
         while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
             let raw_line: Vec<u8> = buffer.drain(..=pos).collect();
             // Drop invalid UTF-8 bytes.
             let decoded =
                 String::from_utf8_lossy(&raw_line[..raw_line.len() - 1]).replace('\u{fffd}', "");
             let decoded = decoded.trim_end_matches('\r');
-            client_order_changed |= client_order_may_change(decoded);
             let (pane_id, payload) = parse_control_mode_output(decoded);
             if !pane_id.is_empty() {
                 record_control_mode_output(inner, &pane_id, &payload);
@@ -897,36 +815,22 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
                 colour_sampling.last_client_event = Some(Instant::now());
             }
         }
-        if yields_to_terminals
-            && client_order_changed
-            && session_control_client_leads(session_target, child.id())
-        {
-            crate::notify_debug::emit(
-                &inner.workspace,
-                "monitor.yield_to_terminal",
-                &[("session", serde_json::json!(session_target))],
-            );
-            end = RunEnd::YieldedToTerminal;
-            break;
-        }
-        if supports_colours {
-            let sampled = colour_sampling.sample_if_due(
-                Instant::now(),
-                colour_reports.has_unknown_client,
-                refresh_panes || refresh_clients,
-                || {
-                    report_session_pane_colours(
-                        master,
-                        session_target,
-                        &inner.workspace,
-                        &mut colour_reports,
-                        panes_dirty,
-                    )
-                },
-            );
-            if sampled == Some(true) {
-                panes_dirty = false;
-            }
+        let sampled = colour_sampling.sample_if_due(
+            Instant::now(),
+            colour_reports.has_unknown_client,
+            refresh_panes || refresh_clients,
+            || {
+                report_session_pane_colours(
+                    master,
+                    session_target,
+                    &inner.workspace,
+                    &mut colour_reports,
+                    panes_dirty,
+                )
+            },
+        );
+        if sampled == Some(true) {
+            panes_dirty = false;
         }
     }
     terminate_child(&mut child);
@@ -935,7 +839,7 @@ fn monitor_run_once(inner: &MonitorInner, session_target: &str) -> std::io::Resu
     unsafe {
         libc::close(master);
     }
-    Ok(end)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -988,34 +892,6 @@ mod colour_tests {
             "team",
             &[]
         ));
-    }
-
-    #[test]
-    fn test_control_client_leads_only_when_it_precedes_the_first_terminal() {
-        // A terminal arrived behind the hived's client (pid 10).
-        assert!(control_client_leads_terminals("10\t1\n20\t0\n", 10));
-        // Another control client ahead does not stop ours from moving.
-        assert!(control_client_leads_terminals("5\t1\n10\t1\n20\t0", 10));
-        // The terminal already leads, also with a second one behind ours.
-        assert!(!control_client_leads_terminals("20\t0\n10\t1", 10));
-        assert!(!control_client_leads_terminals("20\t0\n10\t1\n30\t0", 10));
-        // Ours not listed, or no terminal at all.
-        assert!(!control_client_leads_terminals("20\t0\n30\t1", 10));
-        assert!(!control_client_leads_terminals("10\t1\n30\t1", 10));
-        assert!(!control_client_leads_terminals("", 10));
-    }
-
-    #[test]
-    fn test_client_order_may_change_on_any_attach_switch_or_detach() {
-        // This client's own attach, then any client, any session.
-        assert!(client_order_may_change("%session-changed $1 team"));
-        assert!(client_order_may_change(
-            "%client-session-changed /dev/ttys001 $2 other"
-        ));
-        assert!(client_order_may_change("%client-detached /dev/ttys001"));
-        assert!(!client_order_may_change("%output %1 %client-detached x"));
-        assert!(!client_order_may_change("%layout-change @1 x"));
-        assert!(!client_order_may_change("%sessions-changed"));
     }
 
     #[test]
