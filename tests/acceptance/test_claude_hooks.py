@@ -22,6 +22,8 @@ import json
 import os
 import subprocess
 import time
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,57 @@ import pytest
 pytestmark = pytest.mark.acceptance
 
 REPORT_WINDOW = int(os.environ.get("HIVE_ACCEPTANCE_HOOK_WINDOW", "150"))
+
+
+@dataclass
+class HookTeam:
+    team: str
+    pane: str
+    root: Path
+    workspace: Path
+
+
+def _tmux(*args: str) -> str:
+    return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=20).stdout
+
+
+@pytest.fixture(scope="module")
+def team():
+    """A team of its own, created from a plain shell pane: its hived runs in
+    the human's real context, where a real claude member is reached. (The
+    shared rig's hived runs in its stub orch's context instead.)"""
+    run_id = uuid.uuid4().hex[:6]
+    t = HookTeam(team=f"hook-{run_id}", pane="", root=Path(f"/tmp/hhook-{run_id}"),
+                 workspace=Path(f"/tmp/hhook-{run_id}/ws"))
+    t.root.mkdir(parents=True)
+    session = f"hive-hook-{run_id}"
+    jobs_before = {p.name for p in Path.home().glob(".claude/jobs/*")}
+    _tmux("new-session", "-d", "-s", session, "-x", "220", "-y", "50", "-c", str(t.root))
+    t.pane = _tmux("display", "-t", f"{session}:", "-p", "#{pane_id}").strip()
+    try:
+        _tmux("send-keys", "-t", t.pane, "-l",
+              f"hive create {t.team} --workspace {t.workspace} && touch {t.root}/created")
+        _tmux("send-keys", "-t", t.pane, "Enter")
+        deadline = time.time() + 30
+        while not (t.root / "created").exists():
+            if time.time() > deadline:
+                raise RuntimeError("hive create never finished in the hooks team's pane")
+            time.sleep(1)
+        yield t
+    finally:
+        for p in Path.home().glob(".claude/jobs/*"):
+            if p.name in jobs_before:
+                continue
+            try:
+                state = json.loads((p / "state.json").read_text())
+            except (OSError, ValueError):
+                continue
+            if str(state.get("name", "")).startswith(f"{t.team}."):
+                subprocess.run(["claude", "stop", p.name], capture_output=True, timeout=30)
+                subprocess.run(["claude", "rm", p.name], capture_output=True, timeout=30)
+        subprocess.run(["hive", "delete", t.team, "--down"], capture_output=True, timeout=60)
+        _tmux("kill-session", "-t", session)
+        subprocess.run(["rm", "-rf", str(t.root)], timeout=15)
 
 
 def _hook_rows(notify: Path, member: str) -> list[dict]:
@@ -45,22 +98,22 @@ def _hook_rows(notify: Path, member: str) -> list[dict]:
     return rows
 
 
-def _env(rig) -> dict[str, str]:
-    """The same parentage as the rig's spawns: no $TMUX, the rig pane's own
-    identity pinned, so every verb is issued by the team's orch."""
+def _env(team) -> dict[str, str]:
+    """The creating shell pane's context: no $TMUX, that pane's identity
+    pinned, so every verb is issued from it."""
     env = dict(os.environ)
     env.pop("TMUX", None)
-    env["TMUX_PANE"] = rig.pane
+    env["TMUX_PANE"] = team.pane
     for key in list(env):
         if key.startswith("CLAUDE") or key.startswith("ANTHROPIC"):
             env.pop(key, None)
     return env
 
 
-def _spawn(rig, member: str, task: Path) -> dict:
+def _spawn(team, member: str, task: Path) -> dict:
     out = subprocess.run(
-        ["hive", "spawn", member, "-t", rig.team, "--cli", "claude", "--task", str(task)],
-        capture_output=True, text=True, timeout=180, env=_env(rig),
+        ["hive", "spawn", member, "-t", team.team, "--cli", "claude", "--task", str(task)],
+        capture_output=True, text=True, timeout=180, env=_env(team),
     )
     assert out.returncode == 0, out.stdout + out.stderr
     payload = json.loads(out.stdout)
@@ -68,8 +121,8 @@ def _spawn(rig, member: str, task: Path) -> dict:
     return payload
 
 
-def _kill(rig, member: str) -> None:
-    subprocess.run(["hive", "kill", member, "-t", rig.team], capture_output=True, timeout=60, env=_env(rig))
+def _kill(team, member: str) -> None:
+    subprocess.run(["hive", "kill", member, "-t", team.team], capture_output=True, timeout=60, env=_env(team))
 
 
 def _wait_for_complete(notify: Path, member: str, window: int) -> list[dict]:
@@ -82,27 +135,28 @@ def _wait_for_complete(notify: Path, member: str, window: int) -> list[dict]:
     return _hook_rows(notify, member)
 
 
-def test_claude_member_reports_its_turn_to_the_hived(rig):
-    notify = rig.workspace / "run" / "notify.jsonl"
-    endpoint = rig.workspace / "run" / "hooks-endpoint.json"
-    assert endpoint.exists(), "the team's hived publishes its hooks endpoint"
-    assert (endpoint.stat().st_mode & 0o777) == 0o600
+def test_claude_member_reports_its_turn_to_the_hived(team):
+    notify = team.workspace / "run" / "notify.jsonl"
+    endpoint = team.workspace / "run" / "hooks-endpoint.json"
 
-    task = rig.root / "hooked-task.md"
+    task = team.root / "hooked-task.md"
     task.write_text("Reply with exactly the word `ready` and nothing else. Do not run any command.\n")
 
     members = []
     rows: list[dict] = []
     for attempt, member in enumerate(("hooked", "hooked-again")):
         members.append(member)
-        _spawn(rig, member, task)
+        _spawn(team, member, task)
+        # the first spawn brings the team's hived up
+        assert endpoint.exists(), "the team's hived publishes its hooks endpoint"
+        assert (endpoint.stat().st_mode & 0o777) == 0o600
         rows = _wait_for_complete(notify, member, REPORT_WINDOW)
         if any(r.get("hook") == "turn.complete" for r in rows):
             break
         if attempt == 0:
             # the one tolerated case: a spare booted before the plugin
             # record carried the hooks module (see the module docstring)
-            _kill(rig, member)
+            _kill(team, member)
             print(f"{member}: no hook report within {REPORT_WINDOW}s; one more spawn for the spare lag")
     try:
         hooks = [r.get("hook") for r in rows]
@@ -113,14 +167,14 @@ def test_claude_member_reports_its_turn_to_the_hived(rig):
         assert not any(r.get("event") == "claude.hook_refused" for r in rows)
         # the member's row says the busy verdict is the engine's own report
         team = json.loads(subprocess.run(
-            ["hive", "team", "-t", rig.team], capture_output=True, text=True, timeout=30, env=_env(rig),
+            ["hive", "team", "-t", team.team], capture_output=True, text=True, timeout=30, env=_env(team),
         ).stdout)
         row = next((m for m in team.get("members", []) if m.get("name") == members[-1]), {})
         assert row.get("busySource") == "hook", row
         assert row.get("hookEvent") == "turn.complete", row
         assert row.get("busy") is False, row
         # the engine reports its own end when hive retires it
-        _kill(rig, members[-1])
+        _kill(team, members[-1])
         deadline = time.time() + 30
         end = None
         while time.time() < deadline and end is None:
@@ -130,4 +184,4 @@ def test_claude_member_reports_its_turn_to_the_hived(rig):
         assert end.get("reason"), end
     finally:
         for member in members:
-            _kill(rig, member)
+            _kill(team, member)

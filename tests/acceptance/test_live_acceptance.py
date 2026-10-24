@@ -84,6 +84,21 @@ def test_report_carries_the_nonce(rig):
         )
 
 
+def test_report_lands_in_the_orch_inbox(rig):
+    # bought by: a report the ledger records but nobody receives — an orch
+    # with no inbox, or a member writing the ledger itself; the delivery is
+    # the frame the orch engine's own inbox took, carrying the nonce
+    for cli in rig.clis:
+        member = rig.member(cli)
+        frames = rig.inbox_frames(member)
+        assert len(frames) == 1, (
+            f"{member}: the orch inbox took {len(frames)} frames from it, one report expected"
+        )
+        assert rig.want(cli) in frames[0]["message"]["content"], (
+            f"{member}: the delivered report lacks the nonce: {frames[0]['message']['content'][:200]!r}"
+        )
+
+
 def test_member_panes_render_color(rig):
     # bought by: NO_COLOR leaking into a cold engine's lifetime render env
     for cli in rig.clis:
