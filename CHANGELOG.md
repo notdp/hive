@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.24.1
+
+### Internal
+
+- The hive skill has a desktop orch link the team's attach tab, `[hive <team>](#terminal/<tab_id>)`, on every spawn and whenever a reply points at the team window, reusing the tab the first `hive attach` opened (#263)
+
 ## 0.24.0
 
 ### Features
