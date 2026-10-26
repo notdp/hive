@@ -31,7 +31,7 @@ hive attach <team> / hive kill <member> [-t <team>] / hive delete <team> [--down
 
 create/join 返回 `handoff: "transferred"` 时,原终端自动进入团窗口,按 `nextStep` 继续当前任务,省略 `hive attach` 提示。已在 tmux 团窗口中时也直接继续。
 
-桌面 Claude:第一个 `hive spawn` 返回 `dispatched: true`(或 `Agent '<name>' spawned`)后,用 `mcp__terminal__run_in_terminal`(延迟加载,先 `ToolSearch` 搜 `select:mcp__terminal__run_in_terminal`)在 Terminal 面板开一个 tab 跑 `hive attach <team>`,human 就能看团。只在这一次跑:`hive create` 刚返回时团窗口里还没有成员 pane,只有一个空 shell,不跑;之后的 spawn、派发、kill 团窗口已经开着,再跑只会多开 tab。交接结果要求恢复,或 human 主动询问如何打开团窗口时,再跑一次或给 ```bash 命令块。
+桌面 Claude:第一个 `hive spawn` 返回 `dispatched: true`(或 `Agent '<name>' spawned`)后,用 `mcp__terminal__run_in_terminal`(延迟加载,先 `ToolSearch` 搜 `select:mcp__terminal__run_in_terminal`)在 Terminal 面板开一个 tab 跑 `hive attach <team>`,human 就能看团;记下它返回的 `tab_id`。只在这一次跑:`hive create` 刚返回时团窗口里还没有成员 pane,只有一个空 shell,不跑;之后的 spawn、派发、kill 团窗口已经开着,再跑只会多开 tab。这一轮起,每次 spawn 成功,以及回复里提到团窗口或终端时(成员回报、等成员、交接恢复、human 问怎么看团),都给可点击的标签 `[hive <team>](#terminal/<tab_id>)`,指向这个已开的 tab。`tab_id` 只用工具返回的值;拿不准就用 `mcp__terminal__list_terminal_tabs`(同样延迟加载)查,这个 tab 已关时才再跑一次 `hive attach <team>`,用新的 `tab_id`。
 
 只对桌面 Claude:标题徽章 `[<team>.<member>] `(orch 是 `[<team>.orch] `)由 hive 插件自动维护——入册后这一轮结束时加上,退队或删团后的下一轮结束时摘掉。不要自己改标题。tmux pane 的 border 已带队籍。
 

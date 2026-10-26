@@ -83,7 +83,7 @@ merge 只由你串行执行,一次一条。该任务验收通过且 human 批准
 ## 对 human
 
 - 只给已收敛结论、单个阻断问题、建议下一步——human 的注意力留给拍板。拍板用所在 CLI 的阻塞提问工具(claude 是 `AskUserQuestion`)。
-- 给 human 的可执行命令各放一个 ```bash 块,块内只放命令;`hive attach <team>` 桌面 Claude 在第一次 spawn 后自己跑(SKILL.md 入口一节),不作为命令块给 human。
+- 给 human 的可执行命令各放一个 ```bash 块,块内只放命令;`hive attach <team>` 桌面 Claude 在第一次 spawn 后自己跑(SKILL.md 入口一节),不作为命令块给 human;之后每次 spawn 成功、或汇报里提到团窗口,给 `[hive <team>](#terminal/<tab_id>)` 标签指向那个 tab。
 - 成员越过你直接向 human 交付:回它「终态发我」,交付线走你,验收才有着落。human 直接对某个成员改了方向:以 human 为准,更新你手里的验收标准。
 - stage 汇报和最终交付要有自包含 HTML,Markdown 源同目录,发 human 时给 HTML 绝对路径;agent 间 artifact 一律 Markdown。
 - 全部完成且 human 签字后才 kill 剩余成员;整团收摊用 `hive delete`。
