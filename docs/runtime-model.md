@@ -381,25 +381,24 @@ withdrawn, and it answers an engine that asks before any terminal
 attached.
 
 So a report is written only when tmux would otherwise answer from a
-control client (`reports_needed`, over `list-clients` in server order):
-the session's first client is a control client and a terminal in the
-session sits behind it, or nobody is in the session and no terminal
-anywhere on the server is older than the session's control client. A
-terminal ahead of every control client — in the session, or elsewhere
-while nobody is in the session, since it is first the moment it switches
-in — answers the panes itself, with its own RGB; this is the terminal a
-human had attached before the team's hived started. A pane passed over is
-not counted as reported: when that terminal detaches or leaves and the
-control client becomes first, the next sample writes it. A pane already
-reported keeps its report current, since tmux answers it from there. The
-attach's direct writes (below) follow the same rule. Narrowings: a
-terminal that never answered tmux's OSC 11 is skipped by tmux, which falls
-to the control client behind it; clients of another session a window is
-linked into are not counted; and a report written earlier — while nobody
-watched, by an attach, or by a monitor before it restarted (its record
-starts empty) — stays. While nobody is in the session and an older
-terminal is elsewhere, the panes hear the control client's black until it
-switches in. `install.sh` refuses a tmux below 3.5; `hive create`,
+control client (`reports_needed`, over the session's `list-clients`, which
+walks the same list): when the session's first client is a control client.
+That is a terminal behind it, and also a session nobody is in — an engine
+started there asks at once, and a terminal attaching later sits behind the
+control client. A terminal first in the session answers the panes itself,
+with its own RGB; this is the terminal a human had attached before the
+team's hived started and then brought into the team (`switch-client`,
+`hive attach` or a launcher moving its pane in). A pane passed over is not
+counted as reported: when that terminal detaches or leaves and the control
+client becomes first, the next sample writes it. A pane already reported
+keeps its report current, since tmux answers it from there. The attach's
+direct writes (below) follow the same rule. Narrowings: a terminal that
+never answered tmux's OSC 11, or a suspended one, is skipped by tmux, which
+falls to the control client behind it; clients of another session a window
+is linked into are not counted; and a report written earlier — while
+nobody watched, by an attach, or by a monitor before it restarted (its
+record starts empty) — stays, so a pane told the selected guess before an
+older terminal switched in keeps the guess. `install.sh` refuses a tmux below 3.5; `hive create`,
 `hive attach`, `hive doctor` and `hive plugin setup` warn, and the team
 session's `@hive-tmux-stale` puts the version on the status bar.
 
