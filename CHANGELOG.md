@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.24.2
+
+### Fixes
+
+- A codex member in a team entered from a terminal already attached to tmux (a dark terminal that reports no theme, on a light desktop) no longer draws its composer and messages on white blocks: hive now writes a pane's colour report only where tmux would otherwise answer from the hived's control client, and otherwise leaves the answer to tmux, which gives the terminal's exact background. `hive attach` and the launchers also ask the terminal from inside a plain tmux session (#265)
+
 ## 0.24.1
 
 ### Internal
