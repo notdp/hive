@@ -31,7 +31,9 @@ from tests.e2e._helpers import hive_binary_argv, wait_for
 class Terminal:
     """Drain an attached client and answer OSC queries dark, withholding 997."""
 
-    def __init__(self, env: dict[str, str], argv: list[str]):
+    def __init__(self, env: dict[str, str], argv: list[str],
+                 fg: bytes = b"ffff/ffff/ffff", bg: bytes = b"0000/0000/0000"):
+        self.colours = {b"10": fg, b"11": bg}
         self.master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         self.child = subprocess.Popen(
@@ -63,7 +65,7 @@ class Terminal:
                 self.theme_requested.set()
             matches = list(query.finditer(pending))
             for match in matches:
-                colour = b"ffff/ffff/ffff" if match[1] == b"10" else b"0000/0000/0000"
+                colour = self.colours[match[1]]
                 os.write(self.master, b"\x1b]" + match[1] + b";rgb:" + colour + b"\x1b\\")
             if matches:
                 pending = pending[matches[-1].end():]
@@ -118,7 +120,9 @@ class Lane:
 
 
 @contextlib.contextmanager
-def colour_lane():
+def colour_lane(early_terminal: dict | None = None):
+    """*early_terminal*: Terminal colours for a human attached to a plain
+    session of the server before the team and its hived exist."""
     real_tmux = shutil.which("tmux")
     version = subprocess.check_output([real_tmux, "-V"], text=True).strip()
     parsed = re.search(r"(\d+)\.(\d+)", version)
@@ -168,6 +172,11 @@ def colour_lane():
                     if (event := json.loads(line)).get("event") == "pane-colours.selected"]
 
         try:
+            if early_terminal is not None:
+                lane.humans = [Terminal(env, ["tmux", "-u", "new-session", "-s", "plain"], **early_terminal)]
+                wait_for(lambda: subprocess.run([str(wrapper), "list-clients", "-F", "#{client_control_mode}"],
+                                                env=env, text=True, capture_output=True,
+                                                timeout=10).stdout.strip() == "0", timeout=10)
             created = subprocess.run([*hive_binary_argv(), "create", team, "--workspace", str(workspace)],
                                      env=env, cwd=root, text=True, capture_output=True, timeout=30)
             assert created.returncode == 0, created.stderr
@@ -278,3 +287,65 @@ def test_e2e_attach_stamps_what_a_terminal_without_theme_reports_answers():
         path = root / "reply-0.json"
         wait_for(path.exists, timeout=10)
         assert "rgb:0000/0000/0000" in json.loads(path.read_text())
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
+def test_e2e_attach_inside_tmux_stamps_what_the_plain_session_relays():
+    """Attach run from a pane of the human's own session (#264): tmux relays
+    the terminal's dark answer there, so the team's panes are told dark."""
+    with colour_lane() as lane:
+        root, env, team, tmux = lane.root, lane.env, lane.team, lane.tmux
+        attach = shlex.join([*hive_binary_argv(), "attach", team])
+        human = Terminal(env, ["tmux", "-u", "new-session", "-s", "plain", f"sleep 1; {attach}; sleep 30"])
+        lane.humans = [human]
+        wait_for(lambda: any(s["source"] == "session" and s["appearance"] == "dark"
+                             for s in lane.selections()), timeout=15)
+        assert tmux("show-environment", "-t", team, "HIVE_APPEARANCE") == "HIVE_APPEARANCE=dark"
+        time.sleep(0.1)
+        probe = root / "probe.py"
+        probe.write_text(PROBE)
+        tmux("respawn-pane", "-k", "-t", lane.pane, shlex.join([sys.executable, str(probe), str(root), "1"]))
+        path = root / "reply-0.json"
+        wait_for(path.exists, timeout=10)
+        assert "rgb:0000/0000/0000" in json.loads(path.read_text())
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
+@pytest.mark.parametrize("enter", ["switch-client", "hive-attach"])
+def test_e2e_a_terminal_older_than_the_hived_answers_the_team_panes_itself(enter):
+    """#264: a dark terminal on a light desktop, attached to the human's own
+    session long before the team and its hived exist, never reporting a
+    theme. Entering the team, by a bare switch-client or by `hive attach`
+    from that session, its panes hear the terminal's exact background:
+    tmux asks it ahead of the hived's control client, so hive reports
+    nothing, neither from the hived nor from the attach."""
+    early = {"fg": b"e0e0/e0e0/e0e0", "bg": b"1818/1818/1818"}
+    with colour_lane(early_terminal=early) as lane:
+        root, env, team, pane, tmux = lane.root, lane.env, lane.team, lane.pane, lane.tmux
+        client = tmux("list-clients", "-t", "plain", "-F", "#{client_name}")
+        assert client and "\n" not in client, client
+        if enter == "switch-client":
+            tmux("switch-client", "-c", client, "-t", team)
+        else:
+            attach = shlex.join([*hive_binary_argv(), "attach", team])
+            tmux("respawn-pane", "-k", "-t", "plain:", f"{attach}; sleep 30")
+        # The terminal is first in the team session: older than the hived's client.
+        wait_for(lambda: tmux("list-clients", "-t", team, "-F", "#{client_control_mode}").splitlines()
+                 == ["0", "1"], timeout=15)
+        if enter == "hive-attach":
+            assert tmux("show-environment", "-t", team, "HIVE_APPEARANCE") == "HIVE_APPEARANCE=dark"
+        time.sleep(0.2)
+        probe = root / "probe.py"
+        probe.write_text(PROBE)
+        tmux("respawn-pane", "-k", "-t", pane, shlex.join([sys.executable, str(probe), str(root), "1"]))
+        path = root / "reply-0.json"
+        wait_for(path.exists, timeout=10)
+        reply = json.loads(path.read_text())
+        assert "rgb:1818/1818/1818" in reply, repr(reply)
+        selections = lane.selections()
+        assert selections and all(s.get("reports") is False for s in selections), selections
+        reports = [args for line in lane.trace.read_text().splitlines()
+                   if (args := json.loads(line))[:1] == ["refresh-client"] and "-r" in args]
+        assert reports == [], reports
+        print(json.dumps({"server": lane.server, "version": lane.version, "enter": enter,
+                          "reply": reply, "selections": selections}))

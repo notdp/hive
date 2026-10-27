@@ -1,7 +1,8 @@
 //! tmux control-mode output parsing and the pane-activity monitor.
 //!
 //! The monitor's control client also carries the per-pane colour reports
-//! (`refresh-client -r`) tmux answers a pane's colour query from
+//! (`refresh-client -r`) tmux answers a pane's colour query from, written
+//! only while tmux would otherwise answer from a control client
 //! (`appearance.rs`).
 
 use std::collections::HashMap;
@@ -651,7 +652,9 @@ fn report_session_pane_colours(
     reports.clients = snapshot.clients;
     reports.has_unknown_client = snapshot.has_unknown_client;
     let selected = snapshot.selected;
-    if reports.selected.as_ref() != Some(&selected) {
+    let terminal_answers = !snapshot.reports;
+    if reports.selected.as_ref() != Some(&selected) || reports.terminal_answers != terminal_answers
+    {
         crate::notify_debug::emit(
             workspace,
             "pane-colours.selected",
@@ -666,9 +669,12 @@ fn report_session_pane_colours(
                 ),
                 ("source", serde_json::json!(selected.source)),
                 ("client", serde_json::json!(selected.client)),
+                // false: tmux answers the panes from a terminal, unreported.
+                ("reports", serde_json::json!(!terminal_answers)),
             ],
         );
         reports.selected = Some(selected);
+        reports.terminal_answers = terminal_answers;
     }
     // Failed writes stay pending for the next sample.
     let _ = reports.write_pending(|lines| write_control_command(master, lines.as_bytes()));
@@ -905,7 +911,11 @@ mod colour_tests {
         let seen = Rc::clone(&calls);
         set_run_override(move |_, _, _| {
             *seen.borrow_mut() += 1;
-            Ok(ok_run(0, "C\t1\t\tcontrol\nC\t0\tdark\thuman\nP\t%1", ""))
+            Ok(ok_run(
+                0,
+                "C\t1\t\tcontrol\nC\t0\tdark\thuman\nG\t1\tcontrol\nG\t0\thuman\nP\t%1",
+                "",
+            ))
         });
         let output = std::fs::File::create(temp.path().join("commands")).unwrap();
         let mut reports = PaneColourReports::default();
@@ -1009,7 +1019,8 @@ mod colour_tests {
         set_run_override(|_, _, _| {
             Ok(ok_run(
                 0,
-                "C\t1\t\tcontrol\nC\t0\tdark\tselected\nC\t0\t\tpending",
+                "C\t1\t\tcontrol\nC\t0\tdark\tselected\nC\t0\t\tpending\n\
+                 G\t1\tcontrol\nG\t0\tselected\nG\t0\tpending",
                 "",
             ))
         });
@@ -1041,7 +1052,7 @@ mod colour_tests {
         let seen = Rc::clone(&calls);
         let snapshot = Rc::new(RefCell::new(ok_run(
             0,
-            "C\t1\t\tcontrol\nP\t%1\nP\t%2\n",
+            "C\t1\t\tcontrol\nG\t1\tcontrol\nP\t%1\nP\t%2\n",
             "",
         )));
         let response = Rc::clone(&snapshot);
@@ -1062,7 +1073,8 @@ mod colour_tests {
         assert!(calls.borrow()[0].iter().any(|a| a == "list-panes"));
         let initial = output.metadata().unwrap().len();
         assert!(initial > 0);
-        *snapshot.borrow_mut() = ok_run(0, "C\t0\tdark\thuman\n", "");
+        let watched = "C\t1\t\tcontrol\nC\t0\tdark\thuman\nG\t1\tcontrol\nG\t0\thuman\n";
+        *snapshot.borrow_mut() = ok_run(0, watched, "");
         assert!(report_session_pane_colours(
             fd,
             "team",
@@ -1080,6 +1092,10 @@ mod colour_tests {
                 "team",
                 "-F",
                 "C\t#{client_control_mode}\t#{client_theme}\t#{client_name}",
+                ";",
+                "list-clients",
+                "-F",
+                "G\t#{client_control_mode}\t#{client_name}",
                 ";",
                 "show-environment",
                 "-t",
@@ -1109,7 +1125,7 @@ mod colour_tests {
             crate::view_theme::Appearance::Dark
         );
         assert_eq!(output.metadata().unwrap().len(), changed);
-        *snapshot.borrow_mut() = ok_run(0, "C\t0\tdark\thuman\nP\t%1\nP\t%2\nP\t%3", "");
+        *snapshot.borrow_mut() = ok_run(0, &format!("{watched}P\t%1\nP\t%2\nP\t%3"), "");
         assert!(report_session_pane_colours(
             fd,
             "team",
@@ -1133,6 +1149,82 @@ mod colour_tests {
         assert_eq!(events[1]["source"], "client");
         assert_eq!(events[1]["client"], "human");
         assert_eq!(events[1]["appearance"], "dark");
+        assert!(events.iter().all(|event| event["reports"] == true));
+    }
+
+    #[test]
+    fn test_panes_stay_unreported_while_an_older_terminal_answers_them() {
+        let mut env =
+            crate::testenv::EnvGuard::cleared(&["HIVE_VIEW_THEME", "HIVE_APPEARANCE", "COLORFGBG"]);
+        let temp = tempfile::tempdir().unwrap();
+        env.set("HOME", temp.path());
+        env.set("HIVE_HOME", temp.path().join("home"));
+        env.set("COLORFGBG", "0;15");
+        let workspace = temp.path().to_str().unwrap();
+        let output = std::fs::File::create(temp.path().join("commands")).unwrap();
+        let fd = output.as_raw_fd();
+        // The terminal attached elsewhere before the monitor's control client.
+        let snapshot = Rc::new(RefCell::new(ok_run(
+            0,
+            "C\t1\t\tcontrol\nG\t0\tghostty\nG\t1\tcontrol\nP\t%1\nP\t%2\n",
+            "",
+        )));
+        let response = Rc::clone(&snapshot);
+        set_run_override(move |_, _, _| Ok(response.borrow().clone()));
+        let mut reports = PaneColourReports::default();
+        assert!(report_session_pane_colours(
+            fd,
+            "team",
+            workspace,
+            &mut reports,
+            true
+        ));
+        assert_eq!(output.metadata().unwrap().len(), 0);
+        assert!(colour_client_changed(
+            "%client-detached ghostty",
+            "team",
+            &reports.clients
+        ));
+        // It switches in, still ahead of the control client: still nothing.
+        *snapshot.borrow_mut() = ok_run(
+            0,
+            "C\t0\t\tghostty\nC\t1\t\tcontrol\nG\t0\tghostty\nG\t1\tcontrol\n",
+            "",
+        );
+        assert!(report_session_pane_colours(
+            fd,
+            "team",
+            workspace,
+            &mut reports,
+            false
+        ));
+        assert_eq!(output.metadata().unwrap().len(), 0);
+        // It detaches: the control client answers now, so both panes are told.
+        *snapshot.borrow_mut() = ok_run(0, "C\t1\t\tcontrol\nG\t1\tcontrol\n", "");
+        assert!(report_session_pane_colours(
+            fd,
+            "team",
+            workspace,
+            &mut reports,
+            false
+        ));
+        let commands = std::fs::read_to_string(temp.path().join("commands")).unwrap();
+        let light = crate::view_theme::Appearance::Light;
+        assert_eq!(
+            commands,
+            [
+                super::super::pane_colour_report_lines("%1", light).concat(),
+                super::super::pane_colour_report_lines("%2", light).concat(),
+            ]
+            .concat()
+        );
+        let log = std::fs::read_to_string(crate::notify_debug::log_path(workspace)).unwrap();
+        let reported: Vec<bool> = log
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .map(|event| event["reports"].as_bool().unwrap())
+            .collect();
+        assert_eq!(reported, vec![false, true]);
     }
 }
 

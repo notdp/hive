@@ -369,14 +369,37 @@ status bar's orch chip and `prefix+m` run the same verb with `--window`: a
 
 The hived's control client also decides each pane's OSC 10/11 colour
 answers. tmux answers a pane with a default background from the first
-client in its client list attached to a session holding the window; a
+client in its client list attached to a session holding the window; the
+list is in creation order, which `switch-client` does not change. A
 control client carries black, a terminal the colours it answered tmux at
-attach. The hived reports each pane's answer itself
-(`tmux/appearance.rs`, `refresh-client -r`, which is why tmux 3.5 is the
-floor). A stored report takes precedence over pane style and over every
-client while any control client exists on the server; it is not owned by
-the client that wrote it, and it answers an engine that asks before any
-terminal attached. `install.sh` refuses a tmux below 3.5; `hive create`,
+attach, exactly. Where tmux would answer from a control client, the hived
+reports each pane's answer itself (`tmux/appearance.rs`, `refresh-client
+-r`, which is why tmux 3.5 is the floor). A stored report takes precedence
+over pane style and over every client while any control client exists on
+the server; it is not owned by the client that wrote it, it cannot be
+withdrawn, and it answers an engine that asks before any terminal
+attached.
+
+So a report is written only when tmux would otherwise answer from a
+control client (`reports_needed`, over `list-clients` in server order):
+the session's first client is a control client and a terminal in the
+session sits behind it, or nobody is in the session and no terminal
+anywhere on the server is older than the session's control client. A
+terminal ahead of every control client — in the session, or elsewhere
+while nobody is in the session, since it is first the moment it switches
+in — answers the panes itself, with its own RGB; this is the terminal a
+human had attached before the team's hived started. A pane passed over is
+not counted as reported: when that terminal detaches or leaves and the
+control client becomes first, the next sample writes it. A pane already
+reported keeps its report current, since tmux answers it from there. The
+attach's direct writes (below) follow the same rule. Narrowings: a
+terminal that never answered tmux's OSC 11 is skipped by tmux, which falls
+to the control client behind it; clients of another session a window is
+linked into are not counted; and a report written earlier — while nobody
+watched, by an attach, or by a monitor before it restarted (its record
+starts empty) — stays. While nobody is in the session and an older
+terminal is elsewhere, the panes hear the control client's black until it
+switches in. `install.sh` refuses a tmux below 3.5; `hive create`,
 `hive attach`, `hive doctor` and `hive plugin setup` warn, and the team
 session's `@hive-tmux-stale` puts the version on the status bar.
 
@@ -392,13 +415,17 @@ therefore starts with the system's answer, which is the desktop's and not
 necessarily the terminal's — an app themed apart from the system is right
 only once a terminal has been asked.
 
-The session stamp is written by whoever brings a terminal: `hive attach` run
-outside tmux, and the `hclaude` / `hcodex` / `hgrok` launcher at its handoff
-into the team (it asks at startup, while the terminal is still its own). Each
-asks that terminal OSC 11 (or takes its own `HIVE_APPEARANCE`) before tmux
-has the terminal, writes the answer into the session environment, reports it
+The session stamp is written by whoever brings a terminal: `hive attach`,
+and the `hclaude` / `hcodex` / `hgrok` launcher at its handoff into the team
+(it asks at startup, while the terminal is still its own). Each asks that
+terminal OSC 11 (or takes its own `HIVE_APPEARANCE`). Inside tmux the answer
+is tmux's, so it is asked only from a pane of a plain session — no control
+client attached, no hive-tagged pane — where tmux relays what the terminal
+answered it at attach; from a team session it would read hive's own report
+back, so none is asked there. Each writes the answer into the session environment, reports it
 to the session's panes at once through any client already there (unless an
-explicit theme is set), and draws the team session's status bar again from it. It exists for terminals that
+explicit theme is set, or tmux answers them from a terminal by the rule
+above), and draws the team session's status bar again from it. It exists for terminals that
 answer OSC 11 and never report a theme — the desktop app's terminal (xterm.js)
 answers neither DSR 996 nor mode 2031, so its `client_theme` stays empty — and
 for the bar, which a team built from an agent's tool shell draws with no
@@ -419,10 +446,13 @@ sample uses one tmux process for `list-clients`; after layout changes the same p
 also enumerates panes. One resolved appearance applies to the whole round.
 Only a new pane or a different appearance writes new reports. Failed
 queries retain the previous snapshot and retry; `pane-colours.selected` in
-`run/notify.jsonl` records the source, appearance and selected client.
+`run/notify.jsonl` records the source, appearance and selected client, and
+`reports` — false while tmux answers the panes from a terminal — whenever
+either changes. A terminal elsewhere that is older than the control client
+counts among the known clients, so its detach is sampled at once.
 
-These reports approximate dark/light with black/white, not the terminal's
-exact RGB. A dark terminal attached after hived gets a dark answer once its
+Written reports approximate dark/light with black/white, not the
+terminal's exact RGB. A dark terminal attached after hived gets a dark answer once its
 997 response has been sampled and the report processed. An application
 querying before that point can still read provisional light: there is no
 startup barrier and no hot refresh for a running Codex. Updating the cache
