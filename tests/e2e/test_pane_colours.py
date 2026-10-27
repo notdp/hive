@@ -315,13 +315,13 @@ def test_e2e_attach_inside_tmux_stamps_what_the_plain_session_relays():
 def test_e2e_a_terminal_older_than_the_hived_answers_the_team_panes_itself(enter):
     """#264: a dark terminal on a light desktop, attached to the human's own
     session long before the team and its hived exist, never reporting a
-    theme. Entering the team, by a bare switch-client or by `hive attach`
-    from that session, its panes hear the terminal's exact background:
-    tmux asks it ahead of the hived's control client, so hive reports
-    nothing, neither from the hived nor from the attach."""
+    theme. Once it has entered the team, by a bare switch-client or by
+    `hive attach` from that session, a pane started there hears the
+    terminal's exact background: tmux asks it ahead of the hived's control
+    client, so hive reports nothing for that pane."""
     early = {"fg": b"e0e0/e0e0/e0e0", "bg": b"1818/1818/1818"}
     with colour_lane(early_terminal=early) as lane:
-        root, env, team, pane, tmux = lane.root, lane.env, lane.team, lane.pane, lane.tmux
+        root, env, team, tmux = lane.root, lane.env, lane.team, lane.tmux
         client = tmux("list-clients", "-t", "plain", "-F", "#{client_name}")
         assert client and "\n" not in client, client
         if enter == "switch-client":
@@ -334,18 +334,39 @@ def test_e2e_a_terminal_older_than_the_hived_answers_the_team_panes_itself(enter
                  == ["0", "1"], timeout=15)
         if enter == "hive-attach":
             assert tmux("show-environment", "-t", team, "HIVE_APPEARANCE") == "HIVE_APPEARANCE=dark"
-        time.sleep(0.2)
+        wait_for(lambda: lane.selections()[-1].get("reports") is False, timeout=8)
         probe = root / "probe.py"
         probe.write_text(PROBE)
-        tmux("respawn-pane", "-k", "-t", pane, shlex.join([sys.executable, str(probe), str(root), "1"]))
+        # A member started now gets a new pane, which no report reached.
+        pane = tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"{team}:",
+                    shlex.join([sys.executable, str(probe), str(root), "1"]))
         path = root / "reply-0.json"
         wait_for(path.exists, timeout=10)
         reply = json.loads(path.read_text())
         assert "rgb:1818/1818/1818" in reply, repr(reply)
-        selections = lane.selections()
-        assert selections and all(s.get("reports") is False for s in selections), selections
         reports = [args for line in lane.trace.read_text().splitlines()
-                   if (args := json.loads(line))[:1] == ["refresh-client"] and "-r" in args]
+                   if (args := json.loads(line))[:1] == ["refresh-client"] and "-r" in args
+                   and args[-1].startswith(f"{pane}:")]
         assert reports == [], reports
         print(json.dumps({"server": lane.server, "version": lane.version, "enter": enter,
-                          "reply": reply, "selections": selections}))
+                          "reply": reply, "selections": lane.selections()}))
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
+def test_e2e_an_unwatched_team_is_reported_though_a_terminal_is_attached_elsewhere():
+    """#264 follow-up: terminals attached to other sessions before the team
+    exists, and a member started before any terminal enters the team. tmux
+    would answer it from the hived's control client, black; hive tells it
+    the selected appearance instead (light here, from the lane's hint)."""
+    early = {"fg": b"0000/0000/0000", "bg": b"ffff/ffff/ffff"}
+    with colour_lane(early_terminal=early) as lane:
+        root, tmux = lane.root, lane.tmux
+        time.sleep(0.1)
+        probe = root / "probe.py"
+        probe.write_text(PROBE)
+        tmux("respawn-pane", "-k", "-t", lane.pane, shlex.join([sys.executable, str(probe), str(root), "1"]))
+        path = root / "reply-0.json"
+        wait_for(path.exists, timeout=10)
+        reply = json.loads(path.read_text())
+        assert "rgb:ffff/ffff/ffff" in reply, repr(reply)
+        assert lane.selections()[-1]["reports"] is True

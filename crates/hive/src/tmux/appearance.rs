@@ -9,10 +9,9 @@
 //! supplies per-pane answers through `refresh-client -r` (tmux 3.5, the
 //! oldest hive supports), which override any client while a control client
 //! exists on the server, and which tmux keeps for good. When a terminal is
-//! ahead of every control client — one attached before the hived's client,
-//! in the session or (while nobody is in the session) elsewhere, about to
-//! switch in — hive writes nothing and tmux answers with the terminal's own
-//! colours (`reports_needed`). The hived's monitor and an attach's
+//! the session's first client — attached before the hived's control client
+//! — hive writes nothing and tmux answers with the terminal's own colours
+//! (`reports_needed`). The hived's monitor and an attach's
 //! `stamp_session_appearance` both follow that rule; a pane passed over is
 //! written once the rule turns.
 //!
@@ -268,10 +267,6 @@ pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
             session_target,
             "-F",
             SESSION_CLIENT_FORMAT,
-            ";",
-            "list-clients",
-            "-F",
-            SERVER_CLIENT_FORMAT,
         ],
         false,
         5,
@@ -279,14 +274,15 @@ pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
         Ok(r) if r.returncode == 0 => r.stdout,
         _ => return,
     };
-    let order = server_clients(&clients);
+    let order = session_clients(&clients);
     if !reports_needed(&order) {
         return;
     }
     let Some(client) = order
         .iter()
-        .find(|(row, name)| row.in_session && !name.is_empty())
-        .map(|(_, name)| name.to_string())
+        .map(|(_, name)| *name)
+        .find(|name| !name.is_empty())
+        .map(str::to_string)
     else {
         return;
     };
@@ -308,88 +304,36 @@ pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
 
 /// A session's clients, `C\t<control>\t<theme>\t<name>`.
 const SESSION_CLIENT_FORMAT: &str = "C\t#{client_control_mode}\t#{client_theme}\t#{client_name}";
-/// Every client on the server, `G\t<control>\t<name>`, in tmux's own order:
-/// the order it asks clients for a pane's colours in.
-const SERVER_CLIENT_FORMAT: &str = "G\t#{client_control_mode}\t#{client_name}";
-
-/// One client in the server's client list, which tmux keeps in creation
-/// order (`switch-client` does not move a client in it).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ClientRow {
-    pub control: bool,
-    pub in_session: bool,
-}
-
-/// The server's clients in order, from the `G` rows, each marked by whether
-/// a `C` row puts it in the session. Both listings walk the same list.
-fn server_clients(snapshot: &str) -> Vec<(ClientRow, &str)> {
-    let in_session: Vec<&str> = snapshot
-        .lines()
-        .filter_map(|line| line.strip_prefix("C\t")?.splitn(3, '\t').nth(2))
-        .collect();
+/// The session's clients as (control, name), in tmux's own order: creation
+/// order, the order it asks them for a pane's colours in (`switch-client`
+/// does not move a client in it).
+fn session_clients(snapshot: &str) -> Vec<(bool, &str)> {
     snapshot
         .lines()
         .filter_map(|line| {
-            let (control, name) = line.strip_prefix("G\t")?.split_once('\t')?;
-            Some((
-                ClientRow {
-                    control: control == "1",
-                    in_session: in_session.contains(&name),
-                },
-                name,
-            ))
+            let mut fields = line.strip_prefix("C\t")?.splitn(3, '\t');
+            let control = fields.next()? == "1";
+            Some((control, fields.nth(1)?))
         })
         .collect()
 }
 
-/// Whether hive must tell the session's panes their colours, because tmux
-/// would answer them from a control client's blank tty (black). tmux asks
-/// the first client, in server order, attached to a session holding the
-/// window: a terminal there ahead of every control client answers with its
-/// own exact colours, and a report would override it for good. With nobody
-/// in the session, a terminal elsewhere that is older than the session's
-/// control client is the one that will be first when it switches in, so
-/// nothing is written for it either. A session with no control client has
-/// nothing to override.
+/// Whether hive must tell the session's panes their colours: when the
+/// session's first client is a control client, whose blank tty tmux would
+/// answer them from (black). A terminal first answers with its own exact
+/// colours, and a report would override it for good. A session nobody
+/// watches is told too: an engine started there asks at once, and a
+/// terminal attaching later sits behind the control client. A session with
+/// no client has nothing to override.
 ///
 /// ponytail: tmux skips a terminal that never answered its OSC 11 query
-/// and falls to the control client behind it, black; no format tells hive
-/// whether a terminal answered. A window linked into another
-/// session is answered by that session's clients too; they are not
-/// counted. While nobody watches and an older terminal is elsewhere, the
-/// session's panes hear the control client's black until it switches in;
-/// writing would answer them now and that terminal wrongly for good.
-pub(super) fn reports_needed(clients: &[(ClientRow, &str)]) -> bool {
-    let Some(control) = clients
-        .iter()
-        .position(|(row, _)| row.control && row.in_session)
-    else {
-        return false;
-    };
-    let ahead = &clients[..control];
-    if ahead.iter().any(|(row, _)| row.in_session) {
-        return false;
-    }
-    let watched = clients
-        .iter()
-        .any(|(row, _)| row.in_session && !row.control);
-    watched || !ahead.iter().any(|(row, _)| !row.control)
-}
-
-/// The terminals whose leaving can change `reports_needed`: those in the
-/// session, and those elsewhere ahead of its control client.
-fn colour_watchers<'a>(clients: &[(ClientRow, &'a str)]) -> Vec<&'a str> {
-    let control = clients
-        .iter()
-        .position(|(row, _)| row.control && row.in_session)
-        .unwrap_or(clients.len());
-    clients
-        .iter()
-        .enumerate()
-        .filter(|(index, (row, _))| !row.control && (row.in_session || *index < control))
-        .map(|(_, (_, name))| *name)
-        .filter(|name| !name.is_empty())
-        .collect()
+/// (or is suspended) and falls to the control client behind it, black; no
+/// format tells hive either. A window linked into another session is
+/// answered by that session's clients too; they are not counted. A
+/// terminal attached elsewhere before the control client answers exactly
+/// once it switches in, but only panes not reported while nobody watched.
+pub(super) fn reports_needed(clients: &[(bool, &str)]) -> bool {
+    clients.first().is_some_and(|(control, _)| *control)
 }
 
 pub(super) struct PaneColourSnapshot {
@@ -401,7 +345,7 @@ pub(super) struct PaneColourSnapshot {
 }
 
 /// One subprocess per sample, regardless of pane count: the session's
-/// clients, the server's client order and the session environment. Layout events add list-panes to the same tmux
+/// clients and environment. Layout events add list-panes to the same tmux
 /// command queue. A failed query preserves the
 /// previous snapshot instead of impersonating a headless session.
 pub(super) fn session_colour_snapshot(
@@ -415,10 +359,6 @@ pub(super) fn session_colour_snapshot(
         session_target,
         "-F",
         SESSION_CLIENT_FORMAT,
-        ";",
-        "list-clients",
-        "-F",
-        SERVER_CLIENT_FORMAT,
         ";",
         "show-environment",
         "-t",
@@ -474,17 +414,11 @@ pub(super) fn session_colour_snapshot(
         crate::settings::get_setting("view.theme").and_then(|v| v.as_str().map(str::to_string));
     let stamp = std::env::var("HIVE_APPEARANCE").ok();
     let colorfgbg = std::env::var("COLORFGBG").ok();
-    let mut order = server_clients(&snapshot.stdout);
+    let mut order = session_clients(&snapshot.stdout);
     // The monitor's own control client is the newest: until tmux has run
     // its attach it is not listed, and it would be last.
-    if !order.iter().any(|(row, _)| row.control && row.in_session) {
-        order.push((
-            ClientRow {
-                control: true,
-                in_session: true,
-            },
-            "",
-        ));
+    if !order.iter().any(|(control, _)| *control) {
+        order.push((true, ""));
     }
     Some(PaneColourSnapshot {
         selected: resolve_pane_appearance(
@@ -499,9 +433,9 @@ pub(super) fn session_colour_snapshot(
         reports: reports_needed(&order),
         panes,
         has_unknown_client: human_clients.iter().any(|(_, unknown)| *unknown),
-        clients: colour_watchers(&order)
-            .into_iter()
-            .map(str::to_string)
+        clients: human_clients
+            .iter()
+            .map(|(name, _)| name.to_string())
             .collect(),
     })
 }
@@ -560,81 +494,37 @@ impl PaneColourReports {
 mod tests {
     use super::*;
 
-    /// Server order, one token per client: `c` control, `h` terminal, `*`
-    /// when attached to the session.
-    fn order(spec: &str) -> Vec<(ClientRow, &str)> {
+    /// The session's clients in order, one token each: `c` control, `h`
+    /// terminal.
+    fn order(spec: &str) -> Vec<(bool, &str)> {
         spec.split_whitespace()
-            .map(|token| {
-                (
-                    ClientRow {
-                        control: token.starts_with('c'),
-                        in_session: token.ends_with('*'),
-                    },
-                    token,
-                )
-            })
+            .map(|token| (token == "c", token))
             .collect()
     }
 
     #[test]
     fn test_reports_needed_only_where_a_control_client_would_answer() {
-        // A terminal in the session ahead of every control client answers.
-        assert!(!reports_needed(&order("h* c*")));
-        assert!(!reports_needed(&order("h* c* h*")));
-        assert!(!reports_needed(&order("h* h c* h*")));
-        // The control client is first in the session.
-        assert!(reports_needed(&order("c* h*")));
-        assert!(reports_needed(&order("c*")));
-        assert!(reports_needed(&order("c c* h")));
-        assert!(reports_needed(&order("c* h h*")));
-        // Nobody watches: a terminal older than the control client will be
-        // first when it switches in; a newer one would sit behind it.
-        assert!(!reports_needed(&order("h c*")));
-        assert!(!reports_needed(&order("c h c*")));
-        assert!(reports_needed(&order("c* h")));
-        // A watching terminal behind the control client hears black now.
-        assert!(reports_needed(&order("h c* h*")));
-        // No control client in the session: nothing to override.
+        // A terminal attached before the control client answers itself.
+        assert!(!reports_needed(&order("h c")));
+        assert!(!reports_needed(&order("h c h")));
+        // The control client is first: it would answer black.
+        assert!(reports_needed(&order("c h")));
+        assert!(reports_needed(&order("c h h")));
+        // Nobody watches: an engine started now would hear black.
+        assert!(reports_needed(&order("c")));
+        // No client: nothing to override.
         assert!(!reports_needed(&order("")));
-        assert!(!reports_needed(&order("h*")));
-        assert!(!reports_needed(&order("c h*")));
     }
 
     #[test]
-    fn test_server_clients_keep_server_order_and_mark_the_session() {
-        let snapshot = "C\t1\t\tcontrol\nC\t0\tdark\tnew term\nFOO=bar\n\
-                        G\t0\t/dev/ttys001\nG\t1\tcontrol\nG\t0\tnew term\nP\t%1\n";
-        let clients = server_clients(snapshot);
+    fn test_session_clients_keep_tmux_order() {
+        let snapshot = "C\t0\tdark\tterm one\nC\t1\t\tcontrol\nFOO=bar\nC\t0\t\tterm two\nP\t%1\n";
+        let clients = session_clients(snapshot);
         assert_eq!(
             clients,
-            vec![
-                (
-                    ClientRow {
-                        control: false,
-                        in_session: false
-                    },
-                    "/dev/ttys001"
-                ),
-                (
-                    ClientRow {
-                        control: true,
-                        in_session: true
-                    },
-                    "control"
-                ),
-                (
-                    ClientRow {
-                        control: false,
-                        in_session: true
-                    },
-                    "new term"
-                ),
-            ]
+            vec![(false, "term one"), (true, "control"), (false, "term two")]
         );
-        assert!(reports_needed(&clients));
-        assert_eq!(colour_watchers(&clients), vec!["/dev/ttys001", "new term"]);
-        // Terminals elsewhere behind the control client are not watched.
-        assert_eq!(colour_watchers(&order("h c* h h*")), vec!["h", "h*"]);
+        assert!(!reports_needed(&clients));
     }
 
     #[test]
