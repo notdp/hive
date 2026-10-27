@@ -186,6 +186,44 @@ fn resolve_pane_appearance(
     }
 }
 
+/// Whether a colour query from a pane of this session is answered by a
+/// human's terminal. Not in a session a control client is attached to
+/// (whose blank tty answers black when it is first in the client list) nor
+/// in a team session (hive's own report, read back): a plain session of
+/// the human's relays what their terminal answered tmux at attach.
+pub fn session_relays_terminal_colours(session_target: &str) -> bool {
+    let snapshot = run(
+        &[
+            "list-clients",
+            "-t",
+            session_target,
+            "-F",
+            "C\t#{client_control_mode}",
+            ";",
+            "list-panes",
+            "-s",
+            "-t",
+            session_target,
+            "-F",
+            "P\t#{@hive-team}#{@hive-hidden}",
+        ],
+        false,
+        5,
+    );
+    match snapshot {
+        Ok(r) if r.returncode == 0 => relays_terminal_colours(&r.stdout),
+        _ => false,
+    }
+}
+
+fn relays_terminal_colours(snapshot: &str) -> bool {
+    snapshot.lines().all(|line| match line.split_once('\t') {
+        Some(("C", control)) => control != "1",
+        Some(("P", tags)) => tags.is_empty(),
+        _ => true,
+    })
+}
+
 /// The session environment variable `hive attach` leaves for the reporter
 /// and for every pane the session starts afterwards (`hive view` reads it
 /// before probing).
@@ -372,6 +410,15 @@ impl PaneColourReports {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_relays_terminal_colours_only_in_a_plain_session_without_control_client() {
+        assert!(relays_terminal_colours("C\t0\nP\t\nP\t\n"));
+        assert!(relays_terminal_colours(""));
+        assert!(!relays_terminal_colours("C\t0\nC\t1\nP\t\n"));
+        assert!(!relays_terminal_colours("C\t0\nP\t\nP\thoney\n"));
+        assert!(!relays_terminal_colours("P\t1\n"));
+    }
 
     #[test]
     fn test_parse_version_reads_every_shape_tmux_prints() {

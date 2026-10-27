@@ -335,6 +335,21 @@ fn install_team_status(pane: &str) {
     }
 }
 
+/// What the terminal a launcher or an attach runs in says its background
+/// is. Outside tmux it is asked itself; inside, tmux answers for it, which
+/// is the terminal's own colour only from a plain session of the human's —
+/// in a team session it is hive's report read back.
+pub(crate) fn launching_terminal_appearance() -> Option<crate::view_theme::Appearance> {
+    if crate::identity::is_inside_tmux() {
+        let session = crate::identity::current_pane_id()
+            .and_then(|pane| tmux::display_value(&pane, "#{session_id}"))?;
+        if !tmux::session_relays_terminal_colours(&session) {
+            return None;
+        }
+    }
+    crate::view_theme::stamped_or_probed_appearance()
+}
+
 /// What a terminal about to attach said its background is, taken as the
 /// team session's: stamped for the pane colour reports and later panes,
 /// and — on a session hive built, when *redraw* — the bar drawn again from

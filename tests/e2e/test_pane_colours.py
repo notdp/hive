@@ -278,3 +278,24 @@ def test_e2e_attach_stamps_what_a_terminal_without_theme_reports_answers():
         path = root / "reply-0.json"
         wait_for(path.exists, timeout=10)
         assert "rgb:0000/0000/0000" in json.loads(path.read_text())
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
+def test_e2e_attach_inside_tmux_stamps_what_the_plain_session_relays():
+    """Attach run from a pane of the human's own session (#264): tmux relays
+    the terminal's dark answer there, so the team's panes are told dark."""
+    with colour_lane() as lane:
+        root, env, team, tmux = lane.root, lane.env, lane.team, lane.tmux
+        attach = shlex.join([*hive_binary_argv(), "attach", team])
+        human = Terminal(env, ["tmux", "-u", "new-session", "-s", "plain", f"sleep 1; {attach}; sleep 30"])
+        lane.humans = [human]
+        wait_for(lambda: any(s["source"] == "session" and s["appearance"] == "dark"
+                             for s in lane.selections()), timeout=15)
+        assert tmux("show-environment", "-t", team, "HIVE_APPEARANCE") == "HIVE_APPEARANCE=dark"
+        time.sleep(0.1)
+        probe = root / "probe.py"
+        probe.write_text(PROBE)
+        tmux("respawn-pane", "-k", "-t", lane.pane, shlex.join([sys.executable, str(probe), str(root), "1"]))
+        path = root / "reply-0.json"
+        wait_for(path.exists, timeout=10)
+        assert "rgb:0000/0000/0000" in json.loads(path.read_text())

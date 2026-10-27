@@ -392,11 +392,14 @@ therefore starts with the system's answer, which is the desktop's and not
 necessarily the terminal's — an app themed apart from the system is right
 only once a terminal has been asked.
 
-The session stamp is written by whoever brings a terminal: `hive attach` run
-outside tmux, and the `hclaude` / `hcodex` / `hgrok` launcher at its handoff
-into the team (it asks at startup, while the terminal is still its own). Each
-asks that terminal OSC 11 (or takes its own `HIVE_APPEARANCE`) before tmux
-has the terminal, writes the answer into the session environment, reports it
+The session stamp is written by whoever brings a terminal: `hive attach`,
+and the `hclaude` / `hcodex` / `hgrok` launcher at its handoff into the team
+(it asks at startup, while the terminal is still its own). Each asks that
+terminal OSC 11 (or takes its own `HIVE_APPEARANCE`). Inside tmux the answer
+is tmux's, so it is asked only from a pane of a plain session — no control
+client attached, no hive-tagged pane — where tmux relays what the terminal
+answered it at attach; from a team session it would read hive's own report
+back, so none is asked there. Each writes the answer into the session environment, reports it
 to the session's panes at once through any client already there (unless an
 explicit theme is set), and draws the team session's status bar again from it. It exists for terminals that
 answer OSC 11 and never report a theme — the desktop app's terminal (xterm.js)

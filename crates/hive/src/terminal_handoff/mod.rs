@@ -514,11 +514,7 @@ pub(crate) fn run(session: &Session, initial_args: &[String]) -> Result<i32> {
     let term = terminal::Terminal::capture()?;
     // Asked while the terminal is still the launcher's own: the viewer owns
     // it from here until the handoff, which stamps the answer on the team.
-    let appearance = if crate::identity::is_inside_tmux() {
-        None
-    } else {
-        crate::view_theme::stamped_or_probed_appearance()
-    };
+    let appearance = crate::team_display::launching_terminal_appearance();
     let (registration, listener) = Registration::create(session)?;
     let mut child = viewer(&term, session, initial_args)?;
     loop {
