@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.24.3
+
+### Fixes
+
+- A team nobody has entered yet has its panes told the selected colours again: 0.24.2 left them unreported whenever a terminal older than the hived was attached to another session, so a member spawned before anyone attached (a team built from the desktop) heard the hived's control client answer black and a codex member drew dark on a light terminal. Panes stay unreported only while a terminal is the team session's first client (#266)
+
 ## 0.24.2
 
 ### Fixes
