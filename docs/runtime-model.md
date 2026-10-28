@@ -424,11 +424,10 @@ answered it at attach; from a team session it would read hive's own report
 back, so none is asked there. Each writes the answer into the session environment, reports it
 to the session's panes at once through any client already there (unless an
 explicit theme is set, or tmux answers them from a terminal by the rule
-above), and draws the team session's status bar again from it. It exists for terminals that
+above), and sets `@hive-appearance` on the session, which the status bar
+reads for a terminal that reports no theme. It exists for terminals that
 answer OSC 11 and never report a theme — the desktop app's terminal (xterm.js)
-answers neither DSR 996 nor mode 2031, so its `client_theme` stays empty — and
-for the bar, which a team built from an agent's tool shell draws with no
-terminal to ask. The stamp is as old as the last such attach: a theme switched
+answers neither DSR 996 nor mode 2031, so its `client_theme` stays empty. The stamp is as old as the last such attach: a theme switched
 afterwards is not followed until the next `hive attach`, and a desktop session
 that is not open in any window answers nothing, so an attach typed into it
 leaves the stamp as it was. Panes the session starts later inherit the
@@ -468,10 +467,20 @@ two-line status bar. It is installed by session id (`tmux/status.rs`):
 `status*` and `mouse` are session options, so the source session keeps its
 configuration. Borrowed shell-pane and legacy windows get no Hive bar.
 The two key bindings below are server-wide, with fallbacks for other windows.
-The bar's colours follow the viewer's appearance switch — `view.theme`, `HIVE_VIEW_THEME`, then
-detection (`view_theme.rs`), resolved once at install, so a theme change
-shows at the next session build — and the bar is rendered from tmux options
-alone, with no `#()` in the format: `@hive-team`; `@hive-mirror` (orch chip,
+The bar's colours follow an explicit `view.theme` / `HIVE_VIEW_THEME` when
+one is set, as one fixed set installed with the bar. Otherwise each colour
+is a format tmux resolves per client at every redraw: the dark or light set
+for the theme that client's terminal reported (`client_theme`, tmux 3.6+),
+else for the session's `@hive-appearance` stamp (above), else a neutral set
+on the terminal's own background and foreground (`default`), with accents
+readable on either and the active pane underlined. Nothing is guessed from
+the system's appearance: a dark terminal on a light desktop never gets the
+light bar. tmux records a reported theme without redrawing, so the session's
+`client-dark-theme` / `client-light-theme` hooks redraw that client's bar
+(`run-shell -C`, since a bare `refresh-client` would pick another client
+when several are attached); a session hook shadows a global one of the same
+name on that session. The bar is rendered from tmux options alone, with no
+`#()` in the format: `@hive-team`; `@hive-mirror` (orch chip,
 ▴ parked / ▾ open, absent while unset); per pane `@hive-role`, `@hive-agent`,
 `@hive-busy`, `@hive-unread` and `@hive-notify-active` (✱, the attention
 mark); `@hive-pr`; on the second line `@hive-notify-text`, then

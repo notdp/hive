@@ -275,14 +275,19 @@ pub fn resolve_kind(pref: ThemePref, detected: Option<Appearance>) -> ThemeKind 
     }
 }
 
+/// The explicit switch alone: `HIVE_VIEW_THEME`, then `view.theme`.
+pub fn active_theme_pref() -> ThemePref {
+    let env_val = std::env::var("HIVE_VIEW_THEME").ok();
+    let config_val =
+        crate::settings::get_setting("view.theme").and_then(|v| v.as_str().map(str::to_string));
+    resolve_pref(env_val.as_deref(), config_val.as_deref())
+}
+
 /// Full startup resolution. Runs the detection chain only when no explicit
 /// setting decided the theme; MUST be called before crossterm owns the
 /// terminal (the OSC 11 probe reads raw stdin).
 pub fn active_theme_kind() -> ThemeKind {
-    let env_val = std::env::var("HIVE_VIEW_THEME").ok();
-    let config_val =
-        crate::settings::get_setting("view.theme").and_then(|v| v.as_str().map(str::to_string));
-    let pref = resolve_pref(env_val.as_deref(), config_val.as_deref());
+    let pref = active_theme_pref();
     let detected = match pref {
         ThemePref::Auto => detect_appearance(),
         _ => None,

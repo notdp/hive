@@ -236,8 +236,10 @@ fn relays_terminal_colours(snapshot: &str) -> bool {
 const SESSION_STAMP: &str = "HIVE_APPEARANCE";
 
 /// Record what the attaching terminal said its background is. Display
-/// state on the session, rewritten by every attach that got an answer.
-/// The panes are told at once as well, through whichever client the
+/// state on the session, rewritten by every attach that got an answer: the
+/// environment variable for the pane reports and later panes, and
+/// `@hive-appearance`, which the team bar reads for a client that reports
+/// no theme of its own (`status_palette`). The panes are told at once as well, through whichever client the
 /// session has (a report is stored per pane, whoever writes it): an engine
 /// started in the next moment asks before the monitor's next sample. Only
 /// when tmux would answer them from a control client (`reports_needed`):
@@ -249,6 +251,12 @@ pub fn stamp_session_appearance(session_target: &str, appearance: Appearance) {
             "-t",
             session_target,
             SESSION_STAMP,
+            appearance.stamp(),
+            ";",
+            "set-option",
+            "-t",
+            session_target,
+            "@hive-appearance",
             appearance.stamp(),
         ],
         false,

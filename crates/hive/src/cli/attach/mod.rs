@@ -82,10 +82,9 @@ fn jump_to_window(window: &str, verdict: &str) {
 }
 
 /// A team is usually built by an agent's tool shell, which has no terminal
-/// to ask: the bar is drawn and the panes are answered light. The attach is
-/// the first process on the human's own terminal, so what that terminal
-/// says is stamped on the session (the pane colour reports and every later
-/// pane read it) and the bar is drawn again from it.
+/// to ask. The attach is the first process on the human's own terminal, so
+/// what that terminal says is stamped on the session: the pane colour
+/// reports, every later pane and the bar read it.
 pub(crate) fn attach_cmd(team_name: &str) {
     let entry = match team_entry(team_name) {
         Ok(entry) => entry,
@@ -97,7 +96,7 @@ pub(crate) fn attach_cmd(team_name: &str) {
     }
     let (window, built) = ok_or_fail(ensure_team_display(&entry));
     if let Some(appearance) = appearance {
-        crate::team_display::adopt_terminal_appearance(team_name, &window, appearance, !built);
+        crate::team_display::adopt_terminal_appearance(&window, appearance);
     }
     let ws = map_str(&entry, "workspace");
     if !ws.is_empty() {

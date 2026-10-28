@@ -45,6 +45,7 @@ class Terminal:
         os.close(slave)
         self.stopped = threading.Event()
         self.theme_requested = threading.Event()
+        self.output = bytearray()
         self.thread = threading.Thread(target=self.drain, daemon=True)
         self.thread.start()
 
@@ -61,6 +62,7 @@ class Terminal:
             if not chunk:
                 return
             pending += chunk
+            self.output += chunk
             if b"\x1b[?996n" in pending:
                 self.theme_requested.set()
             matches = list(query.finditer(pending))
@@ -73,6 +75,9 @@ class Terminal:
 
     def report_dark(self):
         os.write(self.master, b"\x1b[?997;1n")
+
+    def report_light(self):
+        os.write(self.master, b"\x1b[?997;2n")
 
     def close(self):
         self.child.terminate()
@@ -267,7 +272,6 @@ def test_e2e_attach_stamps_what_a_terminal_without_theme_reports_answers():
     """A terminal that answers OSC 11 and never 997, as xterm.js does."""
     with colour_lane() as lane:
         root, env, team, tmux = lane.root, lane.env, lane.team, lane.tmux
-        assert "bg=colour254" in tmux("show-options", "-t", team, "-v", "status-style")
         human = Terminal(env, [*hive_binary_argv(), "attach", team])
         lane.humans = [human]
         wait_for(lambda: any(s["source"] == "session" and s["appearance"] == "dark"
@@ -279,7 +283,8 @@ def test_e2e_attach_stamps_what_a_terminal_without_theme_reports_answers():
         direct = [args for line in lane.trace.read_text().splitlines()
                   if (args := json.loads(line))[:1] == ["refresh-client"] and "-r" in args]
         assert any(args[-1].startswith(f"{lane.pane}:\x1b]11;rgb:0000/") for args in direct), direct
-        assert "bg=colour235" in tmux("show-options", "-t", team, "-v", "status-style")
+        # The bar reads the stamp for a terminal that reports no theme.
+        assert tmux("show-options", "-t", team, "-v", "@hive-appearance") == "dark"
         time.sleep(0.1)
         probe = root / "probe.py"
         probe.write_text(PROBE)
@@ -370,3 +375,37 @@ def test_e2e_an_unwatched_team_is_reported_though_a_terminal_is_attached_elsewhe
         reply = json.loads(path.read_text())
         assert "rgb:ffff/ffff/ffff" in reply, repr(reply)
         assert lane.selections()[-1]["reports"] is True
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux is required for e2e tests")
+def test_e2e_the_bar_is_drawn_for_each_terminal():
+    """#268: the bar picks its colours per terminal at redraw. A terminal
+    that reports no theme gets the neutral set on its own background; one
+    that reports dark or light gets that set, each on its own client; a
+    session stamp stands in for a terminal that reports nothing."""
+    # The team chip's background and text: dark 214, light 172 with white
+    # (255) text, neutral 172 with black (16) text.
+    dark, light, neutral = b"\x1b[48;5;214m", b"\x1b[38;5;255m", b"\x1b[38;5;16m"
+    with colour_lane() as lane:
+        env, team, tmux = lane.env, lane.team, lane.tmux
+        humans = [Terminal(env, ["tmux", "-u", "attach", "-t", team]) for _ in range(3)]
+        lane.humans = humans
+        for human in humans:
+            assert human.theme_requested.wait(5), "tmux did not request terminal theme"
+            wait_for(lambda: neutral in human.output, timeout=5)
+            assert dark not in human.output and light not in human.output
+        for human in humans:
+            human.output.clear()
+        humans[0].report_dark()
+        humans[1].report_light()
+        wait_for(lambda: dark in humans[0].output, timeout=5)
+        wait_for(lambda: light in humans[1].output, timeout=5)
+        assert dark not in humans[1].output
+        # The third reports nothing: the session stamp decides once set.
+        tmux("set-option", "-t", team, "@hive-appearance", "dark")
+        pid = str(humans[2].child.pid)
+        name = next(line.split(" ", 1)[1] for line in tmux(
+            "list-clients", "-t", team, "-F", "#{client_pid} #{client_name}").splitlines()
+            if line.split(" ", 1)[0] == pid)
+        tmux("refresh-client", "-S", "-t", name)
+        wait_for(lambda: dark in humans[2].output, timeout=5)
