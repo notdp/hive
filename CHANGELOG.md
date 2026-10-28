@@ -4,6 +4,12 @@ One section per released version, newest first. The bump step in
 AGENTS.md writes the section; `release-notes.yml` puts it on the GitHub
 release.
 
+## 0.24.4
+
+### Fixes
+
+- The team status bar picks its colours per terminal as tmux draws it: the dark or light set for the theme the terminal reports (followed live), else for what it answered `hive attach` or a launcher, else a neutral set on the terminal's own background. It no longer falls back to the system appearance, so a dark terminal on a light-mode Mac stops getting a light bar; `view.theme` still fixes one set (#269)
+
 ## 0.24.3
 
 ### Fixes
