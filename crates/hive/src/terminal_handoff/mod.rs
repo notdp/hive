@@ -478,12 +478,7 @@ fn transfer(
         set_session_roots(&target.pane)?;
     }
     if let Some(appearance) = appearance {
-        crate::team_display::adopt_terminal_appearance(
-            &target.team,
-            &target.pane,
-            appearance,
-            true,
-        );
+        crate::team_display::adopt_terminal_appearance(&target.pane, appearance);
     }
     reader.get_mut().set_read_timeout(None)?;
     child.stop()?;

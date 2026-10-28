@@ -351,24 +351,12 @@ pub(crate) fn launching_terminal_appearance() -> Option<crate::view_theme::Appea
 }
 
 /// What a terminal about to attach said its background is, taken as the
-/// team session's: stamped for the pane colour reports and later panes,
-/// and — on a session hive built, when *redraw* — the bar drawn again from
-/// it. A team is usually built by an agent's tool shell, which has no
-/// terminal to ask.
-pub(crate) fn adopt_terminal_appearance(
-    team: &str,
-    target: &str,
-    appearance: crate::view_theme::Appearance,
-    redraw: bool,
-) {
-    let Some(session) = tmux::display_value(target, "#{session_id}") else {
-        return;
-    };
-    tmux::stamp_session_appearance(&session, appearance);
-    let in_team_session = tmux::display_value(target, "#{session_name}").as_deref() == Some(team);
-    if redraw && in_team_session && owns_team_session(team) {
-        std::env::set_var("HIVE_APPEARANCE", appearance.stamp());
-        tmux::install_team_status(&session);
+/// team session's: stamped for the pane colour reports, later panes and
+/// the bar, which reads the stamp at every redraw. A team is usually built
+/// by an agent's tool shell, which has no terminal to ask.
+pub(crate) fn adopt_terminal_appearance(target: &str, appearance: crate::view_theme::Appearance) {
+    if let Some(session) = tmux::display_value(target, "#{session_id}") {
+        tmux::stamp_session_appearance(&session, appearance);
     }
 }
 

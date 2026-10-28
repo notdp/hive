@@ -523,15 +523,15 @@ const MIRROR_RUN_SHELL: &str =
 
 #[test]
 fn test_team_status_argv_targets_the_session_id() {
-    use crate::view_theme::ThemeKind;
+    use crate::view_theme::ThemePref;
     let rows = |option: &str, value: &str| v(&["set-option", "-t", "$3", option, value]);
-    let p = status_palette(ThemeKind::Dark);
+    let p = &status_palette(ThemePref::Dark);
     assert_eq!(
-        team_status_argv("$3", ThemeKind::Dark, None),
+        team_status_argv("$3", ThemePref::Dark, None),
         vec![
             rows("mouse", "on"),
             rows("status", "2"),
-            rows("status-style", p.bar),
+            rows("status-style", "bg=colour235,fg=colour250"),
             rows("status-left", ""),
             rows("status-right", ""),
             rows("status-format[0]", &team_status_format_0(p)),
@@ -540,17 +540,17 @@ fn test_team_status_argv_targets_the_session_id() {
         ]
     );
     assert_eq!(
-        team_status_argv("$3", ThemeKind::Dark, Some("3.3")).last(),
+        team_status_argv("$3", ThemePref::Dark, Some("3.3")).last(),
         Some(&rows(TMUX_STALE_KEY, "3.3"))
     );
 }
 
-/// Light and dark differ in colours only: with every `#[…]` style stripped
-/// the two bars are the same text, so a theme can never change what the
-/// bar shows or which ranges it marks.
+/// The palettes differ in colours only: with every `#[…]` style stripped
+/// the bars are the same text, so a theme can never change what the bar
+/// shows or which ranges it marks.
 #[test]
 fn test_team_status_palettes_differ_in_colours_only() {
-    use crate::view_theme::ThemeKind;
+    use crate::view_theme::ThemePref;
     fn strip(format: &str) -> String {
         let mut out = String::new();
         let mut rest = format;
@@ -562,16 +562,37 @@ fn test_team_status_palettes_differ_in_colours_only() {
         out.push_str(rest);
         out
     }
-    let dark = status_palette(ThemeKind::Dark);
-    let light = status_palette(ThemeKind::Light);
-    for (d, l) in [
-        (team_status_format_0(dark), team_status_format_0(light)),
-        (team_status_format_1(dark), team_status_format_1(light)),
+    let dark = &status_palette(ThemePref::Dark);
+    for other in [
+        &status_palette(ThemePref::Light),
+        &status_palette(ThemePref::Auto),
     ] {
-        assert_ne!(d, l);
-        assert_eq!(strip(&d), strip(&l));
+        for (d, o) in [
+            (team_status_format_0(dark), team_status_format_0(other)),
+            (team_status_format_1(dark), team_status_format_1(other)),
+        ] {
+            assert_ne!(d, o);
+            assert_eq!(strip(&d), strip(&o));
+        }
     }
-    assert!(team_status_format_0(light).contains(&format!("bg={}", light.team_bg)));
+    let light = &status_palette(ThemePref::Light);
+    assert!(team_status_format_0(light).contains("bg=colour172"));
+}
+
+/// Without an explicit theme every colour is chosen per client at redraw:
+/// its reported theme, else the session's stamp, else the neutral set.
+#[test]
+fn test_auto_status_palette_picks_per_client() {
+    let auto = status_palette(crate::view_theme::ThemePref::Auto);
+    let appearance = "#{?#{client_theme},#{client_theme},#{@hive-appearance}}";
+    assert_eq!(
+        auto.team_bg,
+        format!(
+            "#{{?#{{==:{appearance},dark}},colour214,#{{?#{{==:{appearance},light}},colour172,colour172}}}}"
+        )
+    );
+    assert!(auto.bar_bg.ends_with(",default}}"), "{}", auto.bar_bg);
+    assert!(auto.chip_active_mark.ends_with(",underscore}}"));
 }
 
 #[test]
@@ -751,11 +772,13 @@ fn test_install_team_status_runs_options_then_bindings() {
     ];
     expected.extend(team_status_argv(
         "$3",
-        crate::view_theme::active_theme_kind(),
+        crate::view_theme::active_theme_pref(),
         None,
     ));
     expected.push(status_click_binding("/x/hive", STOCK_STATUS_CLICK));
     expected.push(mirror_key_binding("/x/hive", "select-pane -m"));
+    // …then the hooks that redraw a client's bar when it reports a theme…
+    expected.extend(theme_redraw_hooks("$3"));
     // …then the two session hooks that wake a desk when a terminal
     // arrives: the array is read, and each hook gets one indexed entry.
     let wake = wake_run_shell(&wake_shell_line("/x/hive", &wake_environment()));
@@ -787,8 +810,9 @@ fn test_team_status_format_reads_only_options() {
         "hive-notify-text",
         "hive-ticker",
         "hive-tmux-stale",
+        "hive-appearance",
     ];
-    let p = status_palette(crate::view_theme::ThemeKind::Dark);
+    let p = &status_palette(crate::view_theme::ThemePref::Auto);
     for format in [team_status_format_0(p), team_status_format_1(p)] {
         assert!(!format.contains("#("), "{format}");
         for (i, _) in format.match_indices("@hive-") {

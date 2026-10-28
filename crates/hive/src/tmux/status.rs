@@ -11,31 +11,54 @@ use std::time::{Duration, Instant};
 
 use super::run::run;
 
-/// The bar's colours, one set per appearance. The bar follows the same
-/// switch as the viewer (`view.theme`, `HIVE_VIEW_THEME`, then detection),
-/// resolved at install: a theme change takes effect at the next session
-/// build or the next `hive attach` from a terminal that answers OSC 11.
+/// The bar's colours. With `view.theme` / `HIVE_VIEW_THEME` set, one
+/// fixed set. Otherwise tmux picks per client at every redraw: the set for
+/// the theme the terminal reported (`client_theme`, followed live), else
+/// for what a terminal answered `hive attach` or a launcher over OSC 11
+/// (`@hive-appearance` on the session, `stamp_session_appearance`), else
+/// a neutral set on the terminal's own background, right on either.
 pub struct StatusPalette {
-    pub bar: &'static str,
-    pub team_bg: &'static str,
-    pub team_fg: &'static str,
-    pub chip_bg: &'static str,
-    pub chip_active_bg: &'static str,
-    pub mirror_bg: &'static str,
-    pub muted: &'static str,
-    pub busy: &'static str,
-    pub open: &'static str,
-    pub alert: &'static str,
-    pub ticker_bg: &'static str,
-    pub ticker_fg: &'static str,
+    pub bar_bg: String,
+    pub bar_fg: String,
+    pub team_bg: String,
+    pub team_fg: String,
+    pub chip_bg: String,
+    pub chip_active_bg: String,
+    pub chip_active_mark: String,
+    pub mirror_bg: String,
+    pub muted: String,
+    pub busy: String,
+    pub open: String,
+    pub alert: String,
+    pub ticker_bg: String,
+    pub ticker_fg: String,
 }
 
-pub const STATUS_DARK: StatusPalette = StatusPalette {
-    bar: "bg=colour235,fg=colour250",
+struct Colours {
+    bar_bg: &'static str,
+    bar_fg: &'static str,
+    team_bg: &'static str,
+    team_fg: &'static str,
+    chip_bg: &'static str,
+    chip_active_bg: &'static str,
+    chip_active_mark: &'static str,
+    mirror_bg: &'static str,
+    muted: &'static str,
+    busy: &'static str,
+    open: &'static str,
+    alert: &'static str,
+    ticker_bg: &'static str,
+    ticker_fg: &'static str,
+}
+
+const DARK: Colours = Colours {
+    bar_bg: "colour235",
+    bar_fg: "colour250",
     team_bg: "colour214",
     team_fg: "colour235",
     chip_bg: "colour236",
     chip_active_bg: "colour240",
+    chip_active_mark: "nounderscore",
     mirror_bg: "colour238",
     muted: "colour245",
     busy: "colour214",
@@ -45,12 +68,14 @@ pub const STATUS_DARK: StatusPalette = StatusPalette {
     ticker_fg: "colour250",
 };
 
-pub const STATUS_LIGHT: StatusPalette = StatusPalette {
-    bar: "bg=colour254,fg=colour236",
+const LIGHT: Colours = Colours {
+    bar_bg: "colour254",
+    bar_fg: "colour236",
     team_bg: "colour172",
     team_fg: "colour255",
     chip_bg: "colour252",
     chip_active_bg: "colour248",
+    chip_active_mark: "nounderscore",
     mirror_bg: "colour250",
     muted: "colour243",
     busy: "colour166",
@@ -60,10 +85,63 @@ pub const STATUS_LIGHT: StatusPalette = StatusPalette {
     ticker_fg: "colour238",
 };
 
-pub fn status_palette(kind: crate::view_theme::ThemeKind) -> &'static StatusPalette {
-    match kind {
-        crate::view_theme::ThemeKind::Dark => &STATUS_DARK,
-        crate::view_theme::ThemeKind::Light => &STATUS_LIGHT,
+/// Readable on a dark or a light background (each colour at least 3.7:1
+/// against #181818 and white, the team chip's text 7.4:1); the active pane
+/// is underlined, so the busy/idle marks keep their colours.
+const NEUTRAL: Colours = Colours {
+    bar_bg: "default",
+    bar_fg: "default",
+    team_bg: "colour172",
+    team_fg: "colour16",
+    chip_bg: "default",
+    chip_active_bg: "default",
+    chip_active_mark: "underscore",
+    mirror_bg: "default",
+    muted: "colour244",
+    busy: "colour166",
+    open: "colour28",
+    alert: "colour196",
+    ticker_bg: "default",
+    ticker_fg: "default",
+};
+
+/// The appearance a client is drawn for: its reported theme, else the
+/// session's stamp; empty when neither is known.
+const CLIENT_APPEARANCE: &str = "#{?#{client_theme},#{client_theme},#{@hive-appearance}}";
+
+fn per_client(dark: &str, light: &str, neutral: &str) -> String {
+    format!(
+        "#{{?#{{==:{CLIENT_APPEARANCE},dark}},{dark},#{{?#{{==:{CLIENT_APPEARANCE},light}},{light},{neutral}}}}}"
+    )
+}
+
+fn palette(slot: impl Fn(fn(&Colours) -> &'static str) -> String) -> StatusPalette {
+    StatusPalette {
+        bar_bg: slot(|c| c.bar_bg),
+        bar_fg: slot(|c| c.bar_fg),
+        team_bg: slot(|c| c.team_bg),
+        team_fg: slot(|c| c.team_fg),
+        chip_bg: slot(|c| c.chip_bg),
+        chip_active_bg: slot(|c| c.chip_active_bg),
+        chip_active_mark: slot(|c| c.chip_active_mark),
+        mirror_bg: slot(|c| c.mirror_bg),
+        muted: slot(|c| c.muted),
+        busy: slot(|c| c.busy),
+        open: slot(|c| c.open),
+        alert: slot(|c| c.alert),
+        ticker_bg: slot(|c| c.ticker_bg),
+        ticker_fg: slot(|c| c.ticker_fg),
+    }
+}
+
+pub fn status_palette(pref: crate::view_theme::ThemePref) -> StatusPalette {
+    use crate::view_theme::ThemePref;
+    match pref {
+        ThemePref::Dark => palette(|colour| colour(&DARK).to_string()),
+        ThemePref::Light => palette(|colour| colour(&LIGHT).to_string()),
+        ThemePref::Auto => {
+            palette(|colour| per_client(colour(&DARK), colour(&LIGHT), colour(&NEUTRAL)))
+        }
     }
 }
 
@@ -81,7 +159,7 @@ pub fn team_status_format_0(p: &StatusPalette) -> String {
             "#{{?#{{==:#{{@hive-mirror}},off}},#[bg={mirror_bg}#,fg={muted}] ▴ orch ,#[bg={mirror_bg}#,fg={open}] ▾ orch }}",
             "#[norange]#[default] ,}}",
             "#{{P:#{{?#{{==:#{{@hive-role}},mirror}},,",
-            "#[range=pane|#{{pane_id}}]#{{?pane_active,#[bg={chip_active_bg}#,bold],#[bg={chip_bg}]}}",
+            "#[range=pane|#{{pane_id}}]#{{?pane_active,#[bg={chip_active_bg}#,bold#,{chip_active_mark}],#[bg={chip_bg}]}}",
             "#{{?@hive-agent,",
             "#{{?@hive-notify-active,#[fg={alert}#,bold] ✱ ,",
             "#{{?@hive-unread,#[fg={alert}] ✱ ,",
@@ -98,6 +176,7 @@ pub fn team_status_format_0(p: &StatusPalette) -> String {
         muted = p.muted,
         open = p.open,
         chip_active_bg = p.chip_active_bg,
+        chip_active_mark = p.chip_active_mark,
         chip_bg = p.chip_bg,
         alert = p.alert,
         busy = p.busy,
@@ -142,10 +221,10 @@ pub const TMUX_STALE_KEY: &str = "@hive-tmux-stale";
 /// is refused); *stale* is the tmux version the bar warns about.
 pub fn team_status_argv(
     session_id: &str,
-    kind: crate::view_theme::ThemeKind,
+    pref: crate::view_theme::ThemePref,
     stale: Option<&str>,
 ) -> Vec<Vec<String>> {
-    let p = status_palette(kind);
+    let p = &status_palette(pref);
     let set = |option: &str, value: String| {
         vec![
             "set-option".to_string(),
@@ -160,7 +239,7 @@ pub fn team_status_argv(
         // team session turns it on for itself whatever the global says.
         ("mouse", "on".to_string()),
         ("status", "2".to_string()),
-        ("status-style", p.bar.to_string()),
+        ("status-style", format!("bg={},fg={}", p.bar_bg, p.bar_fg)),
         ("status-left", String::new()),
         ("status-right", String::new()),
         ("status-format[0]", team_status_format_0(p)),
@@ -321,7 +400,7 @@ fn install_status_rows(session_id: &str) -> Vec<Vec<String>> {
     let hive = crate::shell::shlex_quote(&crate::paths::self_exe());
     let mut rows = team_status_argv(
         session_id,
-        crate::view_theme::active_theme_kind(),
+        crate::view_theme::active_theme_pref(),
         super::stale_version().as_deref(),
     );
     rows.push(status_click_binding(&hive, &status_click_fallback()));
@@ -672,11 +751,48 @@ pub fn remove_wake_hooks(session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The session hooks that redraw a client's bar when its terminal reports
+/// a theme: tmux records it (`client_theme`) without redrawing, and the
+/// bar's colours are chosen from it per client. tmux 3.6 has the hooks;
+/// on 3.5 setting them fails and `client_theme` is never known, so they
+/// are set unchecked.
+///
+/// ponytail: a session hook shadows a global hook of the same name for
+/// that session — a human's own global theme hooks do not run on the team
+/// session.
+pub fn theme_redraw_hooks(session_id: &str) -> Vec<Vec<String>> {
+    ["client-dark-theme", "client-light-theme"]
+        .into_iter()
+        .map(|hook| {
+            [
+                "set-hook",
+                "-t",
+                session_id,
+                hook,
+                // A bare `refresh-client` would target the current client,
+                // which with several attached is not the one reporting.
+                "run-shell -C \"refresh-client -S -t '#{hook_client}'\"",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        })
+        .collect()
+}
+
+fn install_theme_redraw_hooks(session_id: &str) {
+    for row in theme_redraw_hooks(session_id) {
+        let args: Vec<&str> = row.iter().map(String::as_str).collect();
+        let _ = run(&args, false, 5);
+    }
+}
+
 pub fn install_team_status(session_id: &str) {
     for row in install_status_rows(session_id) {
         let args: Vec<&str> = row.iter().map(String::as_str).collect();
         let _ = run(&args, false, 5);
     }
+    install_theme_redraw_hooks(session_id);
     if let Err(err) = install_wake_hooks(session_id) {
         eprintln!("warning: wake hooks on session {session_id}: {err}");
     }
@@ -687,5 +803,6 @@ pub(crate) fn install_team_status_checked(session_id: &str) -> anyhow::Result<()
         let args: Vec<&str> = row.iter().map(String::as_str).collect();
         run(&args, true, 5)?;
     }
+    install_theme_redraw_hooks(session_id);
     install_wake_hooks(session_id)
 }
